@@ -194,19 +194,38 @@ function start(me: User) {
   renderFriends();
   renderChat();
   connectWs();
+  syncServerRingtone();
+}
+
+// Общая мелодия звонка с сервера: качаем один раз, обновляем, если админ заменил файл
+async function syncServerRingtone() {
+  try {
+    const { version } = await api('/api/ringtone?version=1', undefined, 8000, 1);
+    if (store.get('srvRingVer') === version) return;
+    const r = await fetch(S.server + '/api/ringtone', { headers: { Authorization: 'Bearer ' + S.token }, signal: AbortSignal.timeout(120000) });
+    if (!r.ok) return;
+    const blob = await r.blob();
+    await idb('readwrite', (s) => s.put(blob, 'serverRingtone'));
+    store.set('srvRingVer', version);
+  } catch (err) {
+    if (err instanceof NetError) return; // нет связи — попробуем при следующем входе
+    await idb('readwrite', (s) => s.delete('serverRingtone')).catch(() => {}); // админ убрал мелодию
+    store.set('srvRingVer', '');
+  }
 }
 
 function ringSettings() {
   if (C.incoming) return;
   const name = store.get('ringName');
+  const server = !!store.get('srvRingVer');
   $('#modal').innerHTML = `
     <div class="incoming ringset">
       <b>Мелодия звонка</b>
-      <div class="muted">${name ? 'Сейчас: ' + esc(name) : 'Сейчас: стандартная'}</div>
+      <div class="muted">Сейчас: ${name ? esc(name) : server ? 'мелодия сервера' : 'стандартная'}</div>
       <div class="row">
         <button id="rpick">Выбрать файл…</button>
         <button id="rplay" class="ghost" title="Прослушать">▶</button>
-        <button id="rdef" class="ghost">Стандартная</button>
+        <button id="rdef" class="ghost" title="Убрать свою мелодию">По умолчанию</button>
         <button id="rclose" class="ghost">✕</button>
       </div>
       <input type="file" id="rfile" accept="audio/*" hidden>
@@ -229,7 +248,7 @@ function ringSettings() {
   $('#rdef').onclick = async () => {
     await idb('readwrite', (s) => s.delete('ringtone'));
     store.set('ringName', '');
-    toast('Стандартная мелодия');
+    toast(store.get('srvRingVer') ? 'Мелодия сервера' : 'Стандартная мелодия');
     ringtone(false);
     ringSettings();
   };
@@ -606,7 +625,9 @@ async function ringtone(on: boolean, preview = false) {
     ringAudio = null;
   }
   if (!on) return;
-  const blob = await idb<Blob>('readonly', (s) => s.get('ringtone')).catch(() => undefined);
+  // своя мелодия пользователя, иначе общая мелодия сервера, иначе гудки
+  const blob = (await idb<Blob>('readonly', (s) => s.get('ringtone')).catch(() => undefined))
+    ?? (await idb<Blob>('readonly', (s) => s.get('serverRingtone')).catch(() => undefined));
   if (!preview && !C.incoming) return; // звонок уже приняли/сбросили, пока читали файл
   if (blob) {
     const a = (ringAudio = new Audio(URL.createObjectURL(blob)));
@@ -806,4 +827,4 @@ if (S.token) {
 else renderAuth();
 
 // только для тестов в dev-сборке
-if (import.meta.env.DEV) (window as any).__st = { C, S, reconnect };
+if (import.meta.env.DEV) (window as any).__st = { C, S, reconnect, onIncoming, ringPlaying: () => !!ringAudio && !ringAudio.paused };

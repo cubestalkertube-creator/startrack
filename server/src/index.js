@@ -16,6 +16,7 @@ const LK_KEY = process.env.LIVEKIT_API_KEY || 'devkey';
 const LK_SECRET = process.env.LIVEKIT_API_SECRET || 'secret';
 
 fs.mkdirSync(DATA_DIR, { recursive: true });
+const RINGTONE = path.join(DATA_DIR, 'ringtone.mp3');
 const db = new DatabaseSync(path.join(DATA_DIR, 'startrack.db'));
 db.exec(`
   PRAGMA journal_mode = WAL;
@@ -175,6 +176,7 @@ const routes = {
 const server = http.createServer(async (req, res) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+  res.setHeader('Access-Control-Expose-Headers', 'X-Ringtone-Version');
   if (req.method === 'OPTIONS') return res.end();
   const url = new URL(req.url, 'http://x');
   const send = (code, body) => {
@@ -182,6 +184,16 @@ const server = http.createServer(async (req, res) => {
     res.end(JSON.stringify(body));
   };
   if (url.pathname === '/health') return send(200, { ok: true });
+  // Общая мелодия входящего звонка: файл кладёт админ в DATA_DIR/ringtone.mp3, отдаём только вошедшим
+  if (url.pathname === '/api/ringtone' && req.method === 'GET') {
+    if (!verify((req.headers.authorization || '').replace('Bearer ', ''))) return send(401, { error: 'Нужно войти' });
+    let st;
+    try { st = fs.statSync(RINGTONE); } catch { return send(404, { error: 'Мелодия не задана' }); }
+    const version = String(Math.floor(st.mtimeMs));
+    if (url.searchParams.has('version')) return send(200, { version });
+    res.writeHead(200, { 'Content-Type': 'audio/mpeg', 'Content-Length': st.size, 'X-Ringtone-Version': version });
+    return fs.createReadStream(RINGTONE).pipe(res);
+  }
   const handler = routes[`${req.method} ${url.pathname}`];
   if (!handler) return send(404, { error: 'Not found' });
   try {

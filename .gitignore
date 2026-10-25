@@ -7,3 +7,4 @@ data/
 client/src-tauri/target/
 client/src-tauri/gen/
 .claude/
+*.mp3
