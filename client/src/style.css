@@ -20,8 +20,27 @@ button.sm { padding: 2px 8px; }
 .auth { width: 320px; margin: 12vh auto; background: var(--panel); padding: 28px; border-radius: 10px; display: flex; flex-direction: column; gap: 10px; }
 .auth h1 { margin: 0 0 8px; text-align: center; }
 .auth .row button { flex: 1; }
-.auth details input { width: 100%; margin-top: 6px; }
-.err { color: #f87171; min-height: 1.2em; }
+.auth label { display: flex; flex-direction: column; gap: 4px; color: var(--muted); font-size: 12px; font-weight: 600; text-transform: uppercase; }
+.auth label input { text-transform: none; font-weight: 400; font-size: 14px; }
+.auth .submit { padding: 11px; margin-top: 4px; }
+.auth .submit:disabled { opacity: .6; cursor: wait; }
+.auth .hint { margin: 0; color: var(--muted); }
+.tabs { display: flex; background: var(--bg); border-radius: 8px; padding: 3px; }
+.tabs button { flex: 1; background: transparent; color: var(--muted); }
+.tabs button.active { background: var(--hover); color: var(--text); }
+.auth details { color: var(--muted); font-size: 12px; }
+.auth details summary { cursor: pointer; }
+.auth details label { margin: 8px 0; }
+.srv { margin-left: 6px; display: inline-flex; align-items: center; gap: 5px; }
+.srv .dot { width: 8px; height: 8px; }
+.srv.ok .dot { background: var(--green); }
+.srv.bad .dot { background: var(--red); }
+.srv.bad { color: #f87171; }
+.status { color: var(--muted); min-height: 1.2em; display: flex; align-items: center; gap: 8px; }
+.spin { width: 14px; height: 14px; border: 2px solid var(--muted); border-top-color: transparent; border-radius: 50%; animation: spin .8s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+.err { color: #f87171; min-height: 1.2em; user-select: text; }
+.err:empty { display: none; }
 
 .app { display: flex; height: 100%; }
 .side { width: 250px; background: var(--panel); display: flex; flex-direction: column; }

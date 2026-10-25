@@ -33,48 +33,113 @@ function toast(text: string) {
   setTimeout(() => t.classList.remove('show'), 3500);
 }
 
-async function api(path: string, body?: unknown) {
-  const r = await fetch(S.server + path, {
-    method: body ? 'POST' : 'GET',
-    headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + S.token },
-    body: body ? JSON.stringify(body) : undefined,
-  });
+// Сетевая ошибка (сервер недоступен), а не ответ сервера с ошибкой
+class NetError extends Error {}
+
+async function api(path: string, body?: unknown, timeoutMs = 15000) {
+  let r: Response;
+  try {
+    r = await fetch(S.server + path, {
+      method: body ? 'POST' : 'GET',
+      headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + S.token },
+      body: body ? JSON.stringify(body) : undefined,
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+  } catch (err) {
+    const timeout = (err as Error).name === 'TimeoutError';
+    throw new NetError(timeout
+      ? `Сервер не ответил за ${timeoutMs / 1000} секунд.`
+      : `Не удалось связаться с сервером (${(err as Error).message}).`);
+  }
   const data = await r.json().catch(() => ({}));
   if (r.status === 401 && S.me) logout();
-  if (!r.ok) throw new Error(data.error || 'HTTP ' + r.status);
+  if (!r.ok) throw new Error(data.error || 'Ошибка сервера: HTTP ' + r.status);
   return data;
 }
 
+const NET_HINT = 'Проверьте интернет. Если включён VPN, прокси или антивирус с веб-защитой — попробуйте отключить его или добавить Startrack в исключения.';
+
 // ---------- auth ----------
+let authMode: 'login' | 'register' = 'login';
+
 function renderAuth(error = '') {
+  const reg = authMode === 'register';
   $('#root').innerHTML = `
-    <form class="auth">
+    <form class="auth" novalidate>
       <h1>Startrack</h1>
-      <input name="username" placeholder="Ник" autocomplete="username" required>
-      <input name="password" type="password" placeholder="Пароль" autocomplete="current-password" required>
-      <div class="row">
-        <button name="login">Войти</button>
-        <button name="register" class="ghost">Регистрация</button>
+      <div class="tabs">
+        <button type="button" data-mode="login" class="${reg ? '' : 'active'}">Вход</button>
+        <button type="button" data-mode="register" class="${reg ? 'active' : ''}">Регистрация</button>
       </div>
-      <details><summary>Сервер</summary><input name="server" value="${esc(S.server)}"></details>
+      <p class="hint">${reg ? 'Новый аккаунт: придумайте ник и пароль.' : 'Уже есть аккаунт? Введите ник и пароль.'}</p>
+      <label>Ник<input name="username" autocomplete="username" maxlength="32" placeholder="${reg ? '2–32 символа: буквы, цифры, _ . -' : ''}"></label>
+      <label>Пароль<input name="password" type="password" autocomplete="${reg ? 'new-password' : 'current-password'}" placeholder="${reg ? 'не меньше 6 символов' : ''}"></label>
+      ${reg ? '<label>Повторите пароль<input name="password2" type="password" autocomplete="new-password"></label>' : ''}
+      <button class="submit">${reg ? 'Создать аккаунт' : 'Войти'}</button>
+      <div class="status"></div>
       <div class="err">${esc(error)}</div>
+      <details><summary>Подключение <span class="srv"><span class="dot"></span><span class="srvtxt">проверяю…</span></span></summary>
+        <label>Адрес сервера<input name="server" value="${esc(S.server)}"></label>
+        <button type="button" class="ghost sm" id="chk">Проверить связь</button>
+      </details>
     </form>`;
   const f = $<HTMLFormElement>('.auth');
+  const status = (text: string) => ($('.status', f).innerHTML = text ? `<span class="spin"></span>${esc(text)}` : '');
+  const fail = (text: string) => { status(''); $('.err', f).textContent = text; };
+  const serverInput = () => String(new FormData(f).get('server')).trim().replace(/\/+$/, '');
+
+  f.querySelectorAll<HTMLButtonElement>('.tabs button').forEach((b) => (b.onclick = () => {
+    authMode = b.dataset.mode as typeof authMode;
+    renderAuth();
+  }));
+  $('#chk', f).onclick = () => { S.server = serverInput(); store.set('server', S.server); checkServer(); };
+  checkServer();
+
   f.onsubmit = async (e) => {
     e.preventDefault();
-    const mode = ((e as SubmitEvent).submitter as HTMLButtonElement)?.name || 'login';
+    $('.err', f).textContent = '';
     const fd = new FormData(f);
-    S.server = String(fd.get('server')).replace(/\/+$/, '');
+    const username = String(fd.get('username')).trim();
+    const password = String(fd.get('password'));
+    if (!username || !password) return fail('Введите ник и пароль.');
+    if (reg) {
+      if (!/^[\p{L}\d_.-]{2,32}$/u.test(username)) return fail('Ник: от 2 до 32 символов — буквы, цифры, «_», «.», «-». Без пробелов.');
+      if (password.length < 6) return fail('Пароль должен быть не короче 6 символов.');
+      if (password !== fd.get('password2')) return fail('Пароли не совпадают.');
+    }
+    S.server = serverInput();
     store.set('server', S.server);
+    const btn = $<HTMLButtonElement>('.submit', f);
+    btn.disabled = true;
+    status(reg ? 'Создаю аккаунт…' : 'Вхожу…');
     try {
-      const r = await api('/api/' + mode, { username: fd.get('username'), password: fd.get('password') });
+      const r = await api('/api/' + authMode, { username, password });
+      status('Готово, загружаю…');
       S.token = r.token;
       store.set('token', r.token);
       start(r.user);
     } catch (err) {
-      $('.err').textContent = (err as Error).message;
+      btn.disabled = false;
+      fail(err instanceof NetError ? `${err.message} Адрес: ${S.server}. ${NET_HINT}` : (err as Error).message);
     }
   };
+}
+
+// Индикатор доступности сервера на экране входа
+async function checkServer() {
+  const box = document.querySelector('.auth .srv');
+  if (!box) return;
+  box.className = 'srv';
+  box.querySelector('.srvtxt')!.textContent = 'проверяю…';
+  const t0 = performance.now();
+  let ok = false;
+  try { ok = (await api('/health', undefined, 8000)).ok === true; } catch {}
+  if (!document.body.contains(box)) return;
+  box.className = 'srv ' + (ok ? 'ok' : 'bad');
+  box.querySelector('.srvtxt')!.textContent = ok
+    ? `сервер доступен, ${Math.round(performance.now() - t0)} мс`
+    : 'сервер недоступен';
+  if (!ok) $('.auth').querySelector('details')?.setAttribute('open', '');
 }
 
 function logout() {
@@ -540,5 +605,9 @@ function renderPeople() {
 }
 
 // ---------- boot ----------
-if (S.token) api('/api/me').then(start).catch(() => renderAuth());
+if (S.token) {
+  $('#root').innerHTML = '<div class="auth"><h1>Startrack</h1><div class="status"><span class="spin"></span>Подключаюсь к серверу…</div></div>';
+  api('/api/me').then(start).catch((err) =>
+    renderAuth(err instanceof NetError ? `${err.message} ${NET_HINT}` : 'Сессия истекла, войдите заново.'));
+}
 else renderAuth();
