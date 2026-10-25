@@ -1,0 +1,9 @@
+node_modules/
+dist/
+data/
+*.db
+*.db-*
+.env
+client/src-tauri/target/
+client/src-tauri/gen/
+.claude/
