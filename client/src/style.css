@@ -71,7 +71,9 @@ button.sm { padding: 2px 8px; }
 .empty { margin: auto; color: var(--muted); }
 
 #call { background: #000; padding: 10px; display: flex; flex-direction: column; gap: 8px; max-height: 75%; }
-.ctitle { color: var(--muted); }
+.ctitle { color: var(--muted); display: flex; align-items: center; gap: 8px; }
+.ctitle .tag { background: #3b3f8f; color: #c9cdfb; font-size: 11px; padding: 1px 7px; border-radius: 10px; }
+#netst { color: #f0b232; }
 #stage { display: flex; gap: 8px; min-height: 0; flex: 1; }
 .tile { position: relative; flex: 1; background: #111; border-radius: 8px; overflow: hidden; display: flex; }
 .tile video { width: 100%; height: 100%; max-height: 60vh; object-fit: contain; }
@@ -90,6 +92,8 @@ button.sm { padding: 2px 8px; }
 #settings select { max-width: 220px; padding: 5px; }
 
 .incoming { position: fixed; top: 20px; right: 20px; background: var(--panel); padding: 18px; border-radius: 10px; box-shadow: 0 8px 30px #000a; display: flex; flex-direction: column; gap: 10px; align-items: center; z-index: 10; }
+.ringset { align-items: stretch; min-width: 300px; }
+.ringset .muted { padding: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 340px; }
 .ring { font-size: 32px; animation: shake .6s infinite; }
 @keyframes shake { 50% { transform: rotate(15deg); } }
 #toast { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); background: #111; padding: 10px 16px; border-radius: 8px; opacity: 0; transition: opacity .2s; pointer-events: none; z-index: 20; }

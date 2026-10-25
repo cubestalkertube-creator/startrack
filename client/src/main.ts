@@ -36,7 +36,8 @@ function toast(text: string) {
 // Сетевая ошибка (сервер недоступен), а не ответ сервера с ошибкой
 class NetError extends Error {}
 
-async function api(path: string, body?: unknown, timeoutMs = 15000) {
+// retries: сколько раз повторить при сетевой ошибке (через VPN соединение иногда «залипает»)
+async function api(path: string, body?: unknown, timeoutMs = 15000, retries = 0): Promise<any> {
   let r: Response;
   try {
     r = await fetch(S.server + path, {
@@ -46,6 +47,7 @@ async function api(path: string, body?: unknown, timeoutMs = 15000) {
       signal: AbortSignal.timeout(timeoutMs),
     });
   } catch (err) {
+    if (retries > 0) return api(path, body, timeoutMs, retries - 1);
     const timeout = (err as Error).name === 'TimeoutError';
     throw new NetError(timeout
       ? `Сервер не ответил за ${timeoutMs / 1000} секунд.`
@@ -162,7 +164,7 @@ function start(me: User) {
         <div class="brand">Startrack</div>
         <form id="addf"><input placeholder="Добавить друга по нику"><button>+</button></form>
         <div id="flist"></div>
-        <div class="me"><span class="dot on"></span>${esc(me.username)}<button id="logout" class="ghost sm">Выйти</button></div>
+        <div class="me"><span class="dot on"></span>${esc(me.username)}<button id="ringset" class="ghost sm" title="Мелодия звонка">🔔</button><button id="logout" class="ghost sm">Выйти</button></div>
       </aside>
       <main class="main">
         <section id="call" hidden></section>
@@ -170,6 +172,7 @@ function start(me: User) {
       </main>
     </div>`;
   $('#logout').onclick = logout;
+  $('#ringset').onclick = ringSettings;
   $<HTMLFormElement>('#addf').onsubmit = async (e) => {
     e.preventDefault();
     const inp = $<HTMLInputElement>('#addf input');
@@ -191,6 +194,45 @@ function start(me: User) {
   renderFriends();
   renderChat();
   connectWs();
+}
+
+function ringSettings() {
+  if (C.incoming) return;
+  const name = store.get('ringName');
+  $('#modal').innerHTML = `
+    <div class="incoming ringset">
+      <b>Мелодия звонка</b>
+      <div class="muted">${name ? 'Сейчас: ' + esc(name) : 'Сейчас: стандартная'}</div>
+      <div class="row">
+        <button id="rpick">Выбрать файл…</button>
+        <button id="rplay" class="ghost" title="Прослушать">▶</button>
+        <button id="rdef" class="ghost">Стандартная</button>
+        <button id="rclose" class="ghost">✕</button>
+      </div>
+      <input type="file" id="rfile" accept="audio/*" hidden>
+    </div>`;
+  const close = () => { ringtone(false); $('#modal').innerHTML = ''; };
+  let playing = false;
+  $('#rclose').onclick = close;
+  $('#rplay').onclick = () => { playing = !playing; ringtone(playing, true); $('#rplay').textContent = playing ? '⏹' : '▶'; };
+  $('#rpick').onclick = () => $('#rfile').click();
+  $<HTMLInputElement>('#rfile').onchange = async (e) => {
+    const file = (e.target as HTMLInputElement).files?.[0];
+    if (!file) return;
+    if (file.size > 30e6) return toast('Файл больше 30 МБ');
+    await idb('readwrite', (s) => s.put(file, 'ringtone'));
+    store.set('ringName', file.name);
+    toast('Мелодия звонка сохранена');
+    ringtone(false);
+    ringSettings();
+  };
+  $('#rdef').onclick = async () => {
+    await idb('readwrite', (s) => s.delete('ringtone'));
+    store.set('ringName', '');
+    toast('Стандартная мелодия');
+    ringtone(false);
+    ringSettings();
+  };
 }
 
 async function loadFriends() {
@@ -321,34 +363,99 @@ const C = {
   hint: (store.get('hint') as 'motion' | 'detail') || 'motion',
   codec: (store.get('codec') as 'h264' | 'vp9' | 'av1') || 'h264',
   ns: store.get('ns') !== '0',
-  // TCP-режим: медиа через TURN/TLS. Включается сам, если UDP рвётся (VPN в режиме TUN)
+  // TCP-режим (медиа через TURN/TLS на 443): вручную в настройках, сам при VPN или если UDP рвётся
   relay: store.get('relay') === '1',
+  relayAuto: false, // включили сами в этой сессии из-за обрывов
+  relayBroken: false, // TURN/TLS в этой сети не подключается — больше не пробуем
+  vpn: null as string | null, // адаптер VPN, через который идёт трафик к серверу
+  switching: false,
+  gen: 0, // номер звонка: после сброса незавершённые подключения закрываются
+  rejoins: 0,
+  peerGone: 0,
+  net: '', // статус связи в шапке звонка
 };
+
+type Carry = { mic: boolean; tracks: { track: MediaStreamTrack; source: Track.Source }[] };
 
 function setRelay(on: boolean) {
   C.relay = on;
   store.set('relay', on ? '1' : '0');
 }
 
-// Переподключаем текущий звонок через TURN/TLS
-async function switchToRelay(peer: User) {
-  setRelay(true);
-  toast('Нестабильная сеть (VPN?) — переключаюсь в TCP-режим');
-  const old = C.room;
-  C.room = null;
-  await old?.disconnect();
-  $('#audio').innerHTML = '';
+function setNet(text: string) {
+  C.net = text;
+  const el = document.getElementById('netst');
+  if (el) el.textContent = text;
+}
+
+// Какой адаптер повезёт трафик к серверу; если это туннель VPN — сразу звоним через TCP
+const VPN_RE = /\b(tun|tap)\b|wintun|wireguard|xray|v2ray|happ|clash|mihomo|sing-?box|hiddify|nekobox|outline|amnezia|openvpn|vpn|tunnel/i;
+async function detectVpn(serverUrl: string): Promise<string | null> {
+  const invoke = (window as any).__TAURI_INTERNALS__?.invoke;
+  if (!invoke) return null;
+  const host = new URL(serverUrl).hostname;
+  const m = host.match(/^(\d+)-(\d+)-(\d+)-(\d+)\.sslip\.io$/);
+  const ip = m ? m.slice(1).join('.') : /^[\d.]+$/.test(host) ? host : null;
+  if (!ip) return null;
   try {
-    await joinRoom(peer);
-  } catch (err) {
-    toast('Не удалось переподключиться: ' + (err as Error).message);
-    hangup(true);
+    const adapter: string | null = await invoke('route_adapter', { ip });
+    return adapter && VPN_RE.test(adapter) ? adapter.split(' | ')[0] : null;
+  } catch {
+    return null;
   }
 }
 
-async function joinRoom(peer: User) {
-  const relay = C.relay;
-  const { url, token } = await api('/api/call/token', { peer: peer.id });
+const screenPublishOpts = () => {
+  const q = QUALITY[C.quality];
+  return {
+    videoCodec: C.codec,
+    simulcast: false,
+    screenShareEncoding: { maxBitrate: q.br, maxFramerate: q.fps, priority: 'high' as const },
+    degradationPreference: (C.hint === 'motion' ? 'maintain-framerate' : 'maintain-resolution') as RTCDegradationPreference,
+    audioPreset: AudioPresets.musicHighQualityStereo,
+    dtx: false,
+    red: false,
+  };
+};
+
+// Переподключение звонка без потери микрофона и демонстрации экрана (те же треки публикуем заново)
+async function reconnect(peer: User, toRelay: boolean) {
+  if (C.switching || !C.room) return;
+  C.switching = true;
+  if (toRelay && !C.relayAuto && !C.relay) {
+    C.relayAuto = true;
+    toast('Связь нестабильна (VPN?) — перехожу в TCP-режим');
+  }
+  setNet(toRelay ? 'переподключаюсь в TCP-режиме…' : 'переподключаюсь…');
+  const old = C.room;
+  C.room = null;
+  const lp = old.localParticipant;
+  const carry: Carry = { mic: lp.isMicrophoneEnabled, tracks: [] };
+  for (const pub of lp.trackPublications.values())
+    if ((pub.source === Track.Source.ScreenShare || pub.source === Track.Source.ScreenShareAudio) && pub.track)
+      carry.tracks.push({ track: pub.track.mediaStreamTrack, source: pub.source });
+  lp.getTrackPublication(Track.Source.Microphone)?.track?.stop();
+  await old.disconnect(false).catch(() => {});
+  $('#audio').innerHTML = '';
+  document.getElementById('stage')?.replaceChildren();
+  try {
+    await joinRoom(peer, carry);
+  } catch (err) {
+    toast('Не удалось переподключиться: ' + (err as Error).message);
+    hangup(true);
+  } finally {
+    C.switching = false;
+  }
+}
+
+// mode: 'auto' — по ситуации (VPN/обрывы -> TURN/TLS), 'all' — все пути (UDP, TCP 7881, TURN), запасной вариант
+async function joinRoom(peer: User, carry?: Carry, mode: 'auto' | 'all' = 'auto') {
+  const gen = C.gen;
+  const { url, token } = await api('/api/call/token', { peer: peer.id }, 7000, 2);
+  if (gen !== C.gen) throw new Error('звонок отменён');
+  // VPN смотрим по адресу медиасервера: туда идут звук и видео
+  if (!carry && mode === 'auto') { C.vpn = await detectVpn(url); C.rejoins = 0; }
+  const relay = mode === 'auto' && !C.relayBroken && (C.relay || C.relayAuto || !!C.vpn);
   const room = new Room({
     adaptiveStream: true,
     dynacast: true,
@@ -357,34 +464,72 @@ async function joinRoom(peer: User) {
     publishDefaults: { dtx: true, red: true, audioPreset: AudioPresets.music },
   });
   C.room = room;
+  let reconnTimer = 0;
+  let reconnCount = 0;
+  let joined = false; // до успешного connect обрывы обрабатывает catch ниже, а не события
+  const mine = () => C.room === room && joined;
   room
-    .on(RoomEvent.TrackSubscribed, (track: RemoteTrack) => {
-      if (track.kind === Track.Kind.Audio) {
-        const el = track.attach();
-        el.muted = C.deaf;
-        $('#audio').appendChild(el);
-      }
-      renderStage();
-    })
-    .on(RoomEvent.TrackUnsubscribed, (track: RemoteTrack) => { track.detach().forEach((e) => e.remove()); renderStage(); })
+    .on(RoomEvent.TrackSubscribed, () => { syncAudio(room); renderStage(); })
+    .on(RoomEvent.TrackUnsubscribed, (track: RemoteTrack) => { track.detach(); syncAudio(room); renderStage(); })
+    .on(RoomEvent.Reconnected, () => syncAudio(room))
     .on(RoomEvent.LocalTrackPublished, renderStage)
     .on(RoomEvent.LocalTrackUnpublished, (pub: LocalTrackPublication) => { pub.track?.detach().forEach((e) => e.remove()); renderStage(); })
     .on(RoomEvent.TrackMuted, renderPeople)
     .on(RoomEvent.TrackUnmuted, renderPeople)
     .on(RoomEvent.ActiveSpeakersChanged, renderPeople)
-    .on(RoomEvent.ParticipantConnected, () => { setCallState('incall'); renderPeople(); })
-    .on(RoomEvent.ParticipantDisconnected, () => { if (room.remoteParticipants.size === 0 && C.state === 'incall') hangup(false); })
-    .on(RoomEvent.Disconnected, () => { if (C.room === room) hangup(false); })
-    .on(RoomEvent.Reconnecting, () => { if (!relay && C.room === room) switchToRelay(peer); });
+    .on(RoomEvent.ParticipantConnected, () => {
+      clearTimeout(C.peerGone);
+      setNet('');
+      setCallState('incall');
+    })
+    // Собеседник пропал — ждём, вдруг переподключается. Явное «Завершить» придёт через call_end
+    .on(RoomEvent.ParticipantDisconnected, () => {
+      syncAudio(room);
+      renderStage();
+      if (room.remoteParticipants.size > 0 || C.state !== 'incall') return;
+      setNet(`${peer.username} переподключается…`);
+      clearTimeout(C.peerGone);
+      C.peerGone = window.setTimeout(() => { if (mine() && room.remoteParticipants.size === 0) { toast('Собеседник отключился'); hangup(true); } }, 20000);
+    })
+    .on(RoomEvent.Reconnecting, () => {
+      if (!mine()) return;
+      setNet('связь прервалась, восстанавливаю…');
+      if (relay || C.relayBroken) return;
+      // UDP через VPN часто «моргает»: если сам не восстановился за 4 с или рвётся повторно — в TCP
+      if (++reconnCount >= 2) return reconnect(peer, true);
+      reconnTimer = window.setTimeout(() => mine() && reconnect(peer, true), 4000);
+    })
+    .on(RoomEvent.Reconnected, () => { clearTimeout(reconnTimer); if (mine()) setNet(''); })
+    .on(RoomEvent.Disconnected, () => {
+      clearTimeout(reconnTimer);
+      if (!mine()) return;
+      if (++C.rejoins > 3) { toast('Связь потеряна'); return hangup(true); }
+      reconnect(peer, true);
+    });
   try {
-    await room.connect(url, token, { rtcConfig: relay ? { iceTransportPolicy: 'relay' } : undefined });
+    await room.connect(url, token, {
+      rtcConfig: relay ? { iceTransportPolicy: 'relay' } : undefined,
+      websocketTimeout: 6000,
+      maxRetries: 3,
+    });
+    if (gen !== C.gen || C.room !== room) { room.disconnect(); throw new Error('звонок отменён'); }
+    joined = true;
   } catch (err) {
-    if (relay || C.room !== room) throw err;
-    return switchToRelay(peer);
+    if (gen !== C.gen || C.room !== room) { room.disconnect(); throw err; }
+    C.room = null;
+    await room.disconnect(false).catch(() => {});
+    // Не подключились: TURN/TLS -> пробуем все пути; UDP -> пробуем TURN/TLS
+    if (relay) { C.relayBroken = true; return joinRoom(peer, carry, 'all'); }
+    if (mode === 'all' || C.relayAuto) throw err;
+    C.relayAuto = true;
+    return joinRoom(peer, carry);
   }
-  if (room.remoteParticipants.size > 0) C.state = 'incall';
+  if (room.remoteParticipants.size > 0) { C.state = 'incall'; setNet(''); }
+  for (const t of carry?.tracks || [])
+    if (t.track.readyState === 'live')
+      await room.localParticipant.publishTrack(t.track, { source: t.source, ...screenPublishOpts() }).catch(() => {});
   try {
-    await room.localParticipant.setMicrophoneEnabled(true);
+    await room.localParticipant.setMicrophoneEnabled(carry ? carry.mic : true);
   } catch {
     toast('Нет доступа к микрофону');
   }
@@ -435,11 +580,44 @@ function closeIncoming() {
   ringtone(false);
 }
 
+// Своя мелодия звонка хранится в IndexedDB этого ПК (файл в несколько МБ не влезает в localStorage)
+function idb<T>(mode: IDBTransactionMode, fn: (s: IDBObjectStore) => IDBRequest | void): Promise<T | undefined> {
+  return new Promise((resolve, reject) => {
+    const open = indexedDB.open('startrack', 1);
+    open.onupgradeneeded = () => open.result.createObjectStore('kv');
+    open.onerror = () => reject(open.error);
+    open.onsuccess = () => {
+      const tx = open.result.transaction('kv', mode);
+      const req = fn(tx.objectStore('kv'));
+      tx.oncomplete = () => resolve(req ? req.result : undefined);
+      tx.onerror = () => reject(tx.error);
+    };
+  });
+}
+
 let ringCtx: AudioContext | null = null;
-function ringtone(on: boolean) {
+let ringAudio: HTMLAudioElement | null = null;
+async function ringtone(on: boolean, preview = false) {
   ringCtx?.close();
   ringCtx = null;
+  if (ringAudio) {
+    ringAudio.pause();
+    URL.revokeObjectURL(ringAudio.src);
+    ringAudio = null;
+  }
   if (!on) return;
+  const blob = await idb<Blob>('readonly', (s) => s.get('ringtone')).catch(() => undefined);
+  if (!preview && !C.incoming) return; // звонок уже приняли/сбросили, пока читали файл
+  if (blob) {
+    const a = (ringAudio = new Audio(URL.createObjectURL(blob)));
+    a.loop = true;
+    a.volume = 0.7;
+    return a.play().catch(() => beep());
+  }
+  beep();
+}
+
+function beep() {
   const ctx = (ringCtx = new AudioContext());
   for (let i = 0; i < 15; i++) {
     const o = ctx.createOscillator(), g = ctx.createGain();
@@ -459,7 +637,10 @@ function setCallState(s: typeof C.state) {
 }
 
 function hangup(notify: boolean) {
+  C.gen++;
   clearTimeout(C.ringTimer);
+  clearTimeout(C.peerGone);
+  C.net = '';
   if (notify && C.peer && C.state !== 'idle') wsSend({ type: 'call_end', to: C.peer.id });
   const room = C.room;
   C.room = null;
@@ -482,15 +663,7 @@ async function toggleScreen() {
       surfaceSwitching: 'include',
       contentHint: C.hint,
       resolution: { width: q.w, height: q.h, frameRate: q.fps },
-    }, {
-      videoCodec: C.codec,
-      simulcast: false,
-      screenShareEncoding: { maxBitrate: q.br, maxFramerate: q.fps, priority: 'high' },
-      degradationPreference: C.hint === 'motion' ? 'maintain-framerate' : 'maintain-resolution',
-      audioPreset: AudioPresets.musicHighQualityStereo,
-      dtx: false,
-      red: false,
-    });
+    }, screenPublishOpts());
   } catch (err) {
     if ((err as Error).name !== 'NotAllowedError') toast('Демонстрация не запустилась: ' + (err as Error).message);
   }
@@ -508,7 +681,9 @@ function renderCall() {
   const opt = (o: Record<string, string>, v: string) =>
     Object.entries(o).map(([k, t]) => `<option value="${k}" ${k === v ? 'selected' : ''}>${t}</option>`).join('');
   box.innerHTML = `
-    <div class="ctitle">${C.state === 'calling' ? 'Вызов… ' : 'Звонок: '}<b>${esc(C.peer?.username || '')}</b></div>
+    <div class="ctitle">${C.state === 'calling' ? 'Вызов… ' : 'Звонок: '}<b>${esc(C.peer?.username || '')}</b>
+      ${C.relay || C.relayAuto || C.vpn ? `<span class="tag" title="${C.vpn ? 'VPN: ' + esc(C.vpn) : 'Нестабильный UDP'}">TCP-режим</span>` : ''}
+      <span id="netst">${esc(C.net)}</span></div>
     <div id="stage"></div>
     <div id="people"></div>
     <div class="controls">
@@ -551,7 +726,7 @@ function renderCall() {
   };
   $<HTMLInputElement>('#srelay').onchange = (e) => {
     const on = (e.target as HTMLInputElement).checked;
-    if (on && C.peer) return switchToRelay(C.peer);
+    if (on && C.peer) { setRelay(true); return reconnect(C.peer, true); }
     setRelay(on);
     toast('Применится со следующего звонка');
   };
@@ -573,6 +748,24 @@ async function fillDevices() {
 }
 
 // Видео-плитки (демонстрации экрана), элементы переиспользуем, чтобы не мигало
+// Ровно один <audio> на каждый подписанный удалённый аудиотрек; после переподключений лишние убираем
+function syncAudio(room: Room) {
+  if (C.room !== room) return;
+  const box = $('#audio');
+  const live = new Map<string, RemoteTrack>();
+  for (const p of room.remoteParticipants.values())
+    for (const pub of p.audioTrackPublications.values())
+      if (pub.track && pub.isSubscribed) live.set(pub.trackSid, pub.track as RemoteTrack);
+  box.querySelectorAll<HTMLAudioElement>('audio').forEach((el) => { if (!live.has(el.dataset.tsid!)) { el.srcObject = null; el.remove(); } });
+  for (const [sid, track] of live) {
+    if (box.querySelector(`[data-tsid="${sid}"]`)) continue;
+    const el = track.attach() as HTMLAudioElement;
+    el.dataset.tsid = sid;
+    el.muted = C.deaf;
+    box.appendChild(el);
+  }
+}
+
 function renderStage() {
   const stage = $('#stage');
   const room = C.room;
@@ -611,3 +804,6 @@ if (S.token) {
     renderAuth(err instanceof NetError ? `${err.message} ${NET_HINT}` : 'Сессия истекла, войдите заново.'));
 }
 else renderAuth();
+
+// только для тестов в dev-сборке
+if (import.meta.env.DEV) (window as any).__st = { C, S, reconnect };
