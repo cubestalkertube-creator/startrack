@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod bypass;
+mod update;
 
 #[cfg(not(debug_assertions))]
 use tauri::Manager;
@@ -19,7 +20,14 @@ fn main() {
         }
     }));
     builder
-        .invoke_handler(tauri::generate_handler![route_adapter])
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .manage(update::Pending::default())
+        .invoke_handler(tauri::generate_handler![
+            route_adapter,
+            update::update_check,
+            update::update_install,
+            update::update_progress
+        ])
         .setup(|app| {
             // Домены сервера направляем на локальный обход VPN (или хотя бы прямо на IP, минуя DNS)
             let target = tauri::async_runtime::block_on(bypass::start());

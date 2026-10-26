@@ -7,6 +7,7 @@ import {
 type User = { id: number; username: string; online?: boolean };
 type Msg = { id: number; sender: number; recipient: number; text: string; created: number };
 type Tab = 'online' | 'all' | 'pending' | 'add';
+declare const __APP_VERSION__: string; // версия из package.json (vite.config.ts)
 
 const $ = <T extends HTMLElement = HTMLElement>(s: string, r: ParentNode = document) => r.querySelector(s) as T;
 const esc = (s: string) =>
@@ -53,6 +54,7 @@ const ICON = {
   bell: 'M12 22c1.1 0 2-.9 2-2h-4c0 1.1.89 2 2 2zm6-6v-5c0-3.07-1.64-5.64-4.5-6.32V4c0-.83-.67-1.5-1.5-1.5s-1.5.67-1.5 1.5v.68C7.63 5.36 6 7.92 6 11v5l-2 2v1h16v-1l-2-2z',
   play: 'M8 5v14l11-7z',
   stop: 'M6 6h12v12H6z',
+  download: 'M5 20h14v-2H5v2zM19 9h-4V3H9v6H5l7 7 7-7z',
 };
 const ic = (n: keyof typeof ICON, s = 20) =>
   `<svg class="ic" width="${s}" height="${s}" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="${ICON[n]}"/></svg>`;
@@ -262,6 +264,9 @@ async function act(b: HTMLElement) {
     case 'screen': return C.room && toggleScreen();
     case 'hangup': return hangup(true);
     case 'settings': return openSettings((b.dataset.tab as SetTab) || 'account');
+    case 'update':
+      if (C.state !== 'idle') return toast('Завершите звонок, чтобы обновиться');
+      return installUpdate($('#modal'));
   }
 }
 
@@ -333,7 +338,8 @@ function renderRail() {
     ${callPeer ? `<div class="ri"><button class="rb" data-act="open" data-id="${callPeer.id}" title="${esc(callPeer.username)} — звонок">${avatar(callPeer, 48)}<span class="rb-voice">${ic('volume', 12)}</span></button></div>` : ''}
     ${unread.map(([id, n]) => `<div class="ri dot"><button class="rb" data-act="open" data-id="${id}" title="${esc(friend(id)!.username)}">${avatar(friend(id)!, 48)}<span class="rb-badge">${n > 99 ? '99+' : n}</span></button></div>`).join('')}
     <div class="rail-sep"></div>
-    <div class="ri"><button class="rb add" data-act="tab" data-tab="add" title="Добавить в друзья">${ic('plus', 24)}</button></div>`;
+    <div class="ri"><button class="rb add" data-act="tab" data-tab="add" title="Добавить в друзья">${ic('plus', 24)}</button></div>
+    ${U.version ? `<div class="ri"><button class="rb add upd" data-act="update" title="Доступно обновление ${esc(U.version)} — нажмите, чтобы установить">${ic('download', 24)}</button></div>` : ''}`;
 }
 
 function renderUserbar() {
@@ -1068,7 +1074,7 @@ function openSettings(tab: SetTab) {
   $('#layer').innerHTML = `
     <div class="settings">
       <nav class="set-nav"><div class="set-nav-in">
-        <div class="set-me">${avatar(S.me, 40)}<div><b>${esc(S.me.username)}</b><span>Startrack</span></div></div>
+        <div class="set-me">${avatar(S.me, 40)}<div><b>${esc(S.me.username)}</b><span>Startrack ${__APP_VERSION__}</span></div></div>
         <h5>Настройки пользователя</h5>
         ${navBtn('account', 'Моя учётная запись')}
         <h5>Настройки приложения</h5>
@@ -1302,13 +1308,76 @@ function stopMicTest() {
   if (btn) { btn.textContent = 'Проверка микрофона'; btn.classList.remove('sec'); }
 }
 
-// ---------- boot ----------
-if (S.token) {
-  $('#root').innerHTML = `<div class="auth-bg"><div class="boot">${ic('logo', 64)}<div class="status"><span class="spin"></span>Подключаюсь к серверу…</div></div></div>`;
-  api('/api/me').then(start).catch((err) =>
-    renderAuth(err instanceof NetError ? `${err.message} ${NET_HINT}` : 'Сессия истекла, войдите заново.'));
+// ---------- обновления ----------
+// Как в Discord: при запуске проверяем релиз на GitHub; есть новее — сразу скачиваем и ставим.
+// Не успели проверить за несколько секунд — пускаем в приложение, а найденное обновление
+// покажем зелёной кнопкой в левой панели. Пока приложение открыто, проверяем раз в полчаса.
+const tauri = (window as any).__TAURI_INTERNALS__;
+const U = { version: '', notes: '' };
+
+async function checkUpdate() {
+  if (!tauri || import.meta.env.DEV || U.version) return !!U.version;
+  try {
+    const r: [string, string] | null = await tauri.invoke('update_check');
+    if (r) { [U.version, U.notes] = r; renderRail(); }
+  } catch {}
+  return !!U.version;
 }
-else renderAuth();
+
+const bootScreen = (body: string) => `<div class="auth-bg"><div class="boot">${ic('logo', 64)}${body}</div></div>`;
+const mb = (n: number) => (n / 1048576).toFixed(1);
+
+// Скачивает и ставит обновление; box — куда рисовать экран загрузки. onSkip — что делать, если отказались.
+async function installUpdate(box: HTMLElement, onSkip = () => { box.innerHTML = ''; }) {
+  box.innerHTML = bootScreen(`
+    <div class="upd-box">
+      <b>Загрузка обновления ${esc(U.version)}</b>
+      <div class="upd-bar"><i></i></div>
+      <span class="upd-txt">Подключаюсь…</span>
+    </div>`);
+  const bar = $('.upd-bar i', box);
+  const txt = $('.upd-txt', box);
+  const timer = setInterval(async () => {
+    const [done, total]: [number, number] = await tauri.invoke('update_progress').catch(() => [0, 0]);
+    if (!done) return;
+    if (total) bar.style.width = `${Math.min(100, (done / total) * 100)}%`;
+    txt.textContent = done >= total && total ? 'Устанавливаю…' : `${mb(done)}${total ? ' из ' + mb(total) : ''} МБ`;
+  }, 200);
+  try {
+    // при успехе приложение закрывается, установщик ставит новую версию и запускает её
+    await tauri.invoke('update_install');
+  } catch (err) {
+    clearInterval(timer);
+    box.innerHTML = bootScreen(`
+      <div class="upd-box">
+        <b>Не удалось обновиться</b>
+        <span class="err">${esc(String(err))}</span>
+        <div class="upd-btns"><button class="btn" id="updRetry">Повторить</button><button class="btn sec" id="updSkip">Пропустить</button></div>
+      </div>`);
+    $('#updRetry', box).onclick = () => installUpdate(box, onSkip);
+    $('#updSkip', box).onclick = onSkip;
+  }
+}
+
+// ---------- boot ----------
+function enter() {
+  if (S.token) {
+    $('#root').innerHTML = bootScreen('<div class="status"><span class="spin"></span>Подключаюсь к серверу…</div>');
+    api('/api/me').then(start).catch((err) =>
+      renderAuth(err instanceof NetError ? `${err.message} ${NET_HINT}` : 'Сессия истекла, войдите заново.'));
+  }
+  else renderAuth();
+}
+
+(async () => {
+  if (tauri && !import.meta.env.DEV) {
+    $('#root').innerHTML = bootScreen('<div class="status"><span class="spin"></span>Проверка обновлений…</div>');
+    const found = await Promise.race([checkUpdate(), new Promise<boolean>((r) => setTimeout(() => r(false), 6000))]);
+    setInterval(checkUpdate, 30 * 60e3);
+    if (found) return installUpdate($('#root'), enter);
+  }
+  enter();
+})();
 
 // только для тестов в dev-сборке
 if (import.meta.env.DEV) (window as any).__st = { C, S, reconnect, onIncoming, ringPlaying: () => !!ringAudio && !ringAudio.paused };
