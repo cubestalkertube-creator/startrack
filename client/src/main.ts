@@ -1,15 +1,21 @@
 import './style.css';
 import {
-  AudioPresets, Room, RoomEvent, Track,
+  AudioPresets, DisconnectReason, Room, RoomEvent, Track,
   type LocalTrackPublication, type Participant, type RemoteTrack, type TrackPublication,
 } from 'livekit-client';
 
 type User = { id: number; username: string; online?: boolean };
 // вложение: w/h — размер картинки/видео (для превью без «прыжков» ленты)
 type Att = { id: string; name: string; size: number; type: string; w: number | null; h: number | null };
-type Msg = { id: number; sender: number; recipient: number; text: string; created: number; file?: Att | null };
-// файл, который сейчас загружается на сервер
-type Upload = { key: number; peer: number; name: string; size: number; sent: number; xhr: XMLHttpRequest; cancelled?: boolean };
+// grp — сообщение группы; kind — системное («X добавил(а) Y»); sname — ник автора (в группе)
+type Msg = {
+  id: number; sender: number; recipient: number; text: string; created: number; file?: Att | null;
+  grp?: number; kind?: 'create' | 'add' | 'leave' | 'kick' | 'rename' | 'call' | null; sname?: string;
+};
+// групповой чат: call — кто сейчас в звонке группы
+type Group = { id: number; name: string; owner: number; members: User[]; call: number[] };
+// файл, который сейчас загружается на сервер; conv — беседа ('u5' — друг, 'g3' — группа)
+type Upload = { key: number; conv: string; name: string; size: number; sent: number; xhr: XMLHttpRequest; cancelled?: boolean };
 type Tab = 'online' | 'all' | 'pending' | 'add';
 declare const __APP_VERSION__: string; // версия из package.json (vite.config.ts)
 
@@ -26,9 +32,11 @@ const S = {
   token: store.get('token') || '',
   me: null as User | null,
   friends: { friends: [] as User[], incoming: [] as User[], outgoing: [] as User[] },
-  peer: null as User | null,
-  msgs: new Map<number, Msg[]>(),
-  unread: new Map<number, number>(), // id друга -> сколько непрочитанных
+  groups: [] as Group[],
+  peer: null as User | null, // открытая личная беседа
+  gid: 0, // открытая группа
+  msgs: new Map<string, Msg[]>(), // ключ беседы ('u5' / 'g3') -> сообщения
+  unread: new Map<string, number>(), // ключ беседы -> сколько непрочитанных
   ws: null as WebSocket | null,
   tab: 'online' as Tab, // вкладка на странице «Друзья»
   filter: '', // поиск по списку бесед
@@ -63,6 +71,11 @@ const ICON = {
   attach: 'M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm5 11h-4v4h-2v-4H7v-2h4V7h2v4h4v2z',
   file: 'M14 2H6c-1.1 0-1.99.9-1.99 2L4 20c0 1.1.89 2 1.99 2H18c1.1 0 2-.9 2-2V8l-6-6zm2 16H8v-2h8v2zm0-4H8v-2h8v2zm-3-5V3.5L18.5 9H13z',
   music: 'M12 3v10.55c-.59-.34-1.27-.55-2-.55-2.21 0-4 1.79-4 4s1.79 4 4 4 4-1.79 4-4V7h4V3h-6z',
+  crown: 'M5 16L3 5l5.5 5L12 4l3.5 6L21 5l-2 11H5zm14 3c0 .6-.4 1-1 1H6c-.6 0-1-.4-1-1v-1h14v1z',
+  leave: 'M17 7l-1.41 1.41L18.17 11H8v2h10.17l-2.58 2.58L17 17l5-5zM4 5h8V3H4c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h8v-2H4V5z',
+  arrowIn: 'M12 4l-1.41 1.41L16.17 11H4v2h12.17l-5.58 5.59L12 20l8-8z',
+  arrowOut: 'M20 11H7.83l5.59-5.59L12 4l-8 8 8 8 1.41-1.41L7.83 13H20v-2z',
+  edit: 'M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zM20.71 7.04c.39-.39.39-1.02 0-1.41l-2.34-2.34c-.39-.39-1.02-.39-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z',
 };
 const ic = (n: keyof typeof ICON, s = 20) =>
   `<svg class="ic" width="${s}" height="${s}" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="${ICON[n]}"/></svg>`;
@@ -76,6 +89,24 @@ function avatar(u: User, size: number, status?: boolean) {
     status === undefined ? '' : `<i class="st ${status ? 'on' : ''}"></i>`}</span>`;
 }
 const friend = (id: number) => S.friends.friends.find((f) => f.id === id);
+const group = (id: number) => S.groups.find((g) => g.id === id);
+// без названия группа зовётся по никам участников, как в Discord
+const gname = (g: Group) =>
+  g.name || g.members.filter((u) => u.id !== S.me?.id).map((u) => u.username).join(', ') || 'Пустая группа';
+const gavatar = (g: Group, size: number) =>
+  `<span class="av grp" style="--s:${size}px;--c:${avColor(g.id + 3)}">${ic('friends', Math.round(size * 0.6))}</span>`;
+// «в сети» знаем и про участников групп, которые нам не друзья
+const isOnline = (id: number) => !!(friend(id)?.online ?? S.groups.flatMap((g) => g.members).find((u) => u.id === id)?.online);
+
+// Открытая беседа: ключ для S.msgs/S.unread, адресат для запросов и имя для подсказок
+function conv() {
+  if (S.peer) return { key: 'u' + S.peer.id, to: { peer: S.peer.id } as Record<string, number>, name: '@' + S.peer.username };
+  const g = S.gid ? group(S.gid) : undefined;
+  if (g) return { key: 'g' + g.id, to: { group: g.id } as Record<string, number>, name: gname(g) };
+  return null;
+}
+const convKey = () => conv()?.key ?? '';
+const msgKey = (m: Msg) => m.grp ? 'g' + m.grp : 'u' + (m.sender === S.me!.id ? m.recipient : m.sender);
 
 // onClick — уведомление можно нажать (например, «показать скачанный файл в папке»)
 let toastTimer = 0;
@@ -205,9 +236,16 @@ async function checkServer() {
 
 function logout() {
   hangup(true);
+  closeIncoming();
   closeSettings();
+  closeDlg();
   S.token = '';
   S.me = null;
+  S.peer = null;
+  S.gid = 0;
+  S.groups = [];
+  S.msgs.clear();
+  S.unread.clear();
   store.set('token', '');
   const ws = S.ws;
   S.ws = null;
@@ -225,7 +263,7 @@ function start(me: User) {
         <div class="side-top"><input id="find" placeholder="Найти беседу" spellcheck="false"></div>
         <div class="side-list">
           <div class="nav-item" id="navfr" data-act="home">${ic('friends', 24)}<span>Друзья</span><span class="pill" id="reqn" hidden></span></div>
-          <div class="dm-head"><span>Личные сообщения</span><button class="ibtn sm" data-act="tab" data-tab="add" title="Добавить в друзья">${ic('plus', 16)}</button></div>
+          <div class="dm-head"><span>Личные сообщения</span><button class="ibtn sm" data-act="gnew" title="Создать группу">${ic('plus', 16)}</button></div>
           <div id="flist"></div>
         </div>
       </aside>
@@ -244,10 +282,10 @@ function start(me: User) {
   $<HTMLInputElement>('#find').oninput = (e) => { S.filter = (e.target as HTMLInputElement).value.trim().toLowerCase(); renderDmList(); };
   // перетаскивание файлов в открытую беседу
   const chat = $('#chat');
-  const hasFiles = (e: DragEvent) => !!S.peer && !!e.dataTransfer?.types.includes('Files');
+  const hasFiles = (e: DragEvent) => !!conv() && !!e.dataTransfer?.types.includes('Files');
   chat.ondragenter = (e) => {
     if (!hasFiles(e)) return;
-    chat.dataset.drop = `Отправить файлы @${S.peer!.username}`;
+    chat.dataset.drop = `Отправить файлы ${S.peer ? '' : 'в '}${conv()!.name}`;
     chat.classList.add('drop');
   };
   chat.ondragover = (e) => { if (hasFiles(e)) e.preventDefault(); };
@@ -255,7 +293,8 @@ function start(me: User) {
   chat.ondrop = (e) => {
     e.preventDefault();
     chat.classList.remove('drop');
-    if (S.peer && e.dataTransfer?.files.length) sendFiles(S.peer, e.dataTransfer.files);
+    const c = conv();
+    if (c && e.dataTransfer?.files.length) sendFiles(c, e.dataTransfer.files);
   };
   renderFriends();
   renderChat();
@@ -275,6 +314,23 @@ async function act(b: HTMLElement) {
       if (!u) return;
       if (S.peer?.id !== u.id) openChat(u);
       return startCall(u);
+    }
+    case 'gopen': return group(id) && openGroup(id);
+    case 'gcall':
+      if (S.gid !== id) openGroup(id);
+      return startGroupCall(id, true);
+    // новая группа; из личной беседы — сразу с этим другом
+    case 'gnew': return openPicker(0, id ? [id] : []);
+    case 'gadd': return openPicker(id);
+    case 'grename': return renameGroup(id);
+    case 'gkick': case 'gleave': {
+      const g = group(Number(b.dataset.gid));
+      if (!g) return;
+      if (b.dataset.act === 'gleave' && !(await confirmDlg(`Покинуть «${gname(g)}»`,
+        'Вы больше не будете получать сообщения из этой группы. Вернуться можно, только если вас снова добавят.', 'Покинуть группу'))) return;
+      try { await api('/api/groups/remove', { group: g.id, user: b.dataset.act === 'gkick' ? id : undefined }); }
+      catch (err) { toast((err as Error).message); }
+      return;
     }
     case 'profile':
       S.showProfile = !S.showProfile;
@@ -298,7 +354,7 @@ async function act(b: HTMLElement) {
     // ссылка скачивает файл сама, здесь только подсказка (в приложении файл тихо ложится в «Загрузки»)
     case 'dl': if (tauri) toast(`Скачиваю «${b.dataset.name}»…`); return;
     case 'view': {
-      const f = S.msgs.get(S.peer?.id ?? 0)?.find((m) => m.file?.id === b.dataset.fid)?.file;
+      const f = S.msgs.get(convKey())?.find((m) => m.file?.id === b.dataset.fid)?.file;
       return f && openViewer(f);
     }
     case 'upcancel': {
@@ -311,6 +367,7 @@ async function act(b: HTMLElement) {
 
 function goHome() {
   S.peer = null;
+  S.gid = 0;
   renderFriends();
   renderChat();
 }
@@ -337,45 +394,87 @@ async function loadFriends() {
   renderFriends();
 }
 
-// Всё, что зависит от списка друзей и их статусов
+// Список групп; если нас убрали из открытой группы или из группы со звонком — уходим оттуда
+async function loadGroups() {
+  S.groups = await api('/api/groups');
+  if (C.gid && C.state !== 'idle' && !group(C.gid)) { toast('Вы больше не в группе'); hangup(false); }
+  if (S.gid && !group(S.gid)) return goHome();
+  if (C.incomingG && !group(C.incomingG)) closeIncoming();
+  if (document.querySelector('.dlg-bg.picker')) closeDlg(); // список друзей в окне выбора устарел
+  renderFriends();
+  if (!S.gid) return;
+  renderMessages(); // ники в шапках сообщений
+  const ta = document.querySelector<HTMLTextAreaElement>('#send textarea');
+  if (ta) ta.placeholder = composerHint(conv()!); // группу могли переименовать
+}
+
+// Всё, что зависит от списка друзей, групп и статусов
 function renderFriends() {
   if (!S.me) return;
   const n = S.friends.incoming.length;
   const pill = $('#reqn');
   pill.hidden = !n;
   pill.textContent = String(n);
-  $('#navfr').classList.toggle('sel', !S.peer);
+  $('#navfr').classList.toggle('sel', !conv());
   renderDmList();
   renderRail();
-  if (!S.peer) return renderHome();
+  if (!conv()) return renderHome();
   renderTop();
   renderProfile();
 }
 
+const unreadPill = (n: number) => n ? `<span class="pill">${n > 99 ? '99+' : n}</span>` : '';
+
 function renderDmList() {
-  const list = S.friends.friends.filter((u) => !S.filter || u.username.toLowerCase().includes(S.filter));
-  $('#flist').innerHTML = list.map((u) => {
-    const unread = S.unread.get(u.id) || 0;
-    const inCall = C.state !== 'idle' && C.peer?.id === u.id;
+  const has = (s: string) => !S.filter || s.toLowerCase().includes(S.filter);
+  const groups = S.groups.filter((g) => has(gname(g)));
+  const list = S.friends.friends.filter((u) => has(u.username));
+  $('#flist').innerHTML = groups.map((g) => {
+    const unread = S.unread.get('g' + g.id) || 0;
+    const sub = C.state !== 'idle' && C.gid === g.id ? `<small class="incall">${ic('volume', 12)}В звонке</small>`
+      : g.call.length ? `<small class="incall">${ic('volume', 12)}Звонок: ${g.call.length}</small>`
+      : `<small>${g.members.length} ${plural(g.members.length, 'участник', 'участника', 'участников')}</small>`;
+    return `
+      <div class="dm ${S.gid === g.id ? 'sel' : ''} ${unread ? 'unread' : ''}" data-act="gopen" data-id="${g.id}">
+        ${gavatar(g, 32)}
+        <div class="dm-n"><span>${esc(gname(g))}</span>${sub}</div>
+        ${unreadPill(unread)}
+      </div>`;
+  }).join('') + list.map((u) => {
+    const unread = S.unread.get('u' + u.id) || 0;
+    const inCall = C.state !== 'idle' && !C.gid && C.peer?.id === u.id;
     return `
       <div class="dm ${S.peer?.id === u.id ? 'sel' : ''} ${unread ? 'unread' : ''}" data-act="open" data-id="${u.id}">
         ${avatar(u, 32, !!u.online)}
         <div class="dm-n"><span>${esc(u.username)}</span>${inCall ? `<small class="incall">${ic('volume', 12)}В звонке</small>` : ''}</div>
-        ${unread ? `<span class="pill">${unread > 99 ? '99+' : unread}</span>` : ''}
+        ${unreadPill(unread)}
       </div>`;
   }).join('') || `<div class="muted">${S.filter ? 'Никого не нашлось' : 'Пока никого — добавьте друга'}</div>`;
 }
+
+const plural = (n: number, one: string, few: string, many: string) =>
+  n % 10 === 1 && n % 100 !== 11 ? one : n % 10 >= 2 && n % 10 <= 4 && (n % 100 < 10 || n % 100 >= 20) ? few : many;
 
 // Левая колонка: «Личные сообщения», непрочитанные беседы и текущий звонок
 function renderRail() {
   const rail = document.getElementById('rail');
   if (!rail) return;
-  const callPeer = C.state !== 'idle' ? C.peer : null;
-  const unread = [...S.unread].filter(([id]) => id !== callPeer?.id && friend(id));
+  const ck = C.state !== 'idle' ? callKey() : '';
+  const callG = C.gid ? group(C.gid) : undefined;
+  // кнопка беседы: аватарка друга или значок группы
+  const btn = (key: string, extra: string) => {
+    const id = Number(key.slice(1));
+    const g = key[0] === 'g' ? group(id) : undefined;
+    const u = key[0] === 'u' ? friend(id) : undefined;
+    if (!g && !u) return '';
+    return `<button class="rb" data-act="${g ? 'gopen' : 'open'}" data-id="${id}" title="${esc(g ? gname(g) : u!.username)}">${g ? gavatar(g, 48) : avatar(u!, 48)}${extra}</button>`;
+  };
+  const unread = [...S.unread].filter(([key]) => key !== ck);
   rail.innerHTML = `
     <div class="ri sel"><button class="rb home" data-act="home" title="Личные сообщения">${ic('logo', 28)}</button></div>
-    ${callPeer ? `<div class="ri"><button class="rb" data-act="open" data-id="${callPeer.id}" title="${esc(callPeer.username)} — звонок">${avatar(callPeer, 48)}<span class="rb-voice">${ic('volume', 12)}</span></button></div>` : ''}
-    ${unread.map(([id, n]) => `<div class="ri dot"><button class="rb" data-act="open" data-id="${id}" title="${esc(friend(id)!.username)}">${avatar(friend(id)!, 48)}<span class="rb-badge">${n > 99 ? '99+' : n}</span></button></div>`).join('')}
+    ${ck && (callG || C.peer) ? `<div class="ri">${callG ? btn(ck, `<span class="rb-voice">${ic('volume', 12)}</span>`)
+      : `<button class="rb" data-act="open" data-id="${C.peer!.id}" title="${esc(C.peer!.username)} — звонок">${avatar(C.peer!, 48)}<span class="rb-voice">${ic('volume', 12)}</span></button>`}</div>` : ''}
+    ${unread.map(([key, n]) => { const b = btn(key, `<span class="rb-badge">${n > 99 ? '99+' : n}</span>`); return b && `<div class="ri dot">${b}</div>`; }).join('')}
     <div class="rail-sep"></div>
     <div class="ri"><button class="rb add" data-act="tab" data-tab="add" title="Добавить в друзья">${ic('plus', 24)}</button></div>
     ${U.version ? `<div class="ri"><button class="rb add upd" data-act="update" title="Доступно обновление ${esc(U.version)} — нажмите, чтобы установить">${ic('download', 24)}</button></div>` : ''}`;
@@ -468,49 +567,78 @@ function renderHome() {
     </div>`;
 }
 
-// ---------- личные сообщения ----------
-async function openChat(u: User) {
+// ---------- личные сообщения и группы ----------
+function openChat(u: User) {
   S.peer = u;
-  S.unread.delete(u.id);
+  S.gid = 0;
+  return openConv();
+}
+
+function openGroup(id: number) {
+  S.peer = null;
+  S.gid = id;
+  return openConv();
+}
+
+async function openConv() {
+  const c = conv();
+  if (!c) return goHome();
+  S.unread.delete(c.key);
   renderFriends();
   renderChat();
-  if (!S.msgs.has(u.id)) {
-    S.msgs.set(u.id, await api('/api/dm/messages?peer=' + u.id));
-    if (S.peer?.id === u.id) renderMessages();
+  if (!S.msgs.has(c.key)) {
+    const msgs = await api(S.gid ? '/api/group/messages?group=' + S.gid : '/api/dm/messages?peer=' + S.peer!.id);
+    S.msgs.set(c.key, msgs);
+    if (convKey() === c.key) renderMessages();
   }
 }
 
 function renderTop() {
   const p = S.peer;
+  const g = S.gid ? group(S.gid) : undefined;
+  if (g) {
+    const inCall = C.state !== 'idle' && C.gid === g.id;
+    $('#topbar').innerHTML = `
+      <div class="tb-title">${gavatar(g, 24)}<b class="tb-edit" data-act="grename" data-id="${g.id}" title="Изменить название группы">${esc(gname(g))}</b></div>
+      <div class="tb-actions">
+        <button class="tb-btn ${g.call.length && !inCall ? 'live' : ''}" data-act="gcall" data-id="${g.id}" title="${g.call.length ? 'Присоединиться к звонку' : 'Начать голосовой звонок'}">${ic('phone', 22)}</button>
+        <button class="tb-btn" data-act="gadd" data-id="${g.id}" title="Добавить друзей в группу">${ic('addFriend', 22)}</button>
+        <button class="tb-btn ${S.showProfile ? 'on' : ''}" data-act="profile" title="${S.showProfile ? 'Скрыть список участников' : 'Показать список участников'}">${ic('friends', 22)}</button>
+      </div>`;
+    return;
+  }
   if (!p) return;
   $('#topbar').innerHTML = `
     <div class="tb-title">${avatar(p, 24, !!friend(p.id)?.online)}<b>${esc(p.username)}</b></div>
     <div class="tb-actions">
       <button class="tb-btn" data-act="call" data-id="${p.id}" title="Начать голосовой звонок">${ic('phone', 22)}</button>
+      <button class="tb-btn" data-act="gnew" data-id="${p.id}" title="Создать группу с ${esc(p.username)}">${ic('addFriend', 22)}</button>
       <button class="tb-btn ${S.showProfile ? 'on' : ''}" data-act="profile" title="${S.showProfile ? 'Скрыть профиль' : 'Показать профиль'}">${ic('account', 22)}</button>
     </div>`;
 }
 
+const composerHint = (c: Conv) => `Написать ${c.to.group ? `в «${c.name}»` : c.name}`;
+
 function renderChat() {
   syncCallBox();
-  const p = S.peer;
-  if (!p) return renderHome();
+  const c = conv();
+  if (!c) return renderHome();
   renderTop();
   $('#chat').innerHTML = `
     <div id="msgs"></div>
     <form id="send"><div class="composer">
       <button type="button" class="att-btn" id="attach" title="Отправить файл">${ic('attach', 24)}</button>
       <input type="file" id="attfile" multiple hidden>
-      <textarea rows="1" maxlength="4000" placeholder="Написать @${esc(p.username)}"></textarea>
+      <textarea rows="1" maxlength="4000" placeholder="${esc(composerHint(c))}"></textarea>
     </div></form>`;
   const ta = $<HTMLTextAreaElement>('#send textarea');
   const pick = $<HTMLInputElement>('#attfile');
   $('#attach').onclick = () => pick.click();
-  pick.onchange = () => { if (pick.files?.length) sendFiles(p, pick.files); pick.value = ''; ta.focus(); };
+  pick.onchange = () => { if (pick.files?.length) sendFiles(c, pick.files); pick.value = ''; ta.focus(); };
   // вставка из буфера обмена: скриншоты и скопированные в проводнике файлы
   ta.onpaste = (e) => {
     const files = e.clipboardData?.files;
-    if (files?.length) { e.preventDefault(); sendFiles(p, files); }
+    if (files?.length) { e.preventDefault(); sendFiles(c, files); }
   };
   const box = $('#msgs');
   box.onscroll = () => { msgStick = box.scrollHeight - box.scrollTop - box.clientHeight < 80; };
@@ -522,7 +650,7 @@ function renderChat() {
     if (!text) return;
     ta.value = '';
     grow();
-    try { await api('/api/dm/messages', { peer: p.id, text }); } catch (err) { toast((err as Error).message); }
+    try { await api(c.to.group ? '/api/group/messages' : '/api/dm/messages', { ...c.to, text }); } catch (err) { toast((err as Error).message); }
   };
   ta.oninput = grow;
   ta.onkeydown = (e) => { if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); send(); } };
@@ -586,29 +714,56 @@ function renderUpload(u: Upload) {
 }
 
 let msgStick = true; // лента прокручена до конца — новые сообщения держим в поле зрения
+// Системное сообщение группы: «X добавил(а) Y в группу» и т.п.
+function renderSys(m: Msg, who: string) {
+  const b = (s: string) => `<b>${esc(s)}</b>`;
+  const [icon, cls, text] = {
+    create: ['arrowIn', 'in', `${b(who)} создал(а) группу.`],
+    add: ['arrowIn', 'in', `${b(who)} добавил(а) ${b(m.text)} в группу.`],
+    leave: ['arrowOut', 'out', `${b(m.text)} покинул(а) группу.`],
+    kick: ['arrowOut', 'out', `${b(who)} исключил(а) ${b(m.text)} из группы.`],
+    rename: ['edit', '', m.text ? `${b(who)} изменил(а) название группы: ${b(m.text)}` : `${b(who)} убрал(а) название группы.`],
+    call: ['phone', 'in', `${b(who)} начал(а) звонок.`],
+  }[m.kind!] as [keyof typeof ICON, string, string];
+  return `<div class="msg sys"><span class="sys-ic ${cls}">${ic(icon, 18)}</span><p>${text} <time>${stamp(m.created)}</time></p></div>`;
+}
+
 function renderMessages() {
   const box = document.getElementById('msgs');
-  const p = S.peer;
-  if (!box || !p) return;
+  const c = conv();
+  if (!box || !c) return;
   const me = S.me!;
-  let html = `
-    <div class="intro">${avatar(p, 80)}<h1>${esc(p.username)}</h1>
-      <p>Это начало истории ваших личных сообщений с <b>@${esc(p.username)}</b>.</p></div>`;
+  const p = S.peer;
+  const g = S.gid ? group(S.gid) : undefined;
+  let html = p
+    ? `<div class="intro">${avatar(p, 80)}<h1>${esc(p.username)}</h1>
+        <p>Это начало истории ваших личных сообщений с <b>@${esc(p.username)}</b>.</p></div>`
+    : `<div class="intro">${gavatar(g!, 80)}<h1>${esc(c.name)}</h1>
+        <p>Добро пожаловать в начало группы <b>${esc(c.name)}</b>.</p></div>`;
+  // автор: в группе — участник (или ник из сообщения, если он уже вышел)
+  const author = (m: Msg): User => m.sender === me.id ? me : p ?? g!.members.find((u) => u.id === m.sender) ?? { id: m.sender, username: m.sname || '???' };
   let prev: Msg | null = null;
-  for (const m of S.msgs.get(p.id) || []) {
-    if (!prev || !sameDay(prev.created, m.created))
+  let last = 0; // время предыдущего сообщения — для разделителя дней
+  for (const m of S.msgs.get(c.key) || []) {
+    if (!last || !sameDay(last, m.created))
       html += `<div class="day"><span>${new Date(m.created).toLocaleDateString('ru', { day: 'numeric', month: 'long', year: 'numeric' })}</span></div>`;
+    last = m.created;
+    if (m.kind) {
+      html += renderSys(m, author(m).username);
+      prev = null;
+      continue;
+    }
     const text = (m.text ? `<p>${esc(m.text)}</p>` : '') + (m.file ? renderAtt(m.file) : '');
     // подряд идущие сообщения одного автора в пределах 7 минут — одной группой, как в Discord
     if (prev && prev.sender === m.sender && m.created - prev.created < 7 * 60e3 && sameDay(prev.created, m.created)) {
       html += `<div class="msg cont"><time>${new Date(m.created).toLocaleTimeString('ru', { hour: '2-digit', minute: '2-digit' })}</time>${text}</div>`;
     } else {
-      const u = m.sender === me.id ? me : p;
+      const u = author(m);
       html += `<div class="msg head">${avatar(u, 40)}<div class="mh"><b>${esc(u.username)}</b><time>${stamp(m.created)}</time></div>${text}</div>`;
     }
     prev = m;
   }
-  html += S.uploads.filter((u) => u.peer === p.id).map(renderUpload).join('');
+  html += S.uploads.filter((u) => u.conv === c.key).map(renderUpload).join('');
   // уже показанные картинки и плееры переносим в новую разметку как есть:
   // не перекачиваются, а видео/музыка не останавливаются, когда приходит новое сообщение
   const keep = new Map([...box.querySelectorAll<HTMLElement>('img[data-fid], video[data-fid], audio[data-fid]')].map((el) => [el.dataset.fid!, el]));
@@ -625,8 +780,10 @@ function renderMessages() {
 const MAX_FILE = 500 * 1024 * 1024; // как на сервере
 let upSeq = 0;
 
-function sendFiles(peer: User, files: FileList) {
-  for (const f of [...files]) uploadFile(peer, f);
+type Conv = NonNullable<ReturnType<typeof conv>>;
+
+function sendFiles(c: Conv, files: FileList) {
+  for (const f of [...files]) uploadFile(c, f);
 }
 
 // Размер картинки/видео для превью (читаем локальный файл, на сервер это не уходит)
@@ -662,15 +819,15 @@ function finishUpload(up: Upload, err?: string) {
 }
 
 // Файл уходит на сервер одним запросом; сообщение с ним придёт обоим через WebSocket
-async function uploadFile(peer: User, file: File) {
+async function uploadFile(c: Conv, file: File) {
   if (!file.size) return toast(`«${file.name}» — пустой файл (папки отправить нельзя)`);
   if (file.size > MAX_FILE) return toast(`«${file.name}» больше ${MAX_FILE / 1048576} МБ`);
-  const up: Upload = { key: ++upSeq, peer: peer.id, name: file.name, size: file.size, sent: 0, xhr: new XMLHttpRequest() };
+  const up: Upload = { key: ++upSeq, conv: c.key, name: file.name, size: file.size, sent: 0, xhr: new XMLHttpRequest() };
   S.uploads.push(up);
-  if (S.peer?.id === peer.id) renderMessages();
+  if (convKey() === c.key) renderMessages();
   const dims = await mediaSize(file);
   if (up.cancelled) return;
-  const qs = new URLSearchParams({ peer: String(peer.id), name: file.name });
+  const qs = new URLSearchParams({ ...Object.fromEntries(Object.entries(c.to).map(([k, v]) => [k, String(v)])), name: file.name });
   if (dims) { qs.set('w', String(dims[0])); qs.set('h', String(dims[1])); }
   const xhr = up.xhr;
   const fail = (why: string) => `Не удалось отправить «${file.name}»: ${why}`;
@@ -716,12 +873,18 @@ const closeViewer = () => document.querySelector('.lightbox')?.remove();
 document.addEventListener('dragover', (e) => e.preventDefault());
 document.addEventListener('drop', (e) => e.preventDefault());
 
-// Профиль собеседника справа (во время звонка с ним прячется, как в Discord)
+// Профиль собеседника справа (во время звонка с ним прячется, как в Discord), в группе — участники
 function renderProfile() {
   const box = document.getElementById('profile');
   const p = S.peer;
   if (!box) return;
-  box.hidden = !p || !S.showProfile || (C.state !== 'idle' && C.peer?.id === p.id);
+  const g = S.gid ? group(S.gid) : undefined;
+  if (g) {
+    box.hidden = !S.showProfile;
+    if (!box.hidden) renderMembers(box, g);
+    return;
+  }
+  box.hidden = !p || !S.showProfile || (C.state !== 'idle' && callKey() === 'u' + p.id);
   if (box.hidden || !p) return;
   const online = !!friend(p.id)?.online;
   box.innerHTML = `
@@ -737,11 +900,153 @@ function renderProfile() {
     </div>`;
 }
 
+// Участники группы: в сети сверху, корона у владельца; владелец может исключать
+function renderMembers(box: HTMLElement, g: Group) {
+  const me = S.me!;
+  const inCall = new Set(g.call);
+  const sorted = [...g.members].sort((a, b) => Number(!!b.online) - Number(!!a.online));
+  box.innerHTML = `
+    <div class="pf mem">
+      <h4 class="mem-h">Участники — ${g.members.length}</h4>
+      <div class="mem-list">${sorted.map((u) => `
+        <div class="mem-row ${u.online ? '' : 'off'}" ${u.id !== me.id && friend(u.id) ? `data-act="open" data-id="${u.id}"` : ''}>
+          ${avatar(u, 32, !!u.online)}
+          <span class="mem-n">${esc(u.username)}</span>
+          ${g.owner === u.id ? `<span class="mem-own" title="Владелец группы">${ic('crown', 14)}</span>` : ''}
+          ${inCall.has(u.id) ? `<span class="mem-call" title="В звонке">${ic('volume', 14)}</span>` : ''}
+          ${g.owner === me.id && u.id !== me.id ? `<button class="ibtn sm mem-kick" data-act="gkick" data-gid="${g.id}" data-id="${u.id}" title="Исключить из группы">${ic('close', 14)}</button>` : ''}
+        </div>`).join('')}
+      </div>
+      <button class="pf-btn" data-act="gadd" data-id="${g.id}">${ic('addFriend', 18)}Добавить друзей</button>
+      <button class="pf-btn red" data-act="gleave" data-gid="${g.id}">${ic('leave', 18)}Покинуть группу</button>
+    </div>`;
+}
+
+// ---------- окна: выбор друзей для группы, подтверждение ----------
+const MAX_GROUP = 10; // как на сервере
+function closeDlg() {
+  document.querySelector('.dlg-bg')?.remove();
+}
+function showDlg(cls: string, html: string) {
+  closeDlg();
+  const bg = document.createElement('div');
+  bg.className = 'dlg-bg ' + cls;
+  bg.innerHTML = `<div class="dlg">${html}</div>`;
+  bg.onmousedown = (e) => { if (e.target === bg) closeDlg(); };
+  document.body.append(bg);
+  return bg;
+}
+
+function confirmDlg(title: string, text: string, ok: string): Promise<boolean> {
+  return new Promise((resolve) => {
+    const bg = showDlg('confirm', `
+      <h3>${esc(title)}</h3><p>${esc(text)}</p>
+      <div class="dlg-btns"><button class="btn sec" data-r="0">Отмена</button><button class="btn red" data-r="1">${esc(ok)}</button></div>`);
+    new MutationObserver((_, o) => { if (!bg.isConnected) { o.disconnect(); resolve(false); } }).observe(document.body, { childList: true });
+    bg.querySelectorAll<HTMLElement>('[data-r]').forEach((b) => (b.onclick = () => { resolve(b.dataset.r === '1'); closeDlg(); }));
+  });
+}
+
+// Выбор друзей: gid = 0 — новая группа (preset — уже отмеченные), иначе добавление в группу gid
+function openPicker(gid: number, preset: number[] = []) {
+  const g = gid ? group(gid) : undefined;
+  if (gid && !g) return;
+  const taken = new Set(g?.members.map((u) => u.id) ?? []);
+  const room = MAX_GROUP - (g ? g.members.length : 1); // сколько ещё можно позвать
+  const friends = S.friends.friends.filter((u) => !taken.has(u.id));
+  const sel = new Set(preset.filter((id) => friends.some((u) => u.id === id)));
+  const bg = showDlg('picker', `
+    <h3>${g ? `Добавить в «${esc(gname(g))}»` : 'Выберите друзей'}</h3>
+    <p class="pk-left"></p>
+    <input class="pk-find" placeholder="Введите ник друга" spellcheck="false">
+    <div class="pk-list"></div>
+    <div class="dlg-btns"><button class="btn sec" data-r="0">Отмена</button><button class="btn" data-r="1"></button></div>`);
+  const list = $('.pk-list', bg);
+  const go = $<HTMLButtonElement>('[data-r="1"]', bg);
+  const find = $<HTMLInputElement>('.pk-find', bg);
+  const draw = () => {
+    const left = room - sel.size;
+    $('.pk-left', bg).textContent = left > 0 ? `Можно добавить ещё ${left} ${plural(left, 'друга', 'друзей', 'друзей')}.` : 'Больше добавить нельзя: в группе не больше 10 участников.';
+    const f = find.value.trim().toLowerCase();
+    const shown = friends.filter((u) => !f || u.username.toLowerCase().includes(f));
+    list.innerHTML = shown.map((u) => `
+      <label class="pk-row ${sel.has(u.id) ? 'on' : ''}">
+        ${avatar(u, 32, !!u.online)}<span class="pk-n">${esc(u.username)}</span>
+        <input type="checkbox" data-id="${u.id}" ${sel.has(u.id) ? 'checked' : ''} ${!sel.has(u.id) && left <= 0 ? 'disabled' : ''}>
+      </label>`).join('') || `<div class="muted">${friends.length ? 'Никого не нашлось' : g ? 'Все ваши друзья уже в группе' : 'Сначала добавьте друзей'}</div>`;
+    go.textContent = g ? 'Добавить' : 'Создать группу';
+    go.disabled = !sel.size;
+  };
+  list.onchange = (e) => {
+    const cb = e.target as HTMLInputElement;
+    const id = Number(cb.dataset.id);
+    if (cb.checked) sel.add(id); else sel.delete(id);
+    draw();
+  };
+  find.oninput = draw;
+  find.focus();
+  $('[data-r="0"]', bg).onclick = closeDlg;
+  go.onclick = async () => {
+    go.disabled = true;
+    try {
+      if (g) {
+        await api('/api/groups/add', { group: g.id, users: [...sel] });
+        closeDlg();
+      } else {
+        const ng: Group = await api('/api/groups/create', { users: [...sel] });
+        closeDlg();
+        if (!group(ng.id)) S.groups.push(ng);
+        openGroup(ng.id);
+      }
+    } catch (err) {
+      toast((err as Error).message);
+      go.disabled = false;
+    }
+  };
+  draw();
+}
+
+// Название группы правится прямо в шапке, как в Discord
+function renameGroup(gid: number) {
+  const g = group(gid);
+  const b = document.querySelector<HTMLElement>('#topbar .tb-edit');
+  if (!g || !b) return;
+  const inp = document.createElement('input');
+  inp.className = 'tb-name';
+  inp.value = g.name;
+  inp.maxLength = 100;
+  inp.placeholder = gname({ ...g, name: '' });
+  b.replaceWith(inp);
+  inp.focus();
+  inp.select();
+  let done = false;
+  const save = async (ok: boolean) => {
+    if (done) return;
+    done = true;
+    const name = inp.value.trim();
+    if (ok && name !== g.name) {
+      try { await api('/api/groups/rename', { group: gid, name }); } catch (err) { toast((err as Error).message); }
+    }
+    renderTop();
+  };
+  inp.onkeydown = (e) => {
+    if (e.key === 'Enter') save(true);
+    if (e.key === 'Escape') { e.stopPropagation(); save(false); }
+  };
+  inp.onblur = () => save(true);
+}
+
 // ---------- realtime ----------
 function connectWs() {
   const ws = new WebSocket(S.server.replace(/^http/, 'ws') + '/ws?token=' + encodeURIComponent(S.token));
   S.ws = ws;
-  ws.onopen = () => { renderUserbar(); loadFriends().catch(() => {}); };
+  ws.onopen = () => {
+    renderUserbar();
+    loadFriends().catch(() => {});
+    loadGroups().catch(() => {});
+    // сервер узнаёт, кто в групповом звонке, по соединению — после обрыва напоминаем
+    if (C.gid && C.state !== 'idle') wsSend({ type: 'gcall_join', group: C.gid, ring: false });
+  };
   ws.onmessage = (e) => onEvent(JSON.parse(e.data));
   ws.onclose = () => {
     if (S.ws !== ws) return;
@@ -755,18 +1060,32 @@ function onEvent(ev: any) {
   switch (ev.type) {
     case 'message': {
       const m: Msg = ev.msg;
-      const other = m.sender === S.me!.id ? m.recipient : m.sender;
-      if (S.msgs.has(other)) S.msgs.get(other)!.push(m);
-      if (S.peer?.id === other) renderMessages();
-      else { S.unread.set(other, (S.unread.get(other) || 0) + 1); renderFriends(); }
+      const key = msgKey(m);
+      if (S.msgs.has(key)) S.msgs.get(key)!.push(m);
+      if (convKey() === key) renderMessages();
+      else if (m.sender !== S.me!.id) { S.unread.set(key, (S.unread.get(key) || 0) + 1); renderFriends(); }
       break;
     }
     case 'friends': loadFriends(); break;
+    case 'groups': loadGroups().catch(() => {}); break;
     case 'presence': {
       const f = friend(ev.userId);
-      if (f) { f.online = ev.online; renderFriends(); }
+      if (f) f.online = ev.online;
+      for (const g of S.groups) for (const u of g.members) if (u.id === ev.userId) u.online = ev.online;
+      renderFriends();
       break;
     }
+    // кто сейчас в звонке группы
+    case 'gcall': {
+      const g = group(ev.group);
+      if (!g) break;
+      g.call = ev.users;
+      // звонок закончился или мы ответили на другом устройстве
+      if (C.incomingG === g.id && (!g.call.length || g.call.includes(S.me!.id))) closeIncoming();
+      renderFriends();
+      break;
+    }
+    case 'gcall_ring': onGroupRing(ev.group, ev.from); break;
     case 'call_invite': onIncoming(ev.from); break;
     case 'call_accept': if (C.peer?.id === ev.from.id) setCallState('incall'); break;
     case 'call_decline':
@@ -794,9 +1113,12 @@ type QKey = keyof typeof QUALITY;
 
 const C = {
   room: null as Room | null,
-  peer: null as User | null,
+  peer: null as User | null, // звонок другу
+  gid: 0, // звонок в группе (тогда peer = null)
   state: 'idle' as 'idle' | 'calling' | 'incall',
   incoming: null as User | null,
+  incomingG: 0, // нам звонят в группе
+  inTimer: 0,
   selfMute: false, // микрофон выключен кнопкой (действует и вне звонка)
   deaf: false,
   ringTimer: 0,
@@ -820,6 +1142,11 @@ const C = {
 };
 
 type Carry = { mic: boolean; tracks: { track: MediaStreamTrack; source: Track.Source }[] };
+
+// беседа, в которой идёт звонок (тот же ключ, что у conv())
+const callKey = () => C.gid ? 'g' + C.gid : C.peer ? 'u' + C.peer.id : '';
+const callName = () => C.gid ? (group(C.gid) ? gname(group(C.gid)!) : 'Группа') : C.peer?.username ?? '';
+const ringing = () => !!C.incoming || !!C.incomingG;
 
 function setRelay(on: boolean) {
   C.relay = on;
@@ -883,7 +1210,7 @@ const screenPublishOpts = () => {
 };
 
 // Переподключение звонка без потери микрофона и демонстрации экрана (те же треки публикуем заново)
-async function reconnect(peer: User, toRelay: boolean) {
+async function reconnect(toRelay: boolean) {
   if (C.switching || !C.room) return;
   C.switching = true;
   if (toRelay && !C.relayAuto && !C.relay) {
@@ -903,7 +1230,7 @@ async function reconnect(peer: User, toRelay: boolean) {
   $('#audio').innerHTML = '';
   document.getElementById('stage')?.replaceChildren();
   try {
-    await joinRoom(peer, carry);
+    await joinRoom(carry);
   } catch (err) {
     toast('Не удалось переподключиться: ' + (err as Error).message);
     hangup(true);
@@ -913,9 +1240,11 @@ async function reconnect(peer: User, toRelay: boolean) {
 }
 
 // mode: 'auto' — по ситуации (VPN/обрывы -> TURN/TLS), 'all' — все пути (UDP, TCP 7881, TURN), запасной вариант
-async function joinRoom(peer: User, carry?: Carry, mode: 'auto' | 'all' = 'auto') {
+// Подключение к комнате звонка: с другом (C.peer) или в группе (C.gid)
+async function joinRoom(carry?: Carry, mode: 'auto' | 'all' = 'auto') {
   const gen = C.gen;
-  const { url, token } = await api('/api/call/token', { peer: peer.id }, 7000, 2);
+  const peer = C.peer;
+  const { url, token } = await api('/api/call/token', C.gid ? { group: C.gid } : { peer: peer!.id }, 7000, 2);
   if (gen !== C.gen) throw new Error('звонок отменён');
   // VPN смотрим по адресу медиасервера: туда идут звук и видео
   if (!carry && mode === 'auto') { C.vpn = await detectVpn(url); C.rejoins = 0; }
@@ -952,7 +1281,8 @@ async function joinRoom(peer: User, carry?: Carry, mode: 'auto' | 'all' = 'auto'
       syncAudio(room);
       renderStage();
       renderPeople();
-      if (room.remoteParticipants.size > 0 || C.state !== 'incall') return;
+      // в группе звонок продолжается, даже если остался один
+      if (!peer || room.remoteParticipants.size > 0 || C.state !== 'incall') return;
       setNet(`${peer.username} переподключается…`);
       clearTimeout(C.peerGone);
       C.peerGone = window.setTimeout(() => { if (mine() && room.remoteParticipants.size === 0) { toast('Собеседник отключился'); hangup(true); } }, 20000);
@@ -962,15 +1292,17 @@ async function joinRoom(peer: User, carry?: Carry, mode: 'auto' | 'all' = 'auto'
       setNet('связь прервалась, восстанавливаю…');
       if (relay || C.relayBroken) return;
       // UDP через VPN часто «моргает»: если сам не восстановился за 4 с или рвётся повторно — в TCP
-      if (++reconnCount >= 2) return reconnect(peer, true);
-      reconnTimer = window.setTimeout(() => mine() && reconnect(peer, true), 4000);
+      if (++reconnCount >= 2) return reconnect(true);
+      reconnTimer = window.setTimeout(() => mine() && reconnect(true), 4000);
     })
     .on(RoomEvent.Reconnected, () => { clearTimeout(reconnTimer); if (mine()) setNet(''); })
-    .on(RoomEvent.Disconnected, () => {
+    .on(RoomEvent.Disconnected, (reason?: DisconnectReason) => {
       clearTimeout(reconnTimer);
       if (!mine()) return;
+      // нас убрали из группы — сервер выкинул из комнаты
+      if (C.gid && reason === DisconnectReason.PARTICIPANT_REMOVED) return hangup(false);
       if (++C.rejoins > 3) { toast('Связь потеряна'); return hangup(true); }
-      reconnect(peer, true);
+      reconnect(true);
     });
   try {
     await room.connect(url, token, {
@@ -985,10 +1317,10 @@ async function joinRoom(peer: User, carry?: Carry, mode: 'auto' | 'all' = 'auto'
     C.room = null;
     await room.disconnect(false).catch(() => {});
     // Не подключились: TURN/TLS -> пробуем все пути; UDP -> пробуем TURN/TLS
-    if (relay) { C.relayBroken = true; return joinRoom(peer, carry, 'all'); }
+    if (relay) { C.relayBroken = true; return joinRoom(carry, 'all'); }
     if (mode === 'all' || C.relayAuto) throw err;
     C.relayAuto = true;
-    return joinRoom(peer, carry);
+    return joinRoom(carry);
   }
   if (room.remoteParticipants.size > 0) { C.state = 'incall'; setNet(''); }
   for (const t of carry?.tracks || [])
@@ -1005,9 +1337,10 @@ async function joinRoom(peer: User, carry?: Carry, mode: 'auto' | 'all' = 'auto'
 async function startCall(peer: User) {
   if (C.room || C.state !== 'idle') return toast('Ты уже в звонке');
   C.peer = peer;
+  C.gid = 0;
   setCallState('calling');
   try {
-    await joinRoom(peer);
+    await joinRoom();
     wsSend({ type: 'call_invite', to: peer.id });
     C.ringTimer = window.setTimeout(() => { if (C.state === 'calling') { toast('Нет ответа'); hangup(true); } }, 30000);
   } catch (err) {
@@ -1016,8 +1349,49 @@ async function startCall(peer: User) {
   }
 }
 
+// Звонок в группе: первый вошедший (ring) звонит остальным, кто жмёт позже — просто присоединяется
+async function startGroupCall(gid: number, ring: boolean) {
+  if (C.state !== 'idle') return C.gid === gid || toast('Ты уже в звонке');
+  if (C.incomingG === gid) closeIncoming();
+  C.gid = gid;
+  C.peer = null;
+  setCallState('incall');
+  try {
+    await joinRoom();
+    if (C.gid === gid) wsSend({ type: 'gcall_join', group: gid, ring });
+  } catch (err) {
+    toast('Не удалось подключиться к звонку: ' + (err as Error).message);
+    hangup(false);
+  }
+}
+
+function onGroupRing(gid: number, from: User) {
+  const g = group(gid);
+  if (!g) return;
+  if (C.state !== 'idle' || ringing()) return toast(`${from.username} начал(а) звонок в «${gname(g)}»`);
+  C.incomingG = gid;
+  $('#modal').innerHTML = `
+    <div class="incoming">
+      <div class="in-av">${gavatar(g, 80)}</div>
+      <b>${esc(gname(g))}</b><span>${esc(from.username)} звонит в группе…</span>
+      <div class="row">
+        <button class="rbtn big red" id="dec" title="Отклонить">${ic('hangup', 26)}</button>
+        <button class="rbtn big green" id="acc" title="Присоединиться">${ic('phone', 24)}</button>
+      </div>
+    </div>`;
+  ringtone(true);
+  C.inTimer = window.setTimeout(() => { if (C.incomingG === gid) closeIncoming(); }, 30000);
+  $('#acc').onclick = () => {
+    closeIncoming();
+    openGroup(gid);
+    startGroupCall(gid, false);
+  };
+  $('#dec').onclick = closeIncoming;
+}
+
 function onIncoming(from: User) {
-  if (C.room) return wsSend({ type: 'call_decline', to: from.id });
+  if (C.room || C.state !== 'idle') return wsSend({ type: 'call_decline', to: from.id });
+  if (C.incomingG) closeIncoming(); // личный звонок важнее звонка в группе
   C.incoming = from;
   $('#modal').innerHTML = `
     <div class="incoming">
@@ -1032,10 +1406,11 @@ function onIncoming(from: User) {
   $('#acc').onclick = async () => {
     closeIncoming();
     C.peer = friend(from.id) || from;
+    C.gid = 0;
     setCallState('incall');
     openChat(C.peer);
     try {
-      await joinRoom(C.peer);
+      await joinRoom();
       wsSend({ type: 'call_accept', to: from.id });
     } catch (err) {
       toast('Не удалось подключиться: ' + (err as Error).message);
@@ -1047,6 +1422,8 @@ function onIncoming(from: User) {
 
 function closeIncoming() {
   C.incoming = null;
+  C.incomingG = 0;
+  clearTimeout(C.inTimer);
   $('#modal').innerHTML = '';
   ringtone(false);
 }
@@ -1080,7 +1457,7 @@ async function ringtone(on: boolean, preview = false) {
   // своя мелодия пользователя, иначе общая мелодия сервера, иначе гудки
   const blob = (await idb<Blob>('readonly', (s) => s.get('ringtone')).catch(() => undefined))
     ?? (await idb<Blob>('readonly', (s) => s.get('serverRingtone')).catch(() => undefined));
-  if (!preview && !C.incoming) return; // звонок уже приняли/сбросили, пока читали файл
+  if (!preview && !ringing()) return; // звонок уже приняли/сбросили, пока читали файл
   if (blob) {
     const a = (ringAudio = new Audio(URL.createObjectURL(blob)));
     a.loop = true;
@@ -1115,9 +1492,11 @@ function hangup(notify: boolean) {
   clearTimeout(C.peerGone);
   C.net = '';
   if (notify && C.peer && C.state !== 'idle') wsSend({ type: 'call_end', to: C.peer.id });
+  if (C.gid) wsSend({ type: 'gcall_leave', group: C.gid });
   const room = C.room;
   C.room = null;
   C.peer = null;
+  C.gid = 0;
   C.state = 'idle';
   room?.disconnect();
   $('#audio').innerHTML = '';
@@ -1143,10 +1522,10 @@ async function toggleScreen() {
   renderCall();
 }
 
-// Панель звонка видна только в беседе с собеседником по звонку
+// Панель звонка видна только в беседе, где идёт звонок
 function syncCallBox() {
   const box = document.getElementById('call');
-  if (box) box.hidden = C.state === 'idle' || !C.peer || S.peer?.id !== C.peer.id;
+  if (box) box.hidden = C.state === 'idle' || !callKey() || convKey() !== callKey();
 }
 
 function renderCall() {
@@ -1188,15 +1567,15 @@ function renderCall() {
 function renderVoicebar() {
   const vb = document.getElementById('voicebar');
   if (!vb) return;
-  if (C.state === 'idle' || !C.peer) { vb.hidden = true; vb.innerHTML = ''; return; }
+  if (C.state === 'idle' || !callKey()) { vb.hidden = true; vb.innerHTML = ''; return; }
   const scr = C.room?.localParticipant.isScreenShareEnabled ?? false;
-  const st = C.state === 'calling' ? ['wait', 'Вызов…'] : C.net ? ['warn', 'Восстанавливаю связь'] : ['', 'Голос подключён'];
+  const st = C.state === 'calling' ? ['wait', 'Вызов…'] : C.net ? ['warn', 'Восстанавливаю связь'] : !C.room ? ['wait', 'Подключение…'] : ['', 'Голос подключён'];
   vb.hidden = false;
   vb.innerHTML = `
     <div class="vb-row">
-      <div class="vb-info" data-act="open" data-id="${C.peer.id}" title="Открыть беседу">
+      <div class="vb-info" data-act="${C.gid ? 'gopen' : 'open'}" data-id="${C.gid || C.peer!.id}" title="Открыть беседу">
         <div class="vb-st ${st[0]}">${ic('signal', 16)}${st[1]}</div>
-        <div class="vb-peer">${esc(C.peer.username)}${C.relay || C.relayAuto || C.vpn ? ' • TCP' : ''}</div>
+        <div class="vb-peer">${esc(callName())}${C.relay || C.relayAuto || C.vpn ? ' • TCP' : ''}</div>
       </div>
       <button class="ibtn" data-act="hangup" title="Отключиться">${ic('hangup')}</button>
     </div>
@@ -1307,7 +1686,7 @@ function openSettings(tab: SetTab) {
 
 function closeSettings() {
   stopMicTest();
-  if (ringPreview && !C.incoming) ringtone(false);
+  if (ringPreview && !ringing()) ringtone(false);
   ringPreview = false;
   $('#layer').innerHTML = '';
 }
@@ -1315,6 +1694,7 @@ function closeSettings() {
 document.addEventListener('keydown', (e) => {
   if (e.key !== 'Escape') return;
   if (document.querySelector('.lightbox')) closeViewer();
+  else if (document.querySelector('.dlg-bg')) closeDlg();
   else if (document.querySelector('.settings')) closeSettings();
 });
 
@@ -1359,7 +1739,7 @@ function renderSettingsTab() {
       </div>
       <input type="file" id="rfile" accept="audio/*" hidden>`;
     $('#rplay').onclick = () => {
-      if (C.incoming) return;
+      if (ringing()) return;
       ringPreview = !ringPreview;
       ringtone(ringPreview, true);
       $('#rplay').innerHTML = ic(ringPreview ? 'stop' : 'play');
@@ -1372,7 +1752,7 @@ function renderSettingsTab() {
       await idb('readwrite', (s) => s.put(file, 'ringtone'));
       store.set('ringName', file.name);
       toast('Мелодия звонка сохранена');
-      if (!C.incoming) ringtone(false);
+      if (!ringing()) ringtone(false);
       ringPreview = false;
       renderSettingsTab();
     };
@@ -1380,7 +1760,7 @@ function renderSettingsTab() {
       await idb('readwrite', (s) => s.delete('ringtone'));
       store.set('ringName', '');
       toast(store.get('srvRingVer') ? 'Мелодия сервера' : 'Стандартная мелодия');
-      if (!C.incoming) ringtone(false);
+      if (!ringing()) ringtone(false);
       ringPreview = false;
       renderSettingsTab();
     };
@@ -1439,7 +1819,7 @@ function renderSettingsTab() {
   }));
   $<HTMLInputElement>('#srelay').onchange = (e) => {
     const on = (e.target as HTMLInputElement).checked;
-    if (on && C.peer && C.room) { setRelay(true); return reconnect(C.peer, true); }
+    if (on && C.room) { setRelay(true); return reconnect(true); }
     setRelay(on);
     if (C.room) toast('Применится со следующего звонка');
   };

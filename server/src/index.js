@@ -1,4 +1,4 @@
-// Startrack API: аккаунты, друзья, личные сообщения и файлы, сигналинг звонков.
+// Startrack API: аккаунты, друзья, личные сообщения, группы и файлы, сигналинг звонков.
 // Медиа (голос/видео/демонстрация) идёт через LiveKit SFU, здесь только выдаём токены.
 import http from 'node:http';
 import crypto from 'node:crypto';
@@ -7,7 +7,7 @@ import path from 'node:path';
 import { pipeline } from 'node:stream/promises';
 import { DatabaseSync } from 'node:sqlite';
 import { WebSocketServer } from 'ws';
-import { AccessToken } from 'livekit-server-sdk';
+import { AccessToken, RoomServiceClient } from 'livekit-server-sdk';
 
 const PORT = Number(process.env.PORT || 8080);
 const DATA_DIR = process.env.DATA_DIR || './data';
@@ -15,6 +15,9 @@ const SECRET = process.env.APP_SECRET || 'dev-secret-change-me';
 const LK_URL = process.env.LIVEKIT_URL || 'ws://localhost:7880';
 const LK_KEY = process.env.LIVEKIT_API_KEY || 'devkey';
 const LK_SECRET = process.env.LIVEKIT_API_SECRET || 'secret';
+// API LiveKit с этой же машины (LIVEKIT_URL — публичный адрес для клиентов)
+const lk = new RoomServiceClient(process.env.LIVEKIT_API_HOST || 'http://127.0.0.1:7880', LK_KEY, LK_SECRET);
+const MAX_GROUP = 10; // участников в группе, как в Discord
 
 const FILES_DIR = path.join(DATA_DIR, 'files');
 const MAX_FILE = 500 * 1024 * 1024;
@@ -47,9 +50,26 @@ db.exec(`
     id TEXT PRIMARY KEY, sender INTEGER NOT NULL, recipient INTEGER NOT NULL,
     name TEXT NOT NULL, size INTEGER NOT NULL, type TEXT NOT NULL, w INTEGER, h INTEGER, created INTEGER NOT NULL
   );
+  -- групповые чаты; name пустое — клиент показывает ники участников
+  CREATE TABLE IF NOT EXISTS groups (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, owner INTEGER NOT NULL, created INTEGER NOT NULL
+  );
+  CREATE TABLE IF NOT EXISTS group_members (
+    grp INTEGER NOT NULL, uid INTEGER NOT NULL, joined INTEGER NOT NULL,
+    PRIMARY KEY (grp, uid)
+  );
+  CREATE INDEX IF NOT EXISTS group_members_uid ON group_members (uid);
 `);
-if (!db.prepare('PRAGMA table_info(messages)').all().some((c) => c.name === 'file'))
-  db.exec('ALTER TABLE messages ADD COLUMN file TEXT');
+const addColumn = (table, col, type) => {
+  if (!db.prepare(`PRAGMA table_info(${table})`).all().some((c) => c.name === col))
+    db.exec(`ALTER TABLE ${table} ADD COLUMN ${col} ${type}`);
+};
+addColumn('messages', 'file', 'TEXT');
+// сообщения группы: recipient = 0, grp = id группы; kind — системное сообщение (create/add/leave/kick/rename/call)
+addColumn('messages', 'grp', 'INTEGER');
+addColumn('messages', 'kind', 'TEXT');
+addColumn('files', 'grp', 'INTEGER');
+db.exec('CREATE INDEX IF NOT EXISTS messages_grp ON messages (grp, id)');
 
 const q = {
   userByName: db.prepare('SELECT * FROM users WHERE username = ?'),
@@ -63,19 +83,40 @@ const q = {
     SELECT f.a, f.b, f.status, u.id, u.username FROM friends f
     JOIN users u ON u.id = CASE WHEN f.a = ? THEN f.b ELSE f.a END
     WHERE f.a = ? OR f.b = ?`),
-  addMsg: db.prepare('INSERT INTO messages (sender, recipient, text, created, file) VALUES (?, ?, ?, ?, ?)'),
+  addMsg: db.prepare('INSERT INTO messages (sender, recipient, text, created, file, grp, kind) VALUES (?, ?, ?, ?, ?, ?, ?)'),
   history: db.prepare(`
     SELECT m.*, f.name AS fname, f.size AS fsize, f.type AS ftype, f.w AS fw, f.h AS fh FROM messages m
     LEFT JOIN files f ON f.id = m.file
-    WHERE ((m.sender = ? AND m.recipient = ?) OR (m.sender = ? AND m.recipient = ?)) AND m.id < ?
+    WHERE ((m.sender = ? AND m.recipient = ?) OR (m.sender = ? AND m.recipient = ?)) AND m.grp IS NULL AND m.id < ?
     ORDER BY m.id DESC LIMIT 50`),
-  addFile: db.prepare('INSERT INTO files (id, sender, recipient, name, size, type, w, h, created) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)'),
+  // в группе показываем и ник автора: он мог уже выйти из группы
+  groupHistory: db.prepare(`
+    SELECT m.*, u.username AS sname, f.name AS fname, f.size AS fsize, f.type AS ftype, f.w AS fw, f.h AS fh FROM messages m
+    LEFT JOIN files f ON f.id = m.file LEFT JOIN users u ON u.id = m.sender
+    WHERE m.grp = ? AND m.id < ?
+    ORDER BY m.id DESC LIMIT 50`),
+  addFile: db.prepare('INSERT INTO files (id, sender, recipient, name, size, type, w, h, created, grp) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'),
   file: db.prepare('SELECT * FROM files WHERE id = ?'),
+  group: db.prepare('SELECT * FROM groups WHERE id = ?'),
+  groupsOf: db.prepare('SELECT g.* FROM groups g JOIN group_members m ON m.grp = g.id WHERE m.uid = ? ORDER BY g.id'),
+  members: db.prepare('SELECT u.id, u.username FROM group_members m JOIN users u ON u.id = m.uid WHERE m.grp = ? ORDER BY m.joined, m.uid'),
+  isMember: db.prepare('SELECT 1 FROM group_members WHERE grp = ? AND uid = ?'),
+  coMembers: db.prepare('SELECT DISTINCT b.uid FROM group_members a JOIN group_members b ON b.grp = a.grp AND b.uid != a.uid WHERE a.uid = ?'),
+  addGroup: db.prepare('INSERT INTO groups (name, owner, created) VALUES (?, ?, ?)'),
+  addMember: db.prepare('INSERT OR IGNORE INTO group_members (grp, uid, joined) VALUES (?, ?, ?)'),
+  delMember: db.prepare('DELETE FROM group_members WHERE grp = ? AND uid = ?'),
+  setOwner: db.prepare('UPDATE groups SET owner = ? WHERE id = ?'),
+  rename: db.prepare('UPDATE groups SET name = ? WHERE id = ?'),
+  groupFiles: db.prepare('SELECT id FROM files WHERE grp = ?'),
+  delGroup: db.prepare('DELETE FROM groups WHERE id = ?'),
+  delGroupMsgs: db.prepare('DELETE FROM messages WHERE grp = ?'),
+  delGroupFiles: db.prepare('DELETE FROM files WHERE grp = ?'),
 };
 
 const msgOut = (m) => ({
   id: m.id, sender: m.sender, recipient: m.recipient, text: m.text, created: m.created,
   file: m.file ? { id: m.file, name: m.fname, size: m.fsize, type: m.ftype, w: m.fw, h: m.fh } : null,
+  ...(m.grp ? { grp: m.grp, kind: m.kind || null, sname: m.sname } : {}),
 });
 
 // --- auth ---
@@ -109,11 +150,82 @@ function push(userId, event) {
 function friendIds(userId) {
   return q.relsOf.all(userId, userId, userId).filter((r) => r.status === 'accepted').map((r) => r.id);
 }
+// кому важен статус «в сети»: друзья и все, с кем есть общая группа
+function contactIds(userId) {
+  return [...new Set([...friendIds(userId), ...q.coMembers.all(userId).map((r) => r.uid)])];
+}
 function isFriend(a, b) {
   const r = q.rel.get(a, b, b, a);
   return r && r.status === 'accepted';
 }
 const roomFor = (a, b) => `dm_${Math.min(a, b)}_${Math.max(a, b)}`;
+const groupRoom = (id) => `grp_${id}`;
+
+// --- группы ---
+const isMember = (gid, uid) => !!q.isMember.get(gid, uid);
+const memberIds = (gid) => q.members.all(gid).map((u) => u.id);
+function pushGroup(gid, event) {
+  for (const id of memberIds(gid)) push(id, event);
+}
+function groupView(g) {
+  return {
+    id: g.id, name: g.name, owner: g.owner, call: callUsers(g.id),
+    members: q.members.all(g.id).map((u) => ({ id: u.id, username: u.username, online: online(u.id) })),
+  };
+}
+function memberGroup(me, gid) {
+  const g = q.group.get(Number(gid));
+  if (!g || !isMember(g.id, me.id)) throw [404, 'Группа не найдена'];
+  return g;
+}
+// Сообщение в группу (и системное: «X добавил(а) Y» и т.п.) — всем участникам через WebSocket
+function groupMsg(gid, sender, text, kind = null, file = null) {
+  const created = Date.now();
+  const { lastInsertRowid } = q.addMsg.run(sender.id, 0, text, created, file?.id ?? null, gid, kind);
+  const msg = { id: Number(lastInsertRowid), sender: sender.id, recipient: 0, text, created, file, grp: gid, kind, sname: sender.username };
+  pushGroup(gid, { type: 'message', msg });
+  return msg;
+}
+// Друзья, которых можно добавить в группу: только свои друзья, без повторов
+function pickFriends(me, ids, already = []) {
+  const out = [];
+  for (const id of new Set((Array.isArray(ids) ? ids : []).map(Number))) {
+    if (already.includes(id) || id === me.id) continue;
+    if (!isFriend(me.id, id)) throw [403, 'Добавлять в группу можно только друзей'];
+    out.push(q.userById.get(id));
+  }
+  return out;
+}
+function dropGroup(gid) {
+  for (const f of q.groupFiles.all(gid)) fs.rmSync(path.join(FILES_DIR, f.id), { force: true });
+  q.delGroupFiles.run(gid);
+  q.delGroupMsgs.run(gid);
+  q.delGroup.run(gid);
+}
+
+// Групповые звонки: кто сейчас в звонке, знаем по WebSocket-соединениям (клиент сообщает gcall_join/gcall_leave)
+const gcalls = new Map(); // id группы -> Set<ws>
+const callUsers = (gid) => [...new Set([...(gcalls.get(gid) || [])].map((ws) => ws.uid))];
+function setGcall(ws, gid) {
+  const prev = ws.gcall || 0;
+  if (prev === gid) return;
+  ws.gcall = gid;
+  if (prev) {
+    gcalls.get(prev)?.delete(ws);
+    if (!gcalls.get(prev)?.size) gcalls.delete(prev);
+    pushGroup(prev, { type: 'gcall', group: prev, users: callUsers(prev) });
+  }
+  if (gid) {
+    if (!gcalls.has(gid)) gcalls.set(gid, new Set());
+    gcalls.get(gid).add(ws);
+    pushGroup(gid, { type: 'gcall', group: gid, users: callUsers(gid) });
+  }
+}
+// Убрать человека из звонка группы (вышел или исключили)
+function kickFromCall(gid, uid) {
+  for (const ws of sockets.get(uid) || []) if (ws.gcall === gid) setGcall(ws, 0);
+  lk.removeParticipant(groupRoom(gid), String(uid)).catch(() => {}); // не в комнате — LiveKit ответит ошибкой
+}
 
 function friendsView(userId) {
   const out = { friends: [], incoming: [], outgoing: [] };
@@ -176,17 +288,88 @@ const routes = {
     if (!text) throw [400, 'Пустое сообщение'];
     if (!isFriend(me.id, peer)) throw [403, 'Писать можно только друзьям'];
     const created = Date.now();
-    const { lastInsertRowid } = q.addMsg.run(me.id, peer, text, created, null);
+    const { lastInsertRowid } = q.addMsg.run(me.id, peer, text, created, null, null, null);
     const msg = { id: Number(lastInsertRowid), sender: me.id, recipient: peer, text, created, file: null };
     push(peer, { type: 'message', msg });
     push(me.id, { type: 'message', msg });
     return msg;
   },
-  // Токен в LiveKit-комнату звонка с другом
+  'GET /api/groups': async (me) => q.groupsOf.all(me.id).map(groupView),
+  // Новая группа из друзей; имя можно не задавать
+  'POST /api/groups/create': async (me, b) => {
+    const users = pickFriends(me, b.users);
+    if (!users.length) throw [400, 'Выберите хотя бы одного друга'];
+    if (users.length + 1 > MAX_GROUP) throw [400, `В группе не больше ${MAX_GROUP} участников`];
+    const now = Date.now();
+    const gid = Number(q.addGroup.run(String(b.name || '').trim().slice(0, 100), me.id, now).lastInsertRowid);
+    for (const u of [me, ...users]) q.addMember.run(gid, u.id, now);
+    groupMsg(gid, me, '', 'create');
+    pushGroup(gid, { type: 'groups' });
+    return groupView(q.group.get(gid));
+  },
+  // Любой участник может добавить в группу своих друзей
+  'POST /api/groups/add': async (me, b) => {
+    const g = memberGroup(me, b.group);
+    const ids = memberIds(g.id);
+    const users = pickFriends(me, b.users, ids);
+    if (!users.length) throw [400, 'Выберите друзей'];
+    if (ids.length + users.length > MAX_GROUP) throw [400, `В группе не больше ${MAX_GROUP} участников`];
+    for (const u of users) {
+      q.addMember.run(g.id, u.id, Date.now());
+      groupMsg(g.id, me, u.username, 'add');
+    }
+    pushGroup(g.id, { type: 'groups' });
+    return groupView(g);
+  },
+  // Выйти самому или исключить участника (исключать может только владелец)
+  'POST /api/groups/remove': async (me, b) => {
+    const g = memberGroup(me, b.group);
+    const uid = Number(b.user) || me.id;
+    const self = uid === me.id;
+    if (!self && g.owner !== me.id) throw [403, 'Исключать может только владелец группы'];
+    const u = q.userById.get(uid);
+    if (!u || !isMember(g.id, uid)) throw [404, 'Участник не найден'];
+    groupMsg(g.id, me, u.username, self ? 'leave' : 'kick');
+    q.delMember.run(g.id, uid);
+    kickFromCall(g.id, uid);
+    push(uid, { type: 'groups' });
+    const rest = memberIds(g.id);
+    if (!rest.length) dropGroup(g.id);
+    else {
+      if (g.owner === uid) q.setOwner.run(rest[0], g.id); // владелец ушёл — группа переходит следующему
+      pushGroup(g.id, { type: 'groups' });
+    }
+    return { ok: true };
+  },
+  'POST /api/groups/rename': async (me, b) => {
+    const g = memberGroup(me, b.group);
+    const name = String(b.name || '').trim().slice(0, 100);
+    if (name === g.name) return groupView(g);
+    q.rename.run(name, g.id);
+    groupMsg(g.id, me, name, 'rename');
+    pushGroup(g.id, { type: 'groups' });
+    return groupView(q.group.get(g.id));
+  },
+  'GET /api/group/messages': async (me, _b, url) => {
+    const g = memberGroup(me, url.searchParams.get('group'));
+    const before = Number(url.searchParams.get('before')) || Number.MAX_SAFE_INTEGER;
+    return q.groupHistory.all(g.id, before).reverse().map(msgOut);
+  },
+  'POST /api/group/messages': async (me, b) => {
+    const g = memberGroup(me, b.group);
+    const text = String(b.text || '').trim().slice(0, 4000);
+    if (!text) throw [400, 'Пустое сообщение'];
+    return groupMsg(g.id, me, text);
+  },
+  // Токен в LiveKit-комнату звонка с другом или в группе
   'POST /api/call/token': async (me, b) => {
-    const peer = Number(b.peer);
-    if (!isFriend(me.id, peer)) throw [403, 'Звонить можно только друзьям'];
-    const room = roomFor(me.id, peer);
+    let room;
+    if (b.group) room = groupRoom(memberGroup(me, b.group).id);
+    else {
+      const peer = Number(b.peer);
+      if (!isFriend(me.id, peer)) throw [403, 'Звонить можно только друзьям'];
+      room = roomFor(me.id, peer);
+    }
     const at = new AccessToken(LK_KEY, LK_SECRET, { identity: String(me.id), name: me.username, ttl: '6h' });
     at.addGrant({ room, roomJoin: true, canPublish: true, canSubscribe: true, canPublishData: true });
     return { url: LK_URL, token: await at.toJwt(), room };
@@ -195,13 +378,15 @@ const routes = {
 
 const bearer = (req) => (req.headers.authorization || '').replace('Bearer ', '');
 
-// Отправка файла в личку: тело запроса — сам файл, имя и размеры превью — в параметрах.
-// Пишем потоком сразу на диск, в память файл целиком не попадает.
+// Отправка файла в личку (?peer=) или в группу (?group=): тело запроса — сам файл, имя и размеры
+// превью — в параметрах. Пишем потоком сразу на диск, в память файл целиком не попадает.
 async function uploadFile(req, res, url, send) {
   const me = verify(bearer(req));
   if (!me) return send(401, { error: 'Нужно войти' });
-  const peer = Number(url.searchParams.get('peer'));
-  if (!isFriend(me.id, peer)) return send(403, { error: 'Отправлять файлы можно только друзьям' });
+  const gid = Number(url.searchParams.get('group')) || 0;
+  const peer = gid ? 0 : Number(url.searchParams.get('peer'));
+  if (gid && !isMember(gid, me.id)) return send(404, { error: 'Группа не найдена' });
+  if (!gid && !isFriend(me.id, peer)) return send(403, { error: 'Отправлять файлы можно только друзьям' });
   const size = Number(req.headers['content-length']);
   if (!size) return send(400, { error: 'Пустой файл' });
   if (size > MAX_FILE) return send(413, { error: `Файл больше ${MAX_FILE / 1048576} МБ` });
@@ -230,8 +415,11 @@ async function uploadFile(req, res, url, send) {
   }
   const created = Date.now();
   const meta = { id, name, size, type, w: dim('w'), h: dim('h') };
-  q.addFile.run(id, me.id, peer, name, size, type, meta.w, meta.h, created);
-  const { lastInsertRowid } = q.addMsg.run(me.id, peer, '', created, id);
+  // из группы могли выйти, пока файл грузился
+  if (gid && !isMember(gid, me.id)) { fs.rmSync(file, { force: true }); return send(404, { error: 'Группа не найдена' }); }
+  q.addFile.run(id, me.id, peer, name, size, type, meta.w, meta.h, created, gid || null);
+  if (gid) return send(200, groupMsg(gid, me, '', null, meta));
+  const { lastInsertRowid } = q.addMsg.run(me.id, peer, '', created, id, null, null);
   const msg = { id: Number(lastInsertRowid), sender: me.id, recipient: peer, text: '', created, file: meta };
   push(peer, { type: 'message', msg });
   push(me.id, { type: 'message', msg });
@@ -247,7 +435,8 @@ function downloadFile(req, res, url, id, send) {
   const me = verify(bearer(req) || url.searchParams.get('token'));
   if (!me) return send(401, { error: 'Нужно войти' });
   const f = q.file.get(id);
-  if (!f || (f.sender !== me.id && f.recipient !== me.id)) return send(404, { error: 'Файл не найден' });
+  const allowed = f && (f.grp ? isMember(f.grp, me.id) : f.sender === me.id || f.recipient === me.id);
+  if (!allowed) return send(404, { error: 'Файл не найден' });
   const inline = INLINE.test(f.type) && !url.searchParams.has('dl');
   const ascii = f.name.replace(/[^\x20-\x7e]|["\\]/g, '_');
   const headers = {
@@ -330,7 +519,8 @@ wss.on('connection', (ws, req) => {
   const wasOnline = online(me.id);
   if (!sockets.has(me.id)) sockets.set(me.id, new Set());
   sockets.get(me.id).add(ws);
-  if (!wasOnline) for (const f of friendIds(me.id)) push(f, { type: 'presence', userId: me.id, online: true });
+  ws.uid = me.id;
+  if (!wasOnline) for (const f of contactIds(me.id)) push(f, { type: 'presence', userId: me.id, online: true });
 
   ws.isAlive = true;
   ws.on('pong', () => (ws.isAlive = true));
@@ -338,6 +528,20 @@ wss.on('connection', (ws, req) => {
   ws.on('message', (raw) => {
     let m;
     try { m = JSON.parse(raw); } catch { return; }
+    // Групповой звонок: вошёл / вышел. ring — первый вошедший звонит остальным
+    if (m.type === 'gcall_join' || m.type === 'gcall_leave') {
+      const gid = Number(m.group);
+      const g = q.group.get(gid);
+      if (!g || !isMember(gid, me.id)) return;
+      if (m.type === 'gcall_leave') return ws.gcall === gid && setGcall(ws, 0);
+      const fresh = callUsers(gid).length === 0;
+      setGcall(ws, gid);
+      if (fresh && m.ring) {
+        groupMsg(gid, me, '', 'call');
+        for (const id of memberIds(gid)) if (id !== me.id) push(id, { type: 'gcall_ring', group: gid, from: { id: me.id, username: me.username } });
+      }
+      return;
+    }
     const to = Number(m.to);
     if (!['call_invite', 'call_accept', 'call_decline', 'call_end'].includes(m.type) || !isFriend(me.id, to)) return;
     push(to, { type: m.type, from: { id: me.id, username: me.username } });
@@ -345,11 +549,12 @@ wss.on('connection', (ws, req) => {
     if (m.type !== 'call_invite') push(me.id, { type: m.type + '_self', peer: to });
   });
   ws.on('close', () => {
+    setGcall(ws, 0);
     const set = sockets.get(me.id);
     set?.delete(ws);
     if (set && set.size === 0) {
       sockets.delete(me.id);
-      for (const f of friendIds(me.id)) push(f, { type: 'presence', userId: me.id, online: false });
+      for (const f of contactIds(me.id)) push(f, { type: 'presence', userId: me.id, online: false });
     }
   });
 });
