@@ -1,10 +1,13 @@
 import './style.css';
 import {
   AudioPresets, DisconnectReason, Room, RoomEvent, Track,
-  type LocalTrackPublication, type Participant, type RemoteTrack, type TrackPublication,
+  type LocalTrackPublication, type Participant, type RemoteParticipant, type RemoteTrack, type RemoteTrackPublication, type TrackPublication,
 } from 'livekit-client';
 import { closePicker, emojify, isJumbo, loadEmoji, noteUsed, openPicker as openEmojiPicker, replaceCodes, suggest } from './emoji';
+import { decodeGif, encodeGif } from './gif';
+import { BUILTIN, SB_MAX_SEC, cutWav, decodeFile, playSound, preload, preview, sbVol, setSbVol, stopSounds, type SbSound } from './soundboard';
 import { SFX_GROUPS, setSfxOn, setSfxOutput, setSfxVol, sfx, sfxLoop, sfxOn, sfxVol, type SfxGroup } from './sounds';
+import { initWatch, watchDeaf, watchJoined, watchMount, watchOn, watchOnData, watchReset, watchStart } from './watch';
 
 // offline — так другие видят «невидимку»
 type Status = 'online' | 'idle' | 'dnd' | 'invisible' | 'offline';
@@ -16,7 +19,10 @@ type User = {
 // профиль из /api/users/profile: что у нас с этим человеком общего
 type Profile = User & { mutualFriends: number[]; mutualGroups: number[] };
 // вложение: w/h — размер картинки/видео (для превью без «прыжков» ленты)
-type Att = { id: string; name: string; size: number; type: string; w: number | null; h: number | null };
+// gif — sha256 гифки (по нему видно, что она в избранном)
+type Att = { id: string; name: string; size: number; type: string; w: number | null; h: number | null; gif?: string | null };
+// избранная гифка: файл на сервере /api/gifs/<hash>.gif
+type FavGif = { hash: string; w: number | null; h: number | null };
 // grp — сообщение группы; kind — системное («X добавил(а) Y»); sname — ник автора (в группе)
 type Msg = {
   id: number; sender: number; recipient: number; text: string; created: number; file?: Att | null;
@@ -53,6 +59,7 @@ const S = {
   showProfile: store.get('profile') !== '0',
   uploads: [] as Upload[],
   profiles: new Map<number, Profile>(), // загруженные профили (общие друзья и группы)
+  gifs: [] as FavGif[], // избранные гифки
 };
 
 // ---------- иконки и аватарки ----------
@@ -89,6 +96,23 @@ const ICON = {
   edit: 'M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zM20.71 7.04c.39-.39.39-1.02 0-1.41l-2.34-2.34c-.39-.39-1.02-.39-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z',
   chevron: 'M9.29 6.71a1 1 0 0 0 0 1.41L13.17 12l-3.88 3.88a1 1 0 1 0 1.42 1.41l4.59-4.59a1 1 0 0 0 0-1.41L10.7 6.7a1 1 0 0 0-1.41.01z',
   copy: 'M16 1H4c-1.1 0-2 .9-2 2v14h2V3h12V1zm3 4H8c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm0 16H8V7h11v14z',
+  star: 'M12 17.27L18.18 21l-1.64-7.03L22 9.24l-7.19-.61L12 2 9.19 8.63 2 9.24l5.46 4.73L5.82 21z',
+  starOutline: 'M22 9.24l-7.19-.62L12 2 9.19 8.63 2 9.24l5.46 4.73L5.82 21 12 17.27 18.18 21l-1.63-7.03L22 9.24zM12 15.4l-3.76 2.27 1-4.28-3.32-2.88 4.38-.38L12 6.1l1.71 4.04 4.38.38-3.32 2.88 1 4.28L12 15.4z',
+  upload: 'M9 16h6v-6h4l-7-7-7 7h4zm-4 2h14v2H5z',
+  soundboard: 'M18 11v2h4v-2h-4zm-2 6.61c.96.71 2.21 1.65 3.2 2.39.4-.53.8-1.07 1.2-1.6-.99-.74-2.24-1.68-3.2-2.4-.4.54-.8 1.08-1.2 1.61zM20.4 5.6c-.4-.53-.8-1.07-1.2-1.6-.99.74-2.24 1.68-3.2 2.4.4.53.8 1.07 1.2 1.6.96-.72 2.21-1.65 3.2-2.4zM4 9c-1.1 0-2 .9-2 2v2c0 1.1.9 2 2 2h1v4h2v-4h1l5 3V6L8 9H4zm11.5 3c0-1.33-.58-2.53-1.5-3.35v6.69c.92-.81 1.5-2.01 1.5-3.34z',
+  youtube: 'M10 15l5.19-3L10 9v6m11.56-7.83c.13.47.22 1.1.28 1.9.07.8.1 1.49.1 2.09L22 12c0 2.19-.16 3.8-.44 4.83-.25.9-.83 1.48-1.73 1.73-.47.13-1.33.22-2.65.28-1.3.07-2.49.1-3.59.1L12 19c-4.19 0-6.8-.16-7.83-.44-.9-.25-1.48-.83-1.73-1.73-.13-.47-.22-1.1-.28-1.9-.07-.8-.1-1.49-.1-2.09L2 12c0-2.19.16-3.8.44-4.83.25-.9.83-1.48 1.73-1.73.47-.13 1.33-.22 2.65-.28 1.3-.07 2.49-.1 3.59-.1L12 5c4.19 0 6.8.16 7.83.44.9.25 1.48.83 1.73 1.73z',
+  fs: 'M7 14H5v5h5v-2H7v-3zm-2-4h2V7h3V5H5v5zm12 7h-3v2h5v-5h-2v3zM14 5v2h3v3h2V5h-5z',
+  fsExit: 'M5 16h3v3h2v-5H5v2zm3-8H5v2h5V5H8v3zm6 11h2v-3h3v-2h-5v5zm2-11V5h-2v5h5V8h-3z',
+  pip: 'M19 7h-8v6h8V7zm2-4H3c-1.1 0-2 .9-2 2v14c0 1.1.9 1.98 2 1.98h18c1.1 0 2-.88 2-1.98V5c0-1.1-.9-2-2-2zm0 16.01H3V4.98h18v14.03z',
+  chevronDown: 'M16.59 8.59L12 13.17 7.41 8.59 6 10l6 6 6-6z',
+  chevronUp: 'M12 8l-6 6 1.41 1.41L12 10.83l4.59 4.58L18 14z',
+  more: 'M6 10c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2zm12 0c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2zm-6 0c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2z',
+  eye: 'M12 4.5C7 4.5 2.73 7.61 1 12c1.73 4.39 6 7.5 11 7.5s9.27-3.11 11-7.5c-1.73-4.39-6-7.5-11-7.5zM12 17c-2.76 0-5-2.24-5-5s2.24-5 5-5 5 2.24 5 5-2.24 5-5 5zm0-8c-1.66 0-3 1.34-3 3s1.34 3 3 3 3-1.34 3-3-1.34-3-3-3z',
+  eyeOff: 'M12 7c2.76 0 5 2.24 5 5 0 .65-.13 1.26-.36 1.83l2.92 2.92c1.51-1.26 2.7-2.89 3.43-4.75-1.73-4.39-6-7.5-11-7.5-1.4 0-2.74.25-3.98.7l2.16 2.16C10.74 7.13 11.35 7 12 7zM2 4.27l2.28 2.28.46.46C3.08 8.3 1.78 10.02 1 12c1.73 4.39 6 7.5 11 7.5 1.55 0 3.03-.3 4.38-.84l.42.42L19.73 22 21 20.73 3.27 3 2 4.27zM7.53 9.8l1.55 1.55c-.05.21-.08.43-.08.65 0 1.66 1.34 3 3 3 .22 0 .44-.03.65-.08l1.55 1.55c-.67.33-1.41.53-2.2.53-2.76 0-5-2.24-5-5 0-.79.2-1.53.53-2.2zm4.31-.78l3.15 3.15.02-.16c0-1.66-1.34-3-3-3l-.17.01z',
+  search: 'M15.5 14h-.79l-.28-.27C15.41 12.59 16 11.11 16 9.5 16 5.91 13.09 3 9.5 3S3 5.91 3 9.5 5.91 16 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z',
+  clock: 'M11.99 2C6.47 2 2 6.48 2 12s4.47 10 9.99 10C17.52 22 22 17.52 22 12S17.52 2 11.99 2zM12 20c-4.42 0-8-3.58-8-8s3.58-8 8-8 8 3.58 8 8-3.58 8-8 8zm.5-13H11v6l5.25 3.15.75-1.23-4.5-2.67z',
+  skip: 'M6 18l8.5-6L6 6v12zM16 6v12h2V6h-2z',
+  queue: 'M15 6H3v2h12V6zm0 4H3v2h12v-2zM3 16h8v-2H3v2zM17 6v8.18c-.31-.11-.65-.18-1-.18-1.66 0-3 1.34-3 3s1.34 3 3 3 3-1.34 3-3V8h3V6h-5z',
   image: 'M21 19V5c0-1.1-.9-2-2-2H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2zM8.5 13.5l2.5 3.01L14.5 12l4.5 6H5l3.5-4.5z',
 };
 const ic = (n: keyof typeof ICON, s = 20) =>
@@ -270,6 +294,7 @@ function logout() {
   closeDlg();
   closePop();
   closePicker();
+  closeGifPicker();
   S.token = '';
   S.me = null;
   S.peer = null;
@@ -332,6 +357,7 @@ function start(me: User) {
   renderUserbar();
   connectWs();
   syncServerRingtone();
+  loadGifs();
 }
 
 async function act(b: HTMLElement) {
@@ -399,6 +425,18 @@ async function act(b: HTMLElement) {
     case 'mic': return setMute(!(C.selfMute || C.deaf));
     case 'deaf': return setDeaf(!C.deaf);
     case 'screen': return C.room && toggleScreen();
+    case 'sb': return openSoundboard(b);
+    case 'yt': return startWatch();
+    case 'callfull': C.full = !C.full; return renderCall();
+    case 'callfs': { const box = document.getElementById('call'); return box && toggleFullscreen(box); }
+    case 'strip':
+      C.strip = !C.strip;
+      store.set('callStrip', C.strip ? '1' : '0');
+      return renderCall();
+    case 'twatch': return setWatching(b.dataset.key!, !!b.dataset.on);
+    case 'tpip': return tilePip(b.dataset.key!);
+    case 'tfs': { const t = tileEl(b.dataset.key!); return t && toggleFullscreen(t); }
+    case 'tmenu': { const t = tileEl(b.dataset.key!); if (!t) return; const r = b.getBoundingClientRect(); return openTileMenu(t, r.left, r.bottom + 4); }
     case 'hangup': return hangup(true);
     case 'settings': return openSettings((b.dataset.tab as SetTab) || 'account');
     case 'update':
@@ -406,6 +444,7 @@ async function act(b: HTMLElement) {
       return installUpdate($('#modal'));
     // ссылка скачивает файл сама, здесь только подсказка (в приложении файл тихо ложится в «Загрузки»)
     case 'dl': if (tauri) toast(`Скачиваю «${b.dataset.name}»…`); return;
+    case 'gfav': return toggleFavGif(b.dataset.fid!);
     case 'view': {
       const f = S.msgs.get(convKey())?.find((m) => m.file?.id === b.dataset.fid)?.file;
       return f && openViewer(f);
@@ -690,12 +729,14 @@ function renderChat() {
       <button type="button" class="att-btn" id="attach" title="Отправить файл">${ic('attach', 24)}</button>
       <input type="file" id="attfile" multiple hidden>
       <textarea rows="1" maxlength="4000" placeholder="${esc(composerHint(c))}"></textarea>
+      <button type="button" class="gif-btn" id="gifbtn" title="Гифки"><span>GIF</span></button>
       <button type="button" class="emo-btn" id="emobtn" title="Выбрать эмодзи"><span class="emo">${EMO_BTN[0]}</span></button>
     </div></form>`;
   const ta = $<HTMLTextAreaElement>('#send textarea');
   const pick = $<HTMLInputElement>('#attfile');
   $('#attach').onclick = () => pick.click();
   bindEmoji(ta, $('#emobtn'), $('#send .ac'));
+  $('#gifbtn').onclick = () => openGifPicker($('#gifbtn'), c);
   pick.onchange = () => { if (pick.files?.length) sendFiles(c, pick.files); pick.value = ''; ta.focus(); };
   // вставка из буфера обмена: скриншоты и скопированные в проводнике файлы
   ta.onpaste = (e) => {
@@ -822,7 +863,8 @@ function mediaBox(f: Att) {
 function renderAtt(f: Att) {
   const dl = `href="${esc(fileUrl(f, true))}" data-act="dl" data-name="${esc(f.name)}"`;
   if (IMG_RE.test(f.type))
-    return `<div class="att-media img" style="${mediaBox(f)}" data-act="view" data-fid="${f.id}" title="${esc(f.name)}"><img data-fid="${f.id}" src="${esc(fileUrl(f))}" alt="${esc(f.name)}" draggable="false"></div>`;
+    return `<div class="att-media img" style="${mediaBox(f)}" data-act="view" data-fid="${f.id}" title="${esc(f.name)}"><img data-fid="${f.id}" src="${esc(fileUrl(f))}" alt="${esc(f.name)}" draggable="false">${
+      f.type === 'image/gif' ? gifStar(f) : ''}</div>`;
   if (VID_RE.test(f.type))
     return `<div class="att-media" style="${mediaBox(f)}"><video data-fid="${f.id}" src="${esc(fileUrl(f))}" controls preload="metadata"></video></div>
       <div class="att-cap"><a ${dl}>${esc(f.name)}</a><span>${fsize(f.size)}</span></div>`;
@@ -834,6 +876,121 @@ function renderAtt(f: Att) {
       <a class="att-dl" ${dl} title="Скачать">${ic('download', 22)}</a>
       ${audio ? `<audio data-fid="${f.id}" src="${esc(fileUrl(f))}" controls preload="none"></audio>` : ''}
     </div>`;
+}
+
+// ---------- гифки ----------
+const gifUrl = (hash: string) => `${S.server}/api/gifs/${hash}.gif`;
+const isFavGif = (hash?: string | null) => !!hash && S.gifs.some((g) => g.hash === hash);
+// звёздочка на гифке в чате, как в Discord: добавить в избранное или убрать
+function gifStar(f: Att) {
+  const on = isFavGif(f.gif);
+  return `<button class="gif-fav ${on ? 'on' : ''}" data-act="gfav" data-fid="${f.id}" title="${on ? 'Убрать из избранного' : 'Добавить в избранное'}">${ic(on ? 'star' : 'starOutline', 20)}</button>`;
+}
+const attById = (id: string) => [...S.msgs.values()].flat().find((m) => m.file?.id === id)?.file;
+function syncGifStars() {
+  document.querySelectorAll<HTMLElement>('.gif-fav[data-fid]').forEach((b) => {
+    const f = attById(b.dataset.fid!);
+    if (f) b.outerHTML = gifStar(f);
+  });
+}
+async function loadGifs() {
+  try { S.gifs = await api('/api/gifs'); syncGifStars(); } catch {}
+}
+async function toggleFavGif(fid: string) {
+  const f = attById(fid);
+  if (!f) return;
+  try {
+    if (isFavGif(f.gif)) {
+      S.gifs = await api('/api/gifs/unfav', { hash: f.gif });
+      toast('Гифка убрана из избранного');
+    } else {
+      const r = await api('/api/gifs/fav', { file: fid });
+      for (const m of [...S.msgs.values()].flat()) if (m.file?.id === fid) m.file.gif = r.hash;
+      S.gifs = r.gifs;
+      toast('Гифка в избранном — она в окне «GIF» у поля ввода');
+    }
+  } catch (err) { toast((err as Error).message); }
+  syncGifStars();
+  drawGifPicker?.();
+}
+
+// Своя гифка с компьютера — сразу в избранное
+async function uploadFavGif(file: File) {
+  if (file.type !== 'image/gif') return toast(`«${file.name}» — не GIF`);
+  if (file.size > 25 * 1048576) return toast(`«${file.name}» больше 25 МБ`);
+  const dims = await mediaSize(file);
+  let r: Response;
+  try {
+    r = await fetch(`${S.server}/api/gifs/upload${dims ? `?w=${dims[0]}&h=${dims[1]}` : ''}`, {
+      method: 'POST', body: file, signal: AbortSignal.timeout(180000),
+      headers: { Authorization: 'Bearer ' + S.token, 'Content-Type': 'image/gif' },
+    });
+  } catch { return toast(`Не удалось загрузить «${file.name}»: нет связи с сервером`); }
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) return toast(data.error || 'Не удалось загрузить гифку: HTTP ' + r.status);
+  S.gifs = data;
+  syncGifStars();
+}
+
+// Окно гифок над полем ввода: избранное и загрузка своих
+let drawGifPicker: (() => void) | null = null;
+function closeGifPicker() {
+  document.querySelector('.gif-pop')?.remove();
+  drawGifPicker = null;
+}
+function openGifPicker(btn: HTMLElement, c: Conv) {
+  if (document.querySelector('.gif-pop')) return closeGifPicker();
+  closePicker();
+  const el = document.createElement('div');
+  el.className = 'gif-pop';
+  let busy = 0; // сколько гифок сейчас загружается
+  const draw = (drawGifPicker = () => {
+    el.innerHTML = `
+      <div class="gp-top"><b>Избранные гифки</b><span class="grow"></span>
+        ${busy ? '<span class="spin"></span>' : ''}<button class="btn sm" data-g="up">${ic('upload', 16)}Загрузить GIF</button>
+        <input type="file" accept="image/gif" multiple hidden></div>
+      <div class="gp-list">${S.gifs.length ? `<div class="gp-cols">${S.gifs.map((g) => `
+        <div class="gp-g" data-h="${g.hash}" title="Отправить" style="aspect-ratio:${g.w && g.h ? `${g.w}/${g.h}` : '1'}">
+          <img src="${esc(gifUrl(g.hash))}" loading="lazy" alt="" draggable="false">
+          <button class="gif-fav on" data-unfav="${g.hash}" title="Убрать из избранного">${ic('star', 18)}</button></div>`).join('')}</div>`
+        : `<div class="gp-empty">${ic('starOutline', 48)}<p>Здесь будут ваши гифки. Нажмите ☆ на любой гифке в чате или загрузите свою с компьютера.</p></div>`}</div>`;
+  });
+  draw();
+  document.body.append(el);
+  const r = btn.getBoundingClientRect();
+  el.style.right = Math.max(8, innerWidth - r.right - 8) + 'px';
+  el.style.bottom = innerHeight - r.top + 14 + 'px';
+  el.onclick = async (e) => {
+    const t = e.target as HTMLElement;
+    const un = t.closest<HTMLElement>('[data-unfav]');
+    if (un) {
+      try { S.gifs = await api('/api/gifs/unfav', { hash: un.dataset.unfav }); } catch (err) { toast((err as Error).message); }
+      syncGifStars();
+      return drawGifPicker?.();
+    }
+    if (t.closest('[data-g="up"]')) return $<HTMLInputElement>('input[type=file]', el).click();
+    const g = t.closest<HTMLElement>('.gp-g');
+    if (!g) return;
+    closeGifPicker();
+    try { await api('/api/gifs/send', { ...c.to, hash: g.dataset.h }); } catch (err) { toast((err as Error).message); }
+  };
+  el.onchange = async (e) => {
+    const inp = e.target as HTMLInputElement;
+    const files = [...(inp.files || [])];
+    busy += files.length;
+    drawGifPicker?.();
+    for (const f of files) { await uploadFavGif(f); busy--; drawGifPicker?.(); }
+  };
+  // с другого устройства могли что-то добавить
+  api('/api/gifs').then((list) => { S.gifs = list; drawGifPicker?.(); }, () => {});
+}
+
+// Ссылка на картинку (в том числе на страницу гифки GIPHY) — показываем саму картинку, как в Discord
+function imageLink(text: string) {
+  const t = text.trim();
+  const giphy = /^https?:\/\/(?:www\.)?giphy\.com\/gifs\/(?:[\w-]*-)?([a-zA-Z0-9]{8,})\/?$/.exec(t);
+  if (giphy) return `https://media.giphy.com/media/${giphy[1]}/giphy.gif`;
+  return /^https?:\/\/[^\s<>"']+\.(gif|png|jpe?g|webp)(\?[^\s<>"']*)?$/i.test(t) ? t : '';
 }
 
 function renderUpload(u: Upload) {
@@ -890,7 +1047,9 @@ function renderMessages() {
       prev = null;
       continue;
     }
-    const text = (m.text ? `<p${isJumbo(m.text) ? ' class="jumbo"' : ''}>${emojify(m.text)}</p>` : '') + (m.file ? renderAtt(m.file) : '');
+    const link = m.text ? imageLink(m.text) : '';
+    const text = link ? `<div class="att-media link"><img src="${esc(link)}" alt="${esc(m.text)}" title="${esc(m.text)}" referrerpolicy="no-referrer" draggable="false"></div>`
+      : (m.text ? `<p${isJumbo(m.text) ? ' class="jumbo"' : ''}>${emojify(m.text)}</p>` : '') + (m.file ? renderAtt(m.file) : '');
     // подряд идущие сообщения одного автора в пределах 7 минут — одной группой, как в Discord
     if (prev && prev.sender === m.sender && m.created - prev.created < 7 * 60e3 && sameDay(prev.created, m.created)) {
       html += `<div class="msg cont"><time>${new Date(m.created).toLocaleTimeString('ru', { hour: '2-digit', minute: '2-digit' })}</time>${text}</div>`;
@@ -1124,6 +1283,12 @@ document.addEventListener('mousedown', (e) => {
   const t = e.target as Node;
   const inside = [document.querySelector('.pop'), document.querySelector('.pop-sub'), popAnchor].some((x) => x?.contains(t));
   if (document.querySelector('.pop') && !inside) closePop();
+  const gp = document.querySelector('.gif-pop');
+  if (gp && !gp.contains(t) && !document.getElementById('gifbtn')?.contains(t)) closeGifPicker();
+  if (!document.querySelector('.t-menu')?.contains(t)) closeTileMenu();
+  // звуковую панель не закрываем, пока открыто окно добавления звука или выбор эмодзи
+  const sb = document.querySelector('.sb-pop');
+  if (sb && !sb.contains(t) && !(t as HTMLElement).closest?.('[data-act="sb"], .dlg-bg, .emo-pop')) closeSoundboard();
 }, true);
 
 const placeFor = (anchor: HTMLElement): Place => anchor.closest('.userbar') ? 'up' : anchor.closest('#profile, .tb-user') ? 'left' : 'right';
@@ -1552,6 +1717,10 @@ const C = {
   rejoins: 0,
   peerGone: 0,
   net: '', // статус связи в шапке звонка
+  focus: '', // развёрнутая плитка: 'u5' — участник, 's<sid>' — демонстрация, 'yt' — YouTube
+  strip: store.get('callStrip') !== '0', // под развёрнутой плиткой — ряд остальных
+  full: false, // «Скрыть чат»: звонок на всю высоту
+  height: Number(store.get('callH')) || 0, // высота панели звонка, перетаскивается (0 — как по умолчанию)
 };
 
 type Carry = { mic: boolean; tracks: { track: MediaStreamTrack; source: Track.Source }[] };
@@ -1592,6 +1761,8 @@ async function setMute(mute: boolean) {
 function setDeaf(deaf: boolean) {
   C.deaf = deaf;
   sfx(deaf ? 'deafen' : 'undeafen');
+  if (deaf) stopSounds();
+  watchDeaf(deaf);
   document.querySelectorAll<HTMLAudioElement>('#audio audio').forEach((a) => (a.muted = C.deaf));
   C.room?.localParticipant.setMicrophoneEnabled(!deaf && !C.selfMute).then(renderCall, () => {});
   renderCall();
@@ -1646,7 +1817,8 @@ async function reconnect(toRelay: boolean) {
   lp.getTrackPublication(Track.Source.Microphone)?.track?.stop();
   await old.disconnect(false).catch(() => {});
   $('#audio').innerHTML = '';
-  document.getElementById('stage')?.replaceChildren();
+  // плитки со старыми треками убираем; YouTube не трогаем — плеер продолжит играть
+  document.querySelectorAll('#stage .tile:not(.yt)').forEach((t) => t.remove());
   try {
     await joinRoom(carry);
   } catch (err) {
@@ -1693,8 +1865,13 @@ async function joinRoom(carry?: Carry, mode: 'auto' | 'all' = 'auto') {
     .on(RoomEvent.TrackMuted, renderPeople)
     .on(RoomEvent.TrackUnmuted, renderPeople)
     .on(RoomEvent.ActiveSpeakersChanged, renderPeople)
-    .on(RoomEvent.ParticipantConnected, () => {
+    .on(RoomEvent.DataReceived, (payload: Uint8Array, p?: RemoteParticipant, _kind?: unknown, topic?: string) => {
+      if (C.room === room && p) onData(topic, payload, p.identity);
+    })
+    .on(RoomEvent.ParticipantConnected, (p: RemoteParticipant) => {
       if (C.room === room) sfx('join');
+      // новичку — что смотрим на YouTube (чуть погодя: пусть успеет подключиться)
+      setTimeout(() => { if (C.room === room) watchJoined(p.identity); }, 1000);
       clearTimeout(C.peerGone);
       setNet('');
       setCallState('incall');
@@ -1910,6 +2087,13 @@ function hangup(notify: boolean) {
   C.peer = null;
   C.gid = 0;
   C.state = 'idle';
+  C.focus = '';
+  C.full = false;
+  watchReset();
+  closeSoundboard();
+  closeTileMenu();
+  stopSounds();
+  if (document.fullscreenElement?.closest('#call')) document.exitFullscreen().catch(() => {});
   room?.disconnect();
   $('#audio').innerHTML = '';
   renderCall();
@@ -1935,10 +2119,14 @@ async function toggleScreen() {
   renderCall();
 }
 
-// Панель звонка видна только в беседе, где идёт звонок
+// Панель звонка видна только в беседе, где идёт звонок; «Скрыть чат» растягивает её на всю высоту
 function syncCallBox() {
   const box = document.getElementById('call');
-  if (box) box.hidden = C.state === 'idle' || !callKey() || convKey() !== callKey();
+  if (!box) return;
+  box.hidden = C.state === 'idle' || !callKey() || convKey() !== callKey();
+  box.classList.toggle('full', C.full);
+  box.style.height = C.full || !C.height ? '' : C.height + 'px';
+  document.querySelector('.main')?.classList.toggle('callfull', C.full && !box.hidden);
 }
 
 function renderCall() {
@@ -1949,33 +2137,85 @@ function renderCall() {
   renderProfile();
   const box = document.getElementById('call');
   if (!box) return;
-  if (C.state === 'idle') { box.hidden = true; box.innerHTML = ''; return; }
+  if (C.state === 'idle') {
+    box.hidden = true;
+    box.innerHTML = '';
+    document.querySelector('.main')?.classList.remove('callfull');
+    return;
+  }
+  if (!document.getElementById('stage')) buildCall(box);
   syncCallBox();
   const lp = C.room?.localParticipant;
   const muted = C.selfMute || C.deaf;
   const scr = lp?.isScreenShareEnabled ?? false;
-  box.innerHTML = `
-    <div class="call-top">
-      <span class="cst">${C.state === 'calling' ? 'Вызов…' : 'Голосовой звонок'}</span>
-      ${C.relay || C.relayAuto || C.vpn ? `<span class="tag" title="${C.vpn ? 'VPN: ' + esc(C.vpn) : 'Нестабильный UDP'}">TCP-режим</span>` : ''}
-      <span id="netst">${esc(C.net)}</span>
+  $('#calltop').innerHTML = `
+    <span class="cst">${C.state === 'calling' ? 'Вызов…' : 'Голосовой звонок'}</span>
+    ${C.relay || C.relayAuto || C.vpn ? `<span class="tag" title="${C.vpn ? 'VPN: ' + esc(C.vpn) : 'Нестабильный UDP'}">TCP-режим</span>` : ''}
+    <span id="netst">${esc(C.net)}</span>`;
+  const fs = !!document.fullscreenElement;
+  $('#cctl').innerHTML = `
+    <button class="cbtn side" data-act="callfull" title="${C.full ? 'Показать чат' : 'Скрыть чат'}">${ic(C.full ? 'chevronUp' : 'chevronDown', 24)}</button>
+    <div class="cgroup">
+      <button class="cbtn ${muted ? 'off' : ''}" data-act="mic" title="${muted ? 'Включить микрофон' : 'Выключить микрофон'}">${ic(muted ? 'micOff' : 'mic')}</button>
+      <button class="cbtn ${C.deaf ? 'off' : ''}" data-act="deaf" title="${C.deaf ? 'Включить звук' : 'Отключить звук'}">${ic(C.deaf ? 'headsetOff' : 'headset')}</button>
     </div>
-    <div id="stage"></div>
-    <div id="people"></div>
-    <div class="controls">
-      <div class="cgroup">
-        <button class="cbtn ${muted ? 'off' : ''}" data-act="mic" title="${muted ? 'Включить микрофон' : 'Выключить микрофон'}">${ic(muted ? 'micOff' : 'mic')}</button>
-        <button class="cbtn ${C.deaf ? 'off' : ''}" data-act="deaf" title="${C.deaf ? 'Включить звук' : 'Отключить звук'}">${ic(C.deaf ? 'headsetOff' : 'headset')}</button>
-      </div>
-      <div class="cgroup">
-        <button class="cbtn ${scr ? 'on' : ''}" data-act="screen" title="${scr ? 'Остановить демонстрацию' : 'Демонстрация экрана'}">${ic('screen')}</button>
-        <button class="cbtn" data-act="settings" data-tab="voice" title="Настройки голоса и демонстрации">${ic('gear')}</button>
-      </div>
-      <button class="cbtn hang" data-act="hangup" title="Завершить звонок">${ic('hangup', 26)}</button>
+    <div class="cgroup">
+      <button class="cbtn ${scr ? 'on' : ''}" data-act="screen" title="${scr ? 'Остановить демонстрацию' : 'Демонстрация экрана'}">${ic('screen')}</button>
+      <button class="cbtn ${document.querySelector('.sb-pop') ? 'sel' : ''}" data-act="sb" title="Звуковая панель">${ic('soundboard')}</button>
+      <button class="cbtn ${watchOn() ? 'on' : ''}" data-act="yt" title="${watchOn() ? 'YouTube вместе — открыть' : 'Смотреть YouTube вместе'}">${ic('youtube')}</button>
+      <button class="cbtn" data-act="settings" data-tab="voice" title="Настройки голоса и демонстрации">${ic('gear')}</button>
+    </div>
+    <button class="cbtn hang" data-act="hangup" title="Завершить звонок">${ic('hangup', 26)}</button>
+    <div class="cside">
+      <button class="cbtn side" data-act="strip" title="${C.strip ? 'Скрыть участников' : 'Показать участников'}" ${C.focus ? '' : 'hidden'}>${ic(C.strip ? 'chevronDown' : 'chevronUp', 18)}${ic('friends', 18)}</button>
+      <button class="cbtn side" data-act="callfs" title="${fs ? 'Выйти из полноэкранного режима' : 'Во весь экран'}">${ic(fs ? 'fsExit' : 'fs', 24)}</button>
     </div>`;
   renderStage();
-  renderPeople();
 }
+
+// Каркас панели звонка создаём один раз за звонок: плитки (видео, плеер YouTube) не пересоздаются
+function buildCall(box: HTMLElement) {
+  box.innerHTML = `<div class="call-top" id="calltop"></div><div id="stage"></div><div class="controls" id="cctl"></div>
+    <div class="call-grip" title="Потяните, чтобы изменить высоту"></div>`;
+  const stage = $('#stage');
+  new ResizeObserver(layoutStage).observe(stage);
+  const tileOf = (e: Event) => {
+    const t = e.target as HTMLElement;
+    return t.closest('[data-act], .yt-bar, .yt-q, button, input') ? null : t.closest<HTMLElement>('.tile');
+  };
+  // щелчок — развернуть плитку (или свернуть обратно), двойной — во весь экран, правой кнопкой — меню
+  stage.onclick = (e) => { const t = tileOf(e); if (t) setFocus(C.focus === t.dataset.key ? '' : t.dataset.key!); };
+  stage.ondblclick = (e) => { const t = tileOf(e); if (t) toggleFullscreen(t); };
+  stage.oncontextmenu = (e) => {
+    const t = (e.target as HTMLElement).closest<HTMLElement>('.tile');
+    if (!t || (e.target as HTMLElement).closest('input')) return;
+    e.preventDefault();
+    openTileMenu(t, e.clientX, e.clientY);
+  };
+  const grip = $('.call-grip', box);
+  grip.onpointerdown = (e) => {
+    if (C.full) return;
+    grip.setPointerCapture(e.pointerId);
+    const y0 = e.clientY, h0 = box.offsetHeight;
+    const max = (box.parentElement?.clientHeight ?? innerHeight) - 160;
+    grip.onpointermove = (m) => {
+      C.height = Math.round(Math.max(200, Math.min(max, h0 + m.clientY - y0)));
+      box.style.height = C.height + 'px';
+    };
+    grip.onpointerup = () => { grip.onpointermove = null; store.set('callH', String(C.height)); };
+  };
+}
+
+function setFocus(key: string) {
+  C.focus = key;
+  renderCall();
+}
+
+function toggleFullscreen(el: HTMLElement) {
+  if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
+  else el.requestFullscreen().catch(() => toast('Не удалось развернуть на весь экран'));
+}
+document.addEventListener('fullscreenchange', () => { if (C.state !== 'idle') renderCall(); });
 
 // Плашка «Голос подключён» над панелью пользователя
 function renderVoicebar() {
@@ -1995,69 +2235,562 @@ function renderVoicebar() {
     </div>
     <div class="vb-btns">
       <button class="vbtn ${scr ? 'on' : ''}" data-act="screen" title="${scr ? 'Остановить демонстрацию' : 'Демонстрация экрана'}">${ic('screen')}</button>
+      <button class="vbtn" data-act="sb" title="Звуковая панель">${ic('soundboard')}</button>
+      <button class="vbtn ${watchOn() ? 'on' : ''}" data-act="yt" title="Смотреть YouTube вместе">${ic('youtube')}</button>
       <button class="vbtn" data-act="settings" data-tab="voice" title="Настройки голоса">${ic('gear')}</button>
     </div>`;
 }
 
-// Видео-плитки (демонстрации экрана), элементы переиспользуем, чтобы не мигало
+// Громкость участника (голос) и его демонстрации — своя у каждого слушателя, 0..1
+const volKey = (id: string, stream: boolean) => (stream ? 'svol:' : 'uvol:') + id;
+const userVol = (id: string, stream = false) => Number(store.get(volKey(id, stream)) ?? 1);
+function applyVolumes() {
+  document.querySelectorAll<HTMLAudioElement>('#audio audio').forEach((a) => (a.volume = C.vol * userVol(a.dataset.uid!, a.dataset.src === 'stream')));
+}
+
 // Ровно один <audio> на каждый подписанный удалённый аудиотрек; после переподключений лишние убираем
 function syncAudio(room: Room) {
   if (C.room !== room) return;
   const box = $('#audio');
-  const live = new Map<string, RemoteTrack>();
+  const live = new Map<string, [RemoteTrack, string, boolean]>();
   for (const p of room.remoteParticipants.values())
     for (const pub of p.audioTrackPublications.values())
-      if (pub.track && pub.isSubscribed) live.set(pub.trackSid, pub.track as RemoteTrack);
+      if (pub.track && pub.isSubscribed) live.set(pub.trackSid, [pub.track as RemoteTrack, p.identity, pub.source === Track.Source.ScreenShareAudio]);
   box.querySelectorAll<HTMLAudioElement>('audio').forEach((el) => { if (!live.has(el.dataset.tsid!)) { el.srcObject = null; el.remove(); } });
-  for (const [sid, track] of live) {
+  for (const [sid, [track, uid, stream]] of live) {
     if (box.querySelector(`[data-tsid="${sid}"]`)) continue;
     const el = track.attach() as HTMLAudioElement;
     el.dataset.tsid = sid;
+    el.dataset.uid = uid;
+    el.dataset.src = stream ? 'stream' : 'voice';
     el.muted = C.deaf;
-    el.volume = C.vol;
+    el.volume = C.vol * userVol(uid, stream);
     box.appendChild(el);
   }
 }
 
-function renderStage() {
-  const stage = document.getElementById('stage');
+// ---------- плитки звонка: участники, демонстрации, YouTube ----------
+type TileSpec = { key: string; kind: 'user' | 'stream' | 'yt'; p?: Participant; u?: User; pub?: TrackPublication; wait?: boolean };
+const userOf = (p: Participant): User => userById(Number(p.identity)) ?? { id: Number(p.identity), username: p.name || p.identity };
+
+function stageTiles(): TileSpec[] {
   const room = C.room;
-  if (!stage || !room) return;
-  const pubs: [Participant, TrackPublication][] = [];
-  for (const p of [room.localParticipant, ...room.remoteParticipants.values()])
-    for (const pub of p.videoTrackPublications.values()) if (pub.track) pubs.push([p, pub]);
-  const keep = new Set(pubs.map(([, pub]) => pub.trackSid));
-  stage.querySelectorAll<HTMLElement>('.tile').forEach((t) => { if (!keep.has(t.dataset.sid!)) t.remove(); });
-  for (const [p, pub] of pubs) {
-    if (stage.querySelector(`[data-sid="${pub.trackSid}"]`)) continue;
-    const tile = document.createElement('div');
-    tile.className = 'tile';
-    tile.dataset.sid = pub.trackSid;
-    const v = pub.track!.attach() as HTMLVideoElement;
-    v.muted = true;
-    tile.append(v, Object.assign(document.createElement('span'), { textContent: p.name || p.identity }));
-    tile.ondblclick = () => (document.fullscreenElement ? document.exitFullscreen() : tile.requestFullscreen());
-    stage.append(tile);
-  }
-  stage.hidden = pubs.length === 0;
+  const out: TileSpec[] = [];
+  if (watchOn()) out.push({ key: 'yt', kind: 'yt' });
+  const parts = room ? [room.localParticipant, ...room.remoteParticipants.values()] : [];
+  // демонстрации — и те, которые мы перестали смотреть (на плитке кнопка «Смотреть»)
+  for (const p of parts)
+    for (const pub of p.videoTrackPublications.values())
+      if (pub.source === Track.Source.ScreenShare && (pub.track || p !== room!.localParticipant)) out.push({ key: 's' + pub.trackSid, kind: 'stream', p, pub });
+  for (const p of parts) out.push({ key: 'u' + p.identity, kind: 'user', p, u: userOf(p) });
+  // пока комната подключается — своя плитка; собеседник ещё не ответил — его плитка с пульсацией
+  if (!room && S.me) out.push({ key: 'u' + S.me.id, kind: 'user', u: S.me });
+  if (C.peer && !room?.remoteParticipants.size) out.push({ key: 'u' + C.peer.id, kind: 'user', u: C.peer, wait: true });
+  return out;
 }
 
-// Круглые аватарки участников: зелёная обводка — говорит, красный значок — без микрофона
-function renderPeople() {
-  const box = document.getElementById('people');
-  if (!box) return;
+function renderStage() {
+  const stage = document.getElementById('stage');
+  if (!stage) return;
+  const specs = stageTiles();
+  const have = new Map([...stage.children].map((el) => [(el as HTMLElement).dataset.key!, el as HTMLElement]));
+  const keys = new Set(specs.map((s) => s.key));
+  for (const [k, el] of have) if (!keys.has(k)) { el.querySelectorAll('video').forEach((v) => (v.srcObject = null)); el.remove(); have.delete(k); }
+  specs.forEach((s, i) => {
+    let el = have.get(s.key);
+    if (!el) {
+      el = document.createElement('div');
+      el.className = 'tile ' + s.kind;
+      el.dataset.key = s.key;
+      stage.append(el);
+      if (s.kind === 'yt') watchMount(el);
+      if (s.kind === 'stream') {
+        el.innerHTML = '<div class="t-vid"></div><div class="t-label"></div><div class="t-tools"></div>';
+        // чужую демонстрацию, как в Discord, сразу разворачиваем
+        if (!C.focus && s.p !== C.room?.localParticipant) C.focus = s.key;
+      }
+    }
+    // порядок для раскладки: YouTube, демонстрации, участники. Сами элементы не переставляем —
+    // перенос в DOM перезагрузил бы плеер YouTube
+    el.dataset.ord = String(i);
+    if (s.kind === 'user') drawUserTile(el, s);
+    if (s.kind === 'stream') drawStreamTile(el, s);
+  });
+  if (C.focus && !keys.has(C.focus)) C.focus = '';
+  const strip = document.querySelector<HTMLElement>('[data-act="strip"]');
+  if (strip) strip.hidden = !C.focus;
+  layoutStage();
+}
+
+function drawUserTile(el: HTMLElement, s: TileSpec) {
+  const u = s.u!;
+  const muted = s.p ? !s.p.isMicrophoneEnabled : false;
+  // перерисовываем, только если что-то поменялось: иначе гифка-аватарка начинала бы сначала
+  const sig = [u.avatar, uname(u), u.banner, u.bcolor, muted, s.wait].join('|');
+  if (el.dataset.sig !== sig) {
+    el.dataset.sig = sig;
+    el.innerHTML = `<div class="t-bg" style="${bannerStyle(u)}"></div><div class="t-av">${avatar(u, 80)}</div>
+      <div class="t-label">${muted ? `<span class="t-mute">${ic('micOff', 14)}</span>` : ''}<span>${esc(uname(u))}</span></div>`;
+  }
+  el.classList.toggle('speak', !!s.p?.isSpeaking);
+  el.classList.toggle('wait', !!s.wait);
+}
+
+function drawStreamTile(el: HTMLElement, s: TileSpec) {
+  const p = s.p!, pub = s.pub!;
+  const mine = p === C.room?.localParticipant;
+  const vid = $('.t-vid', el);
+  const track = pub.track;
+  const shown = vid.querySelector('video') as (HTMLVideoElement & { lkTrack?: unknown }) | null;
+  if (track && shown?.lkTrack !== track) {
+    const v = Object.assign(track.attach() as HTMLVideoElement, { lkTrack: track });
+    v.muted = true;
+    vid.replaceChildren(v);
+  } else if (!track && !vid.querySelector('.t-ph')) {
+    shown && (shown.srcObject = null);
+    vid.innerHTML = `<div class="t-ph"><span>${esc(uname(userOf(p)))} показывает экран</span>
+      <button class="btn" data-act="twatch" data-key="${s.key}" data-on="1">Смотреть демонстрацию</button></div>`;
+  }
+  const dim = pub.dimensions;
+  const q = mine ? `${QUALITY[C.quality].h}p ${QUALITY[C.quality].fps} FPS` : dim?.height ? `${dim.height}p` : '';
+  const sig = [uname(userOf(p)), q, !!track, s.key === C.focus].join('|');
+  if (el.dataset.sig === sig) return;
+  el.dataset.sig = sig;
+  $('.t-label', el).innerHTML = `${ic('screen', 16)}<span>${mine ? 'Ваша демонстрация' : esc(uname(userOf(p)))}</span>`;
+  $('.t-tools', el).innerHTML = `${q && track ? `<span class="t-q">${q}</span>` : ''}<span class="t-live">В ЭФИРЕ</span>
+    ${track ? `<button class="t-btn" data-act="tpip" data-key="${s.key}" title="Поверх всех окон">${ic('pip', 18)}</button>
+    <button class="t-btn" data-act="tfs" data-key="${s.key}" title="Во весь экран">${ic('fs', 18)}</button>` : ''}
+    <button class="t-btn" data-act="tmenu" data-key="${s.key}" title="Ещё">${ic('more', 18)}</button>`;
+}
+
+// Раскладка плиток: обычная — сетка 16:9 по центру; развёрнутая — большая плитка и ряд остальных снизу
+function layoutStage() {
+  const stage = document.getElementById('stage');
+  if (!stage) return;
+  const tiles = ([...stage.children] as HTMLElement[]).sort((a, b) => Number(a.dataset.ord) - Number(b.dataset.ord));
+  const W = stage.clientWidth, H = stage.clientHeight, gap = 8;
+  if (!W || !H || !tiles.length) return;
+  const place = (t: HTMLElement, x: number, y: number, w: number, h: number) => {
+    t.classList.remove('off');
+    Object.assign(t.style, { left: x + 'px', top: y + 'px', width: Math.max(0, w) + 'px', height: Math.max(0, h) + 'px' });
+  };
+  const focus = tiles.find((t) => t.dataset.key === C.focus);
+  stage.classList.toggle('focused', !!focus);
+  tiles.forEach((t) => t.classList.toggle('big', t === focus));
+  if (focus) {
+    const rest = tiles.filter((t) => t !== focus);
+    const sh = C.strip && rest.length ? Math.round(Math.min(150, Math.max(80, H * 0.2))) : 0;
+    place(focus, 0, 0, W, H - (sh ? sh + gap : 0));
+    const tw = Math.min((sh * 16) / 9, (W - gap * (rest.length - 1)) / rest.length);
+    let x = (W - (tw * rest.length + gap * (rest.length - 1))) / 2;
+    for (const t of rest) {
+      if (!sh) { t.classList.add('off'); continue; }
+      place(t, x, H - sh, tw, sh);
+      x += tw + gap;
+    }
+    return;
+  }
+  const n = tiles.length;
+  let cols = 1, w = 0;
+  for (let c = 1; c <= n; c++) {
+    const rows = Math.ceil(n / c);
+    const cw = Math.min((W - gap * (c - 1)) / c, ((H - gap * (rows - 1)) / rows) * 16 / 9);
+    if (cw > w) { w = cw; cols = c; }
+  }
+  const h = (w * 9) / 16, rows = Math.ceil(n / cols);
+  const y0 = (H - (rows * h + (rows - 1) * gap)) / 2;
+  tiles.forEach((t, i) => {
+    const r = Math.floor(i / cols), inRow = Math.min(cols, n - r * cols);
+    const x0 = (W - (inRow * w + (inRow - 1) * gap)) / 2;
+    place(t, x0 + (i % cols) * (w + gap), y0 + r * (h + gap), w, h);
+  });
+}
+
+// события микрофона и «кто говорит» перерисовывают плитки
+function renderPeople() { renderStage(); }
+
+// Смотреть / не смотреть чужую демонстрацию (с её звуком)
+function setWatching(key: string, on: boolean) {
+  const sid = key.slice(1);
+  for (const p of C.room?.remoteParticipants.values() ?? []) {
+    if (![...p.videoTrackPublications.values()].some((x) => x.trackSid === sid)) continue;
+    for (const pub of p.trackPublications.values())
+      if (pub.source === Track.Source.ScreenShare || pub.source === Track.Source.ScreenShareAudio) (pub as RemoteTrackPublication).setSubscribed(on);
+  }
+  setTimeout(renderStage, 50);
+}
+
+const tileEl = (key: string) => [...(document.getElementById('stage')?.children ?? [])].find((t) => (t as HTMLElement).dataset.key === key) as HTMLElement | undefined;
+
+async function tilePip(key: string) {
+  const v = tileEl(key)?.querySelector('video');
+  if (!v) return;
+  try {
+    if (document.pictureInPictureElement === v) await document.exitPictureInPicture();
+    else await v.requestPictureInPicture();
+  } catch { toast('Окно поверх других не открылось'); }
+}
+
+// Меню плитки (правая кнопка или «…»): громкость, смотреть ли демонстрацию, развернуть, профиль
+function closeTileMenu() { document.querySelector('.t-menu')?.remove(); }
+function openTileMenu(tile: HTMLElement, x: number, y: number) {
+  closeTileMenu();
+  const key = tile.dataset.key!;
   const room = C.room;
-  const parts = room ? [room.localParticipant, ...room.remoteParticipants.values()] : [];
-  // пока комната подключается — своя аватарка без индикаторов
-  let html = !room && S.me ? `<div class="pp">${avatar(S.me, 80)}</div>` : '';
-  html += parts.map((p) => {
-    const u = userById(Number(p.identity)) ?? { id: Number(p.identity), username: p.name || p.identity };
-    return `<div class="pp ${p.isSpeaking ? 'speak' : ''}" title="${esc(uname(u))}" data-act="user" data-id="${u.id}">${avatar(u, 80)}${
-      p.isMicrophoneEnabled ? '' : `<span class="pp-mute">${ic('micOff', 14)}</span>`}</div>`;
+  const el = document.createElement('div');
+  el.className = 't-menu';
+  const item = (act: string, icon: keyof typeof ICON, text: string, extra = '') => `<button data-m="${act}" ${extra}>${ic(icon, 18)}<span>${text}</span></button>`;
+  let html = '';
+  let volId = '', volStream = false;
+  if (key[0] === 'u') {
+    const id = key.slice(1);
+    if (id !== String(S.me?.id)) { volId = id; html += item('profile', 'account', 'Профиль'); }
+  } else if (key[0] === 's') {
+    const p = [...(room?.remoteParticipants.values() ?? [])].find((x) => [...x.videoTrackPublications.values()].some((v) => 's' + v.trackSid === key));
+    if (p) {
+      volId = p.identity;
+      volStream = true;
+      const on = [...p.videoTrackPublications.values()].some((v) => 's' + v.trackSid === key && v.isSubscribed);
+      html += item('watch', on ? 'eyeOff' : 'eye', on ? 'Перестать смотреть' : 'Смотреть демонстрацию', `data-on="${on ? '' : '1'}"`);
+      if (on) html += item('pip', 'pip', 'Поверх всех окон');
+    }
+  }
+  html += item('focus', C.focus === key ? 'fsExit' : 'fs', C.focus === key ? 'Свернуть' : 'Развернуть') + item('fs', 'fs', 'Во весь экран');
+  if (volId) html = `<label class="tm-vol"><span>${volStream ? 'Громкость демонстрации' : 'Громкость пользователя'}<b></b></span>
+    <input type="range" min="0" max="100" value="${Math.round(userVol(volId, volStream) * 100)}"></label><div class="pm-sep"></div>` + html;
+  el.innerHTML = html;
+  (document.fullscreenElement ?? document.body).append(el);
+  el.style.left = Math.max(8, Math.min(x, innerWidth - el.offsetWidth - 8)) + 'px';
+  el.style.top = Math.max(8, Math.min(y, innerHeight - el.offsetHeight - 8)) + 'px';
+  const range = el.querySelector<HTMLInputElement>('input');
+  if (range) {
+    const show = () => ($('.tm-vol b', el).textContent = range.value + '%');
+    show();
+    range.oninput = () => { store.set(volKey(volId, volStream), String(Number(range.value) / 100)); applyVolumes(); show(); };
+  }
+  el.onclick = (e) => {
+    const b = (e.target as HTMLElement).closest<HTMLElement>('[data-m]');
+    if (!b) return;
+    closeTileMenu();
+    switch (b.dataset.m) {
+      case 'profile': { const t = tileEl(key); if (t) openUserPop(Number(key.slice(1)), t); return; }
+      case 'watch': return setWatching(key, !!b.dataset.on);
+      case 'pip': return void tilePip(key);
+      case 'focus': return setFocus(C.focus === key ? '' : key);
+      case 'fs': { const t = tileEl(key); if (t) toggleFullscreen(t); return; }
+    }
+  };
+}
+
+// Эмодзи звука из звуковой панели всплывает над плиткой того, кто его включил
+function tileEmoji(identity: string, emoji: string) {
+  const t = tileEl('u' + identity);
+  if (!t || !emoji) return;
+  const e = document.createElement('span');
+  e.className = 't-emo';
+  e.innerHTML = emojify(emoji);
+  t.append(e);
+  setTimeout(() => e.remove(), 2500);
+}
+
+// ---------- данные звонка: звуковая панель и YouTube через LiveKit ----------
+function sendData(topic: string, m: object, to?: string[]) {
+  C.room?.localParticipant.publishData(new TextEncoder().encode(JSON.stringify(m)), { reliable: true, topic, destinationIdentities: to }).catch(() => {});
+}
+function onData(topic: string | undefined, payload: Uint8Array, from: string) {
+  let m: any;
+  try { m = JSON.parse(new TextDecoder().decode(payload)); } catch { return; }
+  if (!m || typeof m !== 'object') return;
+  if (topic === 'sb') return onSound(from, m);
+  if (topic === 'yt') return watchOnData(m);
+}
+
+initWatch({
+  me: () => C.room?.localParticipant.identity ?? String(S.me?.id ?? ''),
+  leader: (except) => {
+    const room = C.room;
+    if (!room) return true;
+    const ids = [room.localParticipant.identity, ...[...room.remoteParticipants.values()].map((p) => p.identity)].filter((i) => i !== except).map(Number);
+    return Number(room.localParticipant.identity) === Math.min(...ids);
+  },
+  send: (m, to) => sendData('yt', m, to),
+  myName: () => S.me ? uname(S.me) : '',
+  info: async (id) => (await api('/api/yt/info?v=' + id, undefined, 8000)).title || '',
+  toast,
+  ic: (n, s) => ic(n as keyof typeof ICON, s),
+  esc,
+  changed: () => {
+    if (watchOn() && !C.focus) C.focus = 'yt';
+    renderCall();
+  },
+});
+
+function startWatch() {
+  if (!C.room) return toast('YouTube вместе работает в звонке');
+  if (watchOn()) {
+    if (convKey() !== callKey()) C.gid ? openGroup(C.gid) : C.peer && openChat(C.peer);
+    return setFocus('yt');
+  }
+  if (convKey() !== callKey()) C.gid ? openGroup(C.gid) : C.peer && openChat(C.peer);
+  watchStart();
+}
+
+// ---------- звуковая панель ----------
+const SB = {
+  lists: new Map<number, SbSound[]>(), // свои звуки и звуки участников звонка, по id пользователя
+  fav: new Set<string>((() => { try { return JSON.parse(store.get('sbFav') || '[]'); } catch { return []; } })()),
+  used: (() => { try { return JSON.parse(store.get('sbUsed') || '{}'); } catch { return {}; } })() as Record<string, number>,
+  last: 0, // когда сами включали звук (не чаще раза в 0.6 с)
+  recent: new Map<string, number[]>(), // кто сколько звуков включал недавно — от спама
+  filter: '',
+};
+const sbAll = () => [...BUILTIN, ...[...SB.lists.values()].flat()];
+const toSb = (x: { id: number; uid: number; name: string; emoji: string; file: string; vol: number }): SbSound =>
+  ({ id: 'f:' + x.id, uid: x.uid, name: x.name, emoji: x.emoji || '🔊', file: x.file, vol: x.vol });
+
+async function loadSounds() {
+  const ids = [S.me!.id, ...[...(C.room?.remoteParticipants.values() ?? [])].map((p) => Number(p.identity))];
+  try {
+    const list: Parameters<typeof toSb>[0][] = await api('/api/sounds?users=' + ids.join(','), undefined, 8000);
+    SB.lists = new Map(ids.map((id) => [id, list.filter((x) => x.uid === id).map(toSb)]));
+    for (const s of sbAll()) preload(S.server, s);
+  } catch {}
+}
+
+function sbPlay(s: SbSound) {
+  if (!C.room) return toast('Звуковая панель работает в звонке');
+  if (C.deaf) return toast('Включите звук, чтобы пользоваться звуковой панелью');
+  if (Date.now() - SB.last < 600) return;
+  SB.last = Date.now();
+  const m = { id: s.id, file: s.file, vol: s.vol, emoji: s.emoji };
+  sendData('sb', m);
+  onSound(C.room.localParticipant.identity, m);
+  SB.used[s.id] = (SB.used[s.id] || 0) + 1;
+  store.set('sbUsed', JSON.stringify(SB.used));
+}
+
+function onSound(from: string, m: { id?: unknown; file?: unknown; vol?: unknown; emoji?: unknown }) {
+  if (typeof m.id !== 'string') return;
+  const now = Date.now();
+  const times = (SB.recent.get(from) ?? []).filter((t) => now - t < 3000);
+  if (times.length >= 4) return; // не больше 4 звуков за 3 секунды от одного человека
+  times.push(now);
+  SB.recent.set(from, times);
+  tileEmoji(from, String(m.emoji ?? '').slice(0, 16));
+  if (!C.deaf) playSound(S.server, { id: m.id, file: typeof m.file === 'string' ? m.file : undefined, vol: Number(m.vol ?? 1) }).catch(() => {});
+}
+
+function closeSoundboard() {
+  document.querySelector('.sb-pop')?.remove();
+  preview(null);
+  document.querySelectorAll('[data-act="sb"]').forEach((b) => b.classList.remove('sel'));
+}
+async function openSoundboard(anchor: HTMLElement) {
+  if (document.querySelector('.sb-pop')) return closeSoundboard();
+  if (!C.room) return toast('Звуковая панель работает в звонке');
+  const el = document.createElement('div');
+  el.className = 'sb-pop';
+  el.innerHTML = `
+    <div class="sb-top"><div class="sb-find">${ic('search', 18)}<input placeholder="Найдите подходящий звук" spellcheck="false" value="${esc(SB.filter)}"></div>
+      <label class="sb-vol" title="Громкость звуковой панели (только у вас)">${ic('volume', 20)}<input type="range" min="0" max="100" value="${Math.round(sbVol * 100)}"></label></div>
+    <div class="sb-mid"><nav class="sb-nav"></nav><div class="sb-list"></div></div>`;
+  // в полноэкранном режиме видно только развёрнутый элемент — панель кладём в него
+  (document.fullscreenElement ?? document.body).append(el);
+  anchor.classList.add('sel');
+  // над кнопкой, а если сверху мало места — под ней
+  const r = anchor.getBoundingClientRect();
+  el.style.left = Math.max(8, Math.min(r.left + r.width / 2 - el.offsetWidth / 2, innerWidth - el.offsetWidth - 8)) + 'px';
+  const above = r.top - 18, below = innerHeight - r.bottom - 18;
+  if (above >= 300 || above >= below) { el.style.bottom = innerHeight - r.top + 10 + 'px'; el.style.maxHeight = above + 'px'; }
+  else { el.style.top = r.bottom + 10 + 'px'; el.style.maxHeight = below + 'px'; }
+  const find = $<HTMLInputElement>('.sb-find input', el);
+  find.focus();
+  find.oninput = () => { SB.filter = find.value.trim().toLowerCase(); drawSoundboard(); };
+  $<HTMLInputElement>('.sb-vol input', el).oninput = (e) => setSbVol(Number((e.target as HTMLInputElement).value) / 100);
+  el.onclick = (e) => {
+    const t = e.target as HTMLElement;
+    const nav = t.closest<HTMLElement>('.sb-nav [data-sec]');
+    if (nav) {
+      const sec = el.querySelector<HTMLElement>(`.sb-sec[data-sec="${nav.dataset.sec}"]`);
+      return sec && $('.sb-list', el).scrollTo({ top: sec.offsetTop, behavior: 'smooth' });
+    }
+    if (t.closest('[data-sbadd]')) return soundDlg();
+    const id = t.closest<HTMLElement>('[data-sid]')?.dataset.sid;
+    const s = id ? sbAll().find((x) => x.id === id) : undefined;
+    if (!s) return;
+    if (t.closest('.sb-star')) {
+      if (SB.fav.has(s.id)) SB.fav.delete(s.id); else SB.fav.add(s.id);
+      store.set('sbFav', JSON.stringify([...SB.fav]));
+      return drawSoundboard();
+    }
+    if (t.closest('.sb-edit')) return soundDlg(s);
+    if (t.closest('.sb-prev')) return void playSound(S.server, s).catch(() => toast('Не удалось проиграть звук'));
+    sbPlay(s);
+  };
+  drawSoundboard();
+  await loadSounds();
+  drawSoundboard();
+}
+
+function drawSoundboard() {
+  const el = document.querySelector<HTMLElement>('.sb-pop');
+  if (!el || !S.me) return;
+  const f = SB.filter;
+  const match = (s: SbSound) => !f || s.name.toLowerCase().includes(f);
+  const all = sbAll();
+  const btn = (s: SbSound) => `
+    <div class="sb-s" data-sid="${s.id}" title="${esc(s.name)}"><span class="emo">${emojify(s.emoji)}</span><span class="sb-n">${esc(s.name)}</span>
+      <span class="sb-acts"><button class="sb-prev" title="Прослушать (только у вас)">${ic('play', 14)}</button>
+      ${s.uid === S.me!.id ? `<button class="sb-edit" title="Изменить">${ic('edit', 14)}</button>` : ''}
+      <button class="sb-star ${SB.fav.has(s.id) ? 'on' : ''}" title="${SB.fav.has(s.id) ? 'Убрать из избранного' : 'В избранное'}">${ic(SB.fav.has(s.id) ? 'star' : 'starOutline', 14)}</button></span></div>`;
+  const secs: { key: string; nav: string; title: string; list: SbSound[]; add?: boolean }[] = [];
+  const favs = all.filter((s) => SB.fav.has(s.id));
+  if (favs.length) secs.push({ key: 'fav', nav: ic('star', 22), title: 'Избранное', list: favs });
+  const used = all.filter((s) => SB.used[s.id]).sort((a, b) => SB.used[b.id] - SB.used[a.id]).slice(0, 6);
+  if (used.length && !f) secs.push({ key: 'used', nav: ic('clock', 22), title: 'Часто используемые', list: used });
+  secs.push({ key: 'st', nav: ic('logo', 22), title: 'Звуки Startrack', list: BUILTIN });
+  secs.push({ key: 'me', nav: avatar(S.me, 28), title: 'Мои звуки', list: SB.lists.get(S.me.id) ?? [], add: true });
+  for (const [uid, list] of SB.lists) {
+    if (uid === S.me.id || !list.length) continue;
+    const u = userById(uid) ?? { id: uid, username: list[0].name };
+    secs.push({ key: 'u' + uid, nav: avatar(u, 28), title: 'Звуки ' + uname(u), list });
+  }
+  $('.sb-nav', el).innerHTML = secs.map((s) => `<button data-sec="${s.key}" title="${esc(s.title)}">${s.nav}</button>`).join('');
+  const html = secs.map((s) => {
+    const list = s.list.filter(match);
+    if (!list.length && !(s.add && !f)) return '';
+    return `<div class="sb-sec" data-sec="${s.key}"><h5>${esc(s.title)}</h5><div class="sb-grid">${list.map(btn).join('')}${
+      s.add && !f ? `<button class="sb-s add" data-sbadd>${ic('plus', 18)}<span class="sb-n">Добавить звук</span></button>` : ''}</div></div>`;
   }).join('');
-  // собеседник ещё не подключился — показываем его аватарку с пульсацией
-  if (C.peer && !room?.remoteParticipants.size) html += `<div class="pp wait" title="${esc(uname(C.peer))}">${avatar(C.peer, 80)}</div>`;
-  box.innerHTML = html;
+  $('.sb-list', el).innerHTML = html || '<div class="sb-none">Ничего не нашлось</div>';
+}
+
+// Добавление своего звука (или изменение: edit). Длинный файл обрезаем до 5 секунд — кусок выбирается на волне
+function soundDlg(edit?: SbSound) {
+  if (document.fullscreenElement) document.exitFullscreen().catch(() => {}); // окна не видно поверх полного экрана
+  let buf: AudioBuffer | null = null;
+  let start = 0;
+  let emoji = edit?.emoji || '🔊';
+  const bg = showDlg('sound', `
+    <h3>${edit ? 'Изменить звук' : 'Добавить звук'}</h3>
+    ${edit ? '' : `<p>Звук услышат все в звонке. Подойдёт MP3, WAV, OGG и другие — длиннее ${SB_MAX_SEC} с обрежем.</p>
+    <div class="row"><button class="btn sec" data-r="file">${ic('upload', 18)}Выбрать файл…</button><span class="sd-file"></span></div>
+    <input type="file" accept="audio/*" hidden>
+    <div class="sd-wave" hidden><canvas></canvas><div class="sd-sel"></div></div>
+    <div class="sd-cut" hidden><span>Начало</span><input type="range" min="0" step="0.01" value="0"><b></b></div>`}
+    <div class="sd-row">
+      <button type="button" class="sd-emo" title="Эмодзи"><span class="emo">${emojify(emoji)}</span></button>
+      <label class="fld grow"><span>Название</span><input class="sd-name" maxlength="32" spellcheck="false" value="${esc(edit?.name ?? '')}"></label>
+    </div>
+    <label class="fld"><span>Громкость</span><input type="range" class="sd-vol" min="0" max="100" value="${Math.round((edit?.vol ?? 1) * 100)}"></label>
+    <div class="dlg-btns">${edit ? '<button class="btn lnk sd-del" data-r="del">Удалить</button><span class="grow"></span>' : ''}
+      <button class="btn sec" data-r="prev">${ic('play', 18)}Прослушать</button><button class="btn sec" data-r="0">Отмена</button>
+      <button class="btn" data-r="1" ${edit ? '' : 'disabled'}>${edit ? 'Сохранить' : 'Загрузить'}</button></div>`);
+  const nameEl = $<HTMLInputElement>('.sd-name', bg);
+  const volEl = $<HTMLInputElement>('.sd-vol', bg);
+  const ok = $<HTMLButtonElement>('[data-r="1"]', bg);
+  const emoBtn = $('.sd-emo', bg);
+  emoBtn.onclick = () => openEmojiPicker(emoBtn, (u) => { emoji = u; emoBtn.innerHTML = `<span class="emo">${emojify(u)}</span>`; });
+  const len = () => buf ? Math.min(SB_MAX_SEC, buf.duration - start) : 0;
+  const drawWave = () => {
+    const wave = bg.querySelector<HTMLElement>('.sd-wave');
+    if (!wave || !buf) return;
+    const cv = $<HTMLCanvasElement>('canvas', wave);
+    const w = wave.clientWidth, h = 64, dpr = devicePixelRatio || 1;
+    cv.width = w * dpr;
+    cv.height = h * dpr;
+    const ctx = cv.getContext('2d')!;
+    ctx.scale(dpr, dpr);
+    const data = buf.getChannelData(0);
+    const per = Math.max(1, Math.floor(data.length / w));
+    ctx.fillStyle = '#b5bac1';
+    for (let x = 0; x < w; x++) {
+      let peak = 0;
+      for (let i = x * per; i < (x + 1) * per && i < data.length; i += 4) peak = Math.max(peak, Math.abs(data[i]));
+      const bh = Math.max(1, peak * h);
+      ctx.fillRect(x, (h - bh) / 2, 1, bh);
+    }
+    const sel = $('.sd-sel', wave);
+    sel.style.left = (start / buf.duration) * 100 + '%';
+    sel.style.width = (len() / buf.duration) * 100 + '%';
+    const cut = bg.querySelector<HTMLElement>('.sd-cut b');
+    if (cut) cut.textContent = `${start.toFixed(1)}–${(start + len()).toFixed(1)} с`;
+  };
+  if (!edit) {
+    const file = $<HTMLInputElement>('input[type=file]', bg);
+    const cut = $<HTMLInputElement>('.sd-cut input', bg);
+    $('[data-r="file"]', bg).onclick = () => file.click();
+    file.onchange = async () => {
+      const f = file.files?.[0];
+      file.value = '';
+      if (!f) return;
+      if (f.size > 100e6) return toast('Файл больше 100 МБ');
+      $('.sd-file', bg).textContent = 'Открываю…';
+      try { buf = await decodeFile(f); } catch { buf = null; }
+      if (!bg.isConnected) return;
+      if (!buf) { $('.sd-file', bg).textContent = ''; ok.disabled = true; return toast('Не удалось открыть звук — выберите другой файл'); }
+      $('.sd-file', bg).textContent = `${f.name} • ${buf.duration.toFixed(1)} с`;
+      if (!nameEl.value) nameEl.value = f.name.replace(/\.[^.]+$/, '').slice(0, 32);
+      start = 0;
+      $('.sd-wave', bg).hidden = false;
+      $('.sd-cut', bg).hidden = buf.duration <= SB_MAX_SEC;
+      cut.max = String(Math.max(0, buf.duration - SB_MAX_SEC));
+      cut.value = '0';
+      ok.disabled = false;
+      drawWave();
+    };
+    cut.oninput = () => { start = Number(cut.value); drawWave(); };
+    // щелчок по волне — начало куска с этого места
+    $('.sd-wave', bg).onclick = (e) => {
+      if (!buf || buf.duration <= SB_MAX_SEC) return;
+      const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
+      start = Math.max(0, Math.min(buf.duration - SB_MAX_SEC, ((e.clientX - r.left) / r.width) * buf.duration - SB_MAX_SEC / 2));
+      cut.value = String(start);
+      drawWave();
+    };
+  }
+  $('[data-r="prev"]', bg).onclick = () => {
+    const vol = Number(volEl.value) / 100;
+    if (edit) return void playSound(S.server, { ...edit, vol }).catch(() => {});
+    if (!buf) return toast('Сначала выберите файл');
+    preview(buf, start, len(), vol);
+  };
+  $('[data-r="0"]', bg).onclick = closeDlg;
+  bg.querySelector<HTMLElement>('[data-r="del"]')?.addEventListener('click', async () => {
+    if (!edit || !(await confirmDlg(`Удалить «${edit.name}»`, 'Звук пропадёт из звуковой панели у всех.', 'Удалить'))) return;
+    try { SB.lists.set(S.me!.id, (await api('/api/sounds/delete', { id: Number(edit.id.slice(2)) })).map(toSb)); } catch (err) { toast((err as Error).message); }
+    drawSoundboard();
+  });
+  ok.onclick = async () => {
+    const name = nameEl.value.trim();
+    if (!name) { nameEl.focus(); return toast('Дайте звуку название'); }
+    const vol = Number(volEl.value) / 100;
+    ok.disabled = true;
+    try {
+      if (edit) {
+        SB.lists.set(S.me!.id, (await api('/api/sounds/edit', { id: Number(edit.id.slice(2)), name, emoji, vol })).map(toSb));
+      } else {
+        if (!buf) return;
+        const wav = await cutWav(buf, start, len());
+        const qs = new URLSearchParams({ name, emoji, vol: String(vol) });
+        const r = await fetch(`${S.server}/api/sounds/upload?${qs}`, {
+          method: 'POST', body: wav, signal: AbortSignal.timeout(60000),
+          headers: { Authorization: 'Bearer ' + S.token, 'Content-Type': 'audio/wav' },
+        }).catch(() => { throw new Error('Нет связи с сервером'); });
+        const data = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error(data.error || 'Не удалось загрузить звук: HTTP ' + r.status);
+        SB.lists.set(S.me!.id, data.map(toSb));
+      }
+      preview(null);
+      closeDlg();
+      toast(edit ? 'Звук сохранён' : `Звук «${name}» добавлен`);
+      drawSoundboard();
+    } catch (err) {
+      toast((err as Error).message);
+      ok.disabled = false;
+    }
+  };
+  if (edit) nameEl.focus();
 }
 
 // ---------- настройки ----------
@@ -2113,6 +2846,10 @@ function closeSettings(force = false) {
 document.addEventListener('keydown', (e) => {
   if (e.key !== 'Escape') return;
   if (document.querySelector('.pop')) closePop();
+  else if (document.querySelector('.gif-pop')) closeGifPicker();
+  else if (document.querySelector('.t-menu')) closeTileMenu();
+  else if (document.querySelector('.dlg-bg')) closeDlg();
+  else if (document.querySelector('.sb-pop')) closeSoundboard();
   else if (document.querySelector('.lightbox')) closeViewer();
   else if (document.querySelector('.dlg-bg')) closeDlg();
   else if (document.querySelector('.settings')) closeSettings();
@@ -2242,7 +2979,7 @@ function renderSettingsTab() {
   $<HTMLInputElement>('#svol').oninput = (e) => {
     C.vol = Number((e.target as HTMLInputElement).value) / 100;
     store.set('vol', String(C.vol));
-    document.querySelectorAll<HTMLAudioElement>('#audio audio').forEach((a) => (a.volume = C.vol));
+    applyVolumes();
     if (micTest) micTest.audio.volume = C.vol;
   };
   box.querySelectorAll<HTMLInputElement>('input[name=prof]').forEach((r) => (r.onchange = () => {
@@ -2317,6 +3054,7 @@ function renderProfileEditor(box: HTMLElement) {
         <label class="fld"><span>Местоимения</span><input id="pf-pronouns" maxlength="40" placeholder="Добавьте местоимения" spellcheck="false"></label>
         <hr>
         <div class="fld"><span>Аватар</span>
+          <p class="set-hint">PNG, JPEG, WebP или анимированный GIF — его тоже можно обрезать.</p>
           <div class="row"><button class="btn" id="pf-av">Сменить аватар</button><button class="btn lnk" id="pf-avdel">Удалить аватар</button></div></div>
         <hr>
         <div class="fld"><span>Баннер профиля</span>
@@ -2413,22 +3151,32 @@ async function saveProfile() {
 }
 
 // Обрезка картинки, как в Discord: двигаем мышью, масштаб — ползунком или колесом.
-// Аватарка — квадрат 512×512 (показывается кругом), баннер — 1500×600. GIF отправляем как есть, чтобы не пропала анимация.
-const CROP = { avatar: { w: 300, h: 300, ow: 512, oh: 512 }, banner: { w: 480, h: 192, ow: 1500, oh: 600 } };
+// Аватарка — квадрат 512×512 (показывается кругом), баннер — 1500×600.
+// Анимированный GIF обрезаем покадрово и собираем обратно поменьше (gw×gh), чтобы влез в 8 МБ.
+const CROP = { avatar: { w: 300, h: 300, ow: 512, oh: 512, gw: 256, gh: 256 }, banner: { w: 480, h: 192, ow: 1500, oh: 600, gw: 600, gh: 240 } };
+const MAX_IMAGE = 8 * 1048576; // как на сервере
 async function cropImage(file: File, kind: 'avatar' | 'banner'): Promise<Blob | null> {
   if (!/^image\/(png|jpeg|webp|gif|bmp|avif)$/.test(file.type)) { toast('Нужна картинка: PNG, JPEG, WebP или GIF'); return null; }
-  if (file.type === 'image/gif') {
-    if (file.size <= 8 * 1048576) return file;
+  const anim = file.type === 'image/gif' ? await decodeGif(file) : null;
+  // старый WebView без разбора GIF по кадрам — отправляем как есть, чтобы не пропала анимация
+  if (file.type === 'image/gif' && !anim && !('ImageDecoder' in window)) {
+    if (file.size <= MAX_IMAGE) return file;
     toast('GIF больше 8 МБ'); return null;
   }
-  const url = URL.createObjectURL(file);
-  const img = new Image();
-  const ok = await new Promise<boolean>((r) => { img.onload = () => r(true); img.onerror = () => r(false); img.src = url; });
-  if (!ok || !img.naturalWidth) { URL.revokeObjectURL(url); toast('Не удалось открыть картинку'); return null; }
+  let src: CanvasImageSource, sw: number, sh: number, url = '';
+  if (anim) { src = anim.first; sw = anim.w; sh = anim.h; }
+  else {
+    url = URL.createObjectURL(file);
+    const img = new Image();
+    const ok = await new Promise<boolean>((r) => { img.onload = () => r(true); img.onerror = () => r(false); img.src = url; });
+    if (!ok || !img.naturalWidth) { URL.revokeObjectURL(url); toast('Не удалось открыть картинку'); return null; }
+    src = img; sw = img.naturalWidth; sh = img.naturalHeight;
+  }
   const c = CROP[kind];
   return new Promise((resolve) => {
     const bg = showDlg('crop', `
       <h3>Изменить изображение</h3>
+      ${anim ? `<p>Анимированный GIF — анимация сохранится (${anim.count} ${plural(anim.count, 'кадр', 'кадра', 'кадров')}).</p>` : ''}
       <div class="crop-box ${kind}" style="width:${c.w}px;height:${c.h}px"><canvas></canvas><div class="crop-mask"></div></div>
       <div class="crop-zoom">${ic('image', 16)}<input type="range" min="1" max="4" step="0.01" value="1">${ic('image', 24)}</div>
       <div class="dlg-btns"><button class="btn lnk" data-r="reset">Сбросить</button><span class="grow"></span><button class="btn sec" data-r="0">Отмена</button><button class="btn" data-r="1">Применить</button></div>`);
@@ -2437,17 +3185,17 @@ async function cropImage(file: File, kind: 'avatar' | 'banner'): Promise<Blob | 
     const dpr = devicePixelRatio || 1;
     cv.width = c.w * dpr;
     cv.height = c.h * dpr;
-    const base = Math.max(c.w / img.naturalWidth, c.h / img.naturalHeight); // «cover»: картинка всегда закрывает рамку
+    const base = Math.max(c.w / sw, c.h / sh); // «cover»: картинка всегда закрывает рамку
     let zoom = 1, x = 0, y = 0; // сдвиг центра картинки от центра рамки, в пикселях рамки
     const clamp = () => {
-      const w = img.naturalWidth * base * zoom, h = img.naturalHeight * base * zoom;
+      const w = sw * base * zoom, h = sh * base * zoom;
       x = Math.max(-(w - c.w) / 2, Math.min((w - c.w) / 2, x));
       y = Math.max(-(h - c.h) / 2, Math.min((h - c.h) / 2, y));
     };
-    const paint = (ctx: CanvasRenderingContext2D, k: number) => {
+    const paint = (ctx: CanvasRenderingContext2D, k: number, img: CanvasImageSource = src) => {
       const s = base * zoom * k;
       ctx.imageSmoothingQuality = 'high';
-      ctx.drawImage(img, (c.w * k) / 2 + x * k - (img.naturalWidth * s) / 2, (c.h * k) / 2 + y * k - (img.naturalHeight * s) / 2, img.naturalWidth * s, img.naturalHeight * s);
+      ctx.drawImage(img, (c.w * k) / 2 + x * k - (sw * s) / 2, (c.h * k) / 2 + y * k - (sh * s) / 2, sw * s, sh * s);
     };
     const draw = () => {
       clamp();
@@ -2469,14 +3217,33 @@ async function cropImage(file: File, kind: 'avatar' | 'banner'): Promise<Blob | 
     const finish = (b: Blob | null) => {
       if (done) return;
       done = true;
-      URL.revokeObjectURL(url);
+      if (url) URL.revokeObjectURL(url);
+      anim?.close();
       resolve(b);
       closeDlg();
     };
     new MutationObserver((_, o) => { if (!bg.isConnected) { o.disconnect(); finish(null); } }).observe(document.body, { childList: true });
     $('[data-r="0"]', bg).onclick = () => finish(null);
     $('[data-r="reset"]', bg).onclick = () => { x = 0; y = 0; setZoom(1); };
-    $('[data-r="1"]', bg).onclick = () => {
+    $('[data-r="1"]', bg).onclick = async () => {
+      if (anim) {
+        const btn = $<HTMLButtonElement>('[data-r="1"]', bg);
+        btn.disabled = true;
+        cv.onpointerdown = cv.onwheel = zoomEl.oninput = null;
+        try {
+          // не влезло в 8 МБ — пробуем меньше
+          for (let k = 1; k > 0.3; k *= 0.75) {
+            const w = Math.round(c.gw * k), h = Math.round(c.gh * k);
+            const gifBlob = await encodeGif(anim, w, h, (ctx, img) => paint(ctx, w / c.w, img),
+              (p) => { if (done) throw new Error('cancel'); btn.textContent = `Обработка ${Math.round(p * 100)}%`; });
+            if (gifBlob.size <= MAX_IMAGE) return finish(gifBlob);
+          }
+          toast('Гифка слишком большая даже после сжатия — возьмите покороче');
+        } catch {
+          if (!done) toast('Не удалось обработать GIF');
+        }
+        return finish(null);
+      }
       const out = document.createElement('canvas');
       out.width = c.ow;
       out.height = c.oh;

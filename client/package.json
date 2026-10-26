@@ -9,6 +9,7 @@
     "tauri": "tauri"
   },
   "dependencies": {
+    "gifenc": "^1.0.3",
     "livekit-client": "^2.15.0"
   },
   "devDependencies": {

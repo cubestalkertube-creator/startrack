@@ -73,9 +73,31 @@ db.exec('CREATE INDEX IF NOT EXISTS messages_grp ON messages (grp, id)');
 // профиль как в Discord: отображаемое имя, «обо мне», местоимения, свой статус («пузырь» у аватарки),
 // аватарка и баннер (файлы в DATA_DIR/avatars) или цвет баннера; status — выбранный онлайн-статус
 for (const col of ['display', 'bio', 'pronouns', 'custom', 'avatar', 'banner', 'bcolor', 'status']) addColumn('users', col, 'TEXT');
+// sha256 гифки во вложении: по нему клиент видит, что она уже в избранном
+addColumn('files', 'gif', 'TEXT');
+db.exec(`
+  -- избранные гифки; файл — DATA_DIR/gifs/<hash>.gif, одинаковые гифки хранятся один раз
+  CREATE TABLE IF NOT EXISTS gifs (
+    uid INTEGER NOT NULL, hash TEXT NOT NULL, w INTEGER, h INTEGER, size INTEGER NOT NULL, created INTEGER NOT NULL,
+    PRIMARY KEY (uid, hash)
+  );
+  -- звуки звуковой панели: файл DATA_DIR/sounds/<file>, vol — громкость 0..1
+  CREATE TABLE IF NOT EXISTS sounds (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, uid INTEGER NOT NULL, name TEXT NOT NULL, emoji TEXT NOT NULL,
+    file TEXT NOT NULL, vol REAL NOT NULL, created INTEGER NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS sounds_uid ON sounds (uid);
+`);
 
 const AVATARS_DIR = path.join(DATA_DIR, 'avatars');
-fs.mkdirSync(AVATARS_DIR, { recursive: true });
+const GIFS_DIR = path.join(DATA_DIR, 'gifs');
+const SOUNDS_DIR = path.join(DATA_DIR, 'sounds');
+for (const dir of [AVATARS_DIR, GIFS_DIR, SOUNDS_DIR]) fs.mkdirSync(dir, { recursive: true });
+const MAX_GIF = 25 * 1024 * 1024;
+const MAX_GIFS = 500; // избранных гифок у одного человека
+const MAX_SOUND = 1024 * 1024;
+const MAX_SOUNDS = 50;
+const SOUND_EXT = { 'audio/wav': 'wav', 'audio/mpeg': 'mp3', 'audio/ogg': 'ogg' };
 const MAX_IMAGE = 8 * 1024 * 1024;
 const IMAGE_EXT = { 'image/png': 'png', 'image/jpeg': 'jpg', 'image/webp': 'webp', 'image/gif': 'gif' };
 const STATUSES = ['online', 'idle', 'dnd', 'invisible'];
@@ -101,18 +123,31 @@ const q = {
     WHERE f.a = ? OR f.b = ?`),
   addMsg: db.prepare('INSERT INTO messages (sender, recipient, text, created, file, grp, kind) VALUES (?, ?, ?, ?, ?, ?, ?)'),
   history: db.prepare(`
-    SELECT m.*, f.name AS fname, f.size AS fsize, f.type AS ftype, f.w AS fw, f.h AS fh FROM messages m
+    SELECT m.*, f.name AS fname, f.size AS fsize, f.type AS ftype, f.w AS fw, f.h AS fh, f.gif AS fgif FROM messages m
     LEFT JOIN files f ON f.id = m.file
     WHERE ((m.sender = ? AND m.recipient = ?) OR (m.sender = ? AND m.recipient = ?)) AND m.grp IS NULL AND m.id < ?
     ORDER BY m.id DESC LIMIT 50`),
   // в группе показываем и ник автора: он мог уже выйти из группы
   groupHistory: db.prepare(`
-    SELECT m.*, u.username AS sname, f.name AS fname, f.size AS fsize, f.type AS ftype, f.w AS fw, f.h AS fh FROM messages m
+    SELECT m.*, u.username AS sname, f.name AS fname, f.size AS fsize, f.type AS ftype, f.w AS fw, f.h AS fh, f.gif AS fgif FROM messages m
     LEFT JOIN files f ON f.id = m.file LEFT JOIN users u ON u.id = m.sender
     WHERE m.grp = ? AND m.id < ?
     ORDER BY m.id DESC LIMIT 50`),
-  addFile: db.prepare('INSERT INTO files (id, sender, recipient, name, size, type, w, h, created, grp) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'),
+  addFile: db.prepare('INSERT INTO files (id, sender, recipient, name, size, type, w, h, created, grp, gif) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'),
   file: db.prepare('SELECT * FROM files WHERE id = ?'),
+  setFileGif: db.prepare('UPDATE files SET gif = ? WHERE id = ?'),
+  gifs: db.prepare('SELECT hash, w, h FROM gifs WHERE uid = ? ORDER BY created DESC'),
+  gif: db.prepare('SELECT * FROM gifs WHERE uid = ? AND hash = ?'),
+  gifCount: db.prepare('SELECT COUNT(*) AS n FROM gifs WHERE uid = ?'),
+  gifUsers: db.prepare('SELECT COUNT(*) AS n FROM gifs WHERE hash = ?'),
+  addGif: db.prepare('INSERT OR IGNORE INTO gifs (uid, hash, w, h, size, created) VALUES (?, ?, ?, ?, ?, ?)'),
+  delGif: db.prepare('DELETE FROM gifs WHERE uid = ? AND hash = ?'),
+  soundsOf: db.prepare('SELECT id, uid, name, emoji, file, vol FROM sounds WHERE uid = ? ORDER BY id'),
+  sound: db.prepare('SELECT * FROM sounds WHERE id = ?'),
+  soundCount: db.prepare('SELECT COUNT(*) AS n FROM sounds WHERE uid = ?'),
+  addSound: db.prepare('INSERT INTO sounds (uid, name, emoji, file, vol, created) VALUES (?, ?, ?, ?, ?, ?)'),
+  editSound: db.prepare('UPDATE sounds SET name = ?, emoji = ?, vol = ? WHERE id = ?'),
+  delSound: db.prepare('DELETE FROM sounds WHERE id = ?'),
   group: db.prepare('SELECT * FROM groups WHERE id = ?'),
   groupsOf: db.prepare('SELECT g.* FROM groups g JOIN group_members m ON m.grp = g.id WHERE m.uid = ? ORDER BY g.id'),
   members: db.prepare(`SELECT ${cols('u')} FROM group_members m JOIN users u ON u.id = m.uid WHERE m.grp = ? ORDER BY m.joined, m.uid`),
@@ -131,7 +166,7 @@ const q = {
 
 const msgOut = (m) => ({
   id: m.id, sender: m.sender, recipient: m.recipient, text: m.text, created: m.created,
-  file: m.file ? { id: m.file, name: m.fname, size: m.fsize, type: m.ftype, w: m.fw, h: m.fh } : null,
+  file: m.file ? { id: m.file, name: m.fname, size: m.fsize, type: m.ftype, w: m.fw, h: m.fh, gif: m.fgif || null } : null,
   ...(m.grp ? { grp: m.grp, kind: m.kind || null, sname: m.sname } : {}),
 });
 
@@ -216,6 +251,38 @@ function isFriend(a, b) {
   const r = q.rel.get(a, b, b, a);
   return r && r.status === 'accepted';
 }
+// вложение видят участники группы или двое из личной беседы
+const canSee = (me, f) => !!f && (f.grp ? isMember(f.grp, me.id) : f.sender === me.id || f.recipient === me.id);
+
+// --- избранные гифки и звуки звуковой панели ---
+const gifPath = (hash) => path.join(GIFS_DIR, hash + '.gif');
+const sha256File = (file) => new Promise((resolve, reject) => {
+  const h = crypto.createHash('sha256');
+  fs.createReadStream(file).on('data', (d) => h.update(d)).on('end', () => resolve(h.digest('hex'))).on('error', reject);
+});
+// from — путь к файлу-вложению или сама гифка (Buffer)
+function addFavGif(uid, hash, w, h, size, from) {
+  if (q.gif.get(uid, hash)) return;
+  if (q.gifCount.get(uid).n >= MAX_GIFS) throw [400, `В избранном не больше ${MAX_GIFS} гифок`];
+  if (!fs.existsSync(gifPath(hash))) {
+    if (Buffer.isBuffer(from)) fs.writeFileSync(gifPath(hash), from);
+    else fs.copyFileSync(from, gifPath(hash));
+  }
+  q.addGif.run(uid, hash, w, h, size, Date.now());
+}
+function soundFields(b) {
+  const name = String(b.name ?? '').replace(/\s+/g, ' ').trim().slice(0, 32);
+  if (!name) throw [400, 'Дайте звуку название'];
+  const emoji = String(b.emoji ?? '').trim().slice(0, 16);
+  const vol = Math.max(0, Math.min(1, Number(b.vol)));
+  return { name, emoji, vol: Number.isFinite(vol) ? vol : 1 };
+}
+function mySound(me, id) {
+  const s = q.sound.get(Number(id));
+  if (!s || s.uid !== me.id) throw [404, 'Звук не найден'];
+  return s;
+}
+const ytInfo = new Map(); // id видео -> название и канал (oEmbed YouTube)
 const roomFor = (a, b) => `dm_${Math.min(a, b)}_${Math.max(a, b)}`;
 const groupRoom = (id) => `grp_${id}`;
 
@@ -455,6 +522,68 @@ const routes = {
     if (!text) throw [400, 'Пустое сообщение'];
     return groupMsg(g.id, me, text);
   },
+  'GET /api/gifs': async (me) => q.gifs.all(me.id),
+  // ★ на гифке в чате: в избранное
+  'POST /api/gifs/fav': async (me, b) => {
+    const f = q.file.get(String(b.file || ''));
+    if (!canSee(me, f) || f.type !== 'image/gif') throw [404, 'Гифка не найдена'];
+    if (f.size > MAX_GIF) throw [413, `Гифка больше ${MAX_GIF / 1048576} МБ`];
+    const src = path.join(FILES_DIR, f.id);
+    const hash = f.gif || await sha256File(src);
+    if (!f.gif) q.setFileGif.run(hash, f.id);
+    addFavGif(me.id, hash, f.w, f.h, f.size, src);
+    return { hash, gifs: q.gifs.all(me.id) };
+  },
+  'POST /api/gifs/unfav': async (me, b) => {
+    const hash = String(b.hash || '');
+    q.delGif.run(me.id, hash);
+    // отправленные гифки — отдельные вложения, им удаление из избранного не мешает
+    if (/^[0-9a-f]{64}$/.test(hash) && !q.gifUsers.get(hash).n) fs.rmSync(gifPath(hash), { force: true });
+    return q.gifs.all(me.id);
+  },
+  // Гифка из избранного в беседу: новое вложение — жёсткая ссылка на тот же файл
+  'POST /api/gifs/send': async (me, b) => {
+    const g = q.gif.get(me.id, String(b.hash || ''));
+    if (!g) throw [404, 'Гифка не найдена'];
+    const gid = Number(b.group) || 0;
+    const peer = gid ? 0 : Number(b.peer);
+    fileTarget(me, gid, peer);
+    const id = crypto.randomBytes(16).toString('hex');
+    try { fs.linkSync(gifPath(g.hash), path.join(FILES_DIR, id)); } catch { fs.copyFileSync(gifPath(g.hash), path.join(FILES_DIR, id)); }
+    return postFile(me, peer, gid, { id, name: g.hash.slice(0, 12) + '.gif', size: g.size, type: 'image/gif', w: g.w, h: g.h, gif: g.hash });
+  },
+  // Звуки свои и тех, с кем звоним (?users=1,2,3): только свои и контактов
+  'GET /api/sounds': async (me, _b, url) => {
+    const ok = new Set([me.id, ...contactIds(me.id)]);
+    const ids = String(url.searchParams.get('users') || me.id).split(',').map(Number).filter((id) => ok.has(id));
+    return [...new Set(ids)].flatMap((id) => q.soundsOf.all(id));
+  },
+  'POST /api/sounds/edit': async (me, b) => {
+    const s = mySound(me, b.id);
+    const f = soundFields(b);
+    q.editSound.run(f.name, f.emoji, f.vol, s.id);
+    return q.soundsOf.all(me.id);
+  },
+  'POST /api/sounds/delete': async (me, b) => {
+    const s = mySound(me, b.id);
+    q.delSound.run(s.id);
+    fs.rmSync(path.join(SOUNDS_DIR, s.file), { force: true });
+    return q.soundsOf.all(me.id);
+  },
+  // Название видео для очереди совместного просмотра
+  'GET /api/yt/info': async (_me, _b, url) => {
+    const v = String(url.searchParams.get('v') || '');
+    if (!/^[\w-]{11}$/.test(v)) throw [400, 'Неверная ссылка на видео'];
+    if (!ytInfo.has(v)) {
+      const watch = 'https://www.youtube.com/watch?v=' + v;
+      const r = await fetch('https://www.youtube.com/oembed?format=json&url=' + encodeURIComponent(watch), { signal: AbortSignal.timeout(6000) }).catch(() => null);
+      if (!r?.ok) return { title: '', author: '' }; // не кэшируем: могло не ответить
+      const j = await r.json().catch(() => ({}));
+      if (ytInfo.size >= 2000) ytInfo.delete(ytInfo.keys().next().value);
+      ytInfo.set(v, { title: String(j.title || '').slice(0, 200), author: String(j.author_name || '').slice(0, 100) });
+    }
+    return ytInfo.get(v);
+  },
   // Токен в LiveKit-комнату звонка с другом или в группе
   'POST /api/call/token': async (me, b) => {
     let room;
@@ -472,6 +601,22 @@ const routes = {
 
 const bearer = (req) => (req.headers.authorization || '').replace('Bearer ', '');
 
+function fileTarget(me, gid, peer) {
+  if (gid && !isMember(gid, me.id)) throw [404, 'Группа не найдена'];
+  if (!gid && !isFriend(me.id, peer)) throw [403, 'Отправлять файлы можно только друзьям'];
+}
+// Сообщение с уже сохранённым на диске вложением meta — в личку или в группу
+function postFile(me, peer, gid, meta) {
+  q.addFile.run(meta.id, me.id, peer, meta.name, meta.size, meta.type, meta.w, meta.h, Date.now(), gid || null, meta.gif ?? null);
+  if (gid) return groupMsg(gid, me, '', null, meta);
+  const created = Date.now();
+  const { lastInsertRowid } = q.addMsg.run(me.id, peer, '', created, meta.id, null, null);
+  const msg = { id: Number(lastInsertRowid), sender: me.id, recipient: peer, text: '', created, file: meta };
+  push(peer, { type: 'message', msg });
+  push(me.id, { type: 'message', msg });
+  return msg;
+}
+
 // Отправка файла в личку (?peer=) или в группу (?group=): тело запроса — сам файл, имя и размеры
 // превью — в параметрах. Пишем потоком сразу на диск, в память файл целиком не попадает.
 async function uploadFile(req, res, url, send) {
@@ -479,8 +624,7 @@ async function uploadFile(req, res, url, send) {
   if (!me) return send(401, { error: 'Нужно войти' });
   const gid = Number(url.searchParams.get('group')) || 0;
   const peer = gid ? 0 : Number(url.searchParams.get('peer'));
-  if (gid && !isMember(gid, me.id)) return send(404, { error: 'Группа не найдена' });
-  if (!gid && !isFriend(me.id, peer)) return send(403, { error: 'Отправлять файлы можно только друзьям' });
+  try { fileTarget(me, gid, peer); } catch (e) { return send(e[0], { error: e[1] }); }
   const size = Number(req.headers['content-length']);
   if (!size) return send(400, { error: 'Пустой файл' });
   if (size > MAX_FILE) return send(413, { error: `Файл больше ${MAX_FILE / 1048576} МБ` });
@@ -493,11 +637,13 @@ async function uploadFile(req, res, url, send) {
   const id = crypto.randomBytes(16).toString('hex');
   const file = path.join(FILES_DIR, id);
   let got = 0;
+  const hash = type === 'image/gif' ? crypto.createHash('sha256') : null; // для избранных гифок
   try {
     await pipeline(req, async function* (src) {
       for await (const chunk of src) {
         got += chunk.length;
         if (got > size) throw new Error('too long');
+        hash?.update(chunk);
         yield chunk;
       }
     }, fs.createWriteStream(file + '.part'));
@@ -507,18 +653,33 @@ async function uploadFile(req, res, url, send) {
     fs.rmSync(file + '.part', { force: true });
     return res.headersSent || res.destroyed || send(400, { error: 'Загрузка прервалась' });
   }
-  const created = Date.now();
-  const meta = { id, name, size, type, w: dim('w'), h: dim('h') };
+  const meta = { id, name, size, type, w: dim('w'), h: dim('h'), gif: hash?.digest('hex') ?? null };
   // из группы могли выйти, пока файл грузился
   if (gid && !isMember(gid, me.id)) { fs.rmSync(file, { force: true }); return send(404, { error: 'Группа не найдена' }); }
-  q.addFile.run(id, me.id, peer, name, size, type, meta.w, meta.h, created, gid || null);
-  if (gid) return send(200, groupMsg(gid, me, '', null, meta));
-  const { lastInsertRowid } = q.addMsg.run(me.id, peer, '', created, id, null, null);
-  const msg = { id: Number(lastInsertRowid), sender: me.id, recipient: peer, text: '', created, file: meta };
-  push(peer, { type: 'message', msg });
-  push(me.id, { type: 'message', msg });
-  send(200, msg);
+  send(200, postFile(me, peer, gid, meta));
 }
+
+// Небольшой файл целиком в память (картинки профиля, гифки, звуки); null — загрузка прервалась
+async function readBody(req, size) {
+  const chunks = [];
+  let got = 0;
+  try {
+    for await (const chunk of req) {
+      got += chunk.length;
+      if (got > size) return null;
+      chunks.push(chunk);
+    }
+  } catch {
+    return null;
+  }
+  return got === size ? Buffer.concat(chunks) : null;
+}
+const sizeError = (req, max, what) => {
+  const size = Number(req.headers['content-length']);
+  if (!size) return [400, 'Пустой файл'];
+  if (size > max) return [413, `${what} больше ${max / 1048576} МБ`];
+  return null;
+};
 
 // Аватарка или баннер (?kind=banner): тело — картинка, уже обрезанная и уменьшенная клиентом
 const MAGIC = { png: /^\x89PNG/, jpg: /^\xff\xd8\xff/, gif: /^GIF8/, webp: /^RIFF....WEBP/s };
@@ -528,22 +689,10 @@ async function uploadImage(req, res, url, send) {
   const kind = url.searchParams.get('kind') === 'banner' ? 'banner' : 'avatar';
   const ext = IMAGE_EXT[String(req.headers['content-type'] || '').toLowerCase()];
   if (!ext) return send(415, { error: 'Нужна картинка PNG, JPEG, WebP или GIF' });
-  const size = Number(req.headers['content-length']);
-  if (!size) return send(400, { error: 'Пустой файл' });
-  if (size > MAX_IMAGE) return send(413, { error: `Картинка больше ${MAX_IMAGE / 1048576} МБ` });
-  const chunks = [];
-  let got = 0;
-  try {
-    for await (const chunk of req) {
-      got += chunk.length;
-      if (got > size) throw new Error('too long');
-      chunks.push(chunk);
-    }
-  } catch {
-    return res.destroyed || send(400, { error: 'Загрузка прервалась' });
-  }
-  const data = Buffer.concat(chunks);
-  if (got !== size) return send(400, { error: 'Загрузка прервалась' });
+  const bad = sizeError(req, MAX_IMAGE, 'Картинка');
+  if (bad) return send(bad[0], { error: bad[1] });
+  const data = await readBody(req, Number(req.headers['content-length']));
+  if (!data) return res.destroyed || send(400, { error: 'Загрузка прервалась' });
   if (!MAGIC[ext].test(data.subarray(0, 12).toString('latin1'))) return send(415, { error: 'Файл не похож на картинку' });
   const name = crypto.randomBytes(16).toString('hex') + '.' + ext;
   fs.writeFileSync(path.join(AVATARS_DIR, name), data);
@@ -552,12 +701,55 @@ async function uploadImage(req, res, url, send) {
   send(200, selfView(q.userById.get(me.id)));
 }
 
-// Аватарки и баннеры видны всем, как в Discord; имя файла случайное, а при смене картинки — новое
-function sendImage(res, name, send) {
-  const file = path.join(AVATARS_DIR, name);
+// Своя гифка с компьютера — сразу в избранное (?w=&h= — размер для превью)
+async function uploadGif(req, res, url, send) {
+  const me = verify(bearer(req));
+  if (!me) return send(401, { error: 'Нужно войти' });
+  const bad = sizeError(req, MAX_GIF, 'Гифка');
+  if (bad) return send(bad[0], { error: bad[1] });
+  const data = await readBody(req, Number(req.headers['content-length']));
+  if (!data) return res.destroyed || send(400, { error: 'Загрузка прервалась' });
+  if (!MAGIC.gif.test(data.subarray(0, 4).toString('latin1'))) return send(415, { error: 'Это не GIF' });
+  const dim = (k) => { const v = Math.round(Number(url.searchParams.get(k))); return v > 0 && v < 1e5 ? v : null; };
+  try {
+    addFavGif(me.id, crypto.createHash('sha256').update(data).digest('hex'), dim('w'), dim('h'), data.length, data);
+  } catch (e) {
+    return Array.isArray(e) ? send(e[0], { error: e[1] }) : send(500, { error: 'Ошибка сервера' });
+  }
+  send(200, q.gifs.all(me.id));
+}
+
+// Новый звук звуковой панели (?name=&emoji=&vol=): тело — уже обрезанный клиентом звук
+const SOUND_MAGIC = { wav: /^RIFF....WAVE/s, mp3: /^(ID3|\xff[\xe0-\xff])/, ogg: /^OggS/ };
+async function uploadSound(req, res, url, send) {
+  const me = verify(bearer(req));
+  if (!me) return send(401, { error: 'Нужно войти' });
+  const ext = SOUND_EXT[String(req.headers['content-type'] || '').toLowerCase()];
+  if (!ext) return send(415, { error: 'Нужен звук WAV, MP3 или OGG' });
+  const bad = sizeError(req, MAX_SOUND, 'Звук');
+  if (bad) return send(bad[0], { error: bad[1] });
+  let f;
+  try {
+    f = soundFields(Object.fromEntries(url.searchParams));
+    if (q.soundCount.get(me.id).n >= MAX_SOUNDS) throw [400, `Своих звуков не больше ${MAX_SOUNDS}`];
+  } catch (e) { return send(e[0], { error: e[1] }); }
+  const data = await readBody(req, Number(req.headers['content-length']));
+  if (!data) return res.destroyed || send(400, { error: 'Загрузка прервалась' });
+  if (!SOUND_MAGIC[ext].test(data.subarray(0, 12).toString('latin1'))) return send(415, { error: 'Файл не похож на звук' });
+  const name = crypto.randomBytes(16).toString('hex') + '.' + ext;
+  fs.writeFileSync(path.join(SOUNDS_DIR, name), data);
+  q.addSound.run(me.id, f.name, f.emoji, name, f.vol, Date.now());
+  send(200, q.soundsOf.all(me.id));
+}
+
+// Аватарки, баннеры, избранные гифки и звуки видны всем, как в Discord: имена файлов не угадать,
+// а содержимое по одному имени никогда не меняется
+const PUBLIC_TYPES = { ...IMAGE_EXT, 'audio/wav': 'wav', 'audio/mpeg': 'mp3', 'audio/ogg': 'ogg' };
+function sendImage(res, dir, name, send) {
+  const file = path.join(dir, name);
   let st;
-  try { st = fs.statSync(file); } catch { return send(404, { error: 'Нет картинки' }); }
-  const type = Object.keys(IMAGE_EXT).find((t) => name.endsWith('.' + IMAGE_EXT[t]));
+  try { st = fs.statSync(file); } catch { return send(404, { error: 'Нет файла' }); }
+  const type = Object.keys(PUBLIC_TYPES).find((t) => name.endsWith('.' + PUBLIC_TYPES[t]));
   res.writeHead(200, {
     'Content-Type': type, 'Content-Length': st.size, 'X-Content-Type-Options': 'nosniff',
     'Cache-Control': 'public, max-age=31536000, immutable',
@@ -574,8 +766,7 @@ function downloadFile(req, res, url, id, send) {
   const me = verify(bearer(req) || url.searchParams.get('token'));
   if (!me) return send(401, { error: 'Нужно войти' });
   const f = q.file.get(id);
-  const allowed = f && (f.grp ? isMember(f.grp, me.id) : f.sender === me.id || f.recipient === me.id);
-  if (!allowed) return send(404, { error: 'Файл не найден' });
+  if (!canSee(me, f)) return send(404, { error: 'Файл не найден' });
   const inline = INLINE.test(f.type) && !url.searchParams.has('dl');
   const ascii = f.name.replace(/[^\x20-\x7e]|["\\]/g, '_');
   const headers = {
@@ -624,8 +815,14 @@ const server = http.createServer(async (req, res) => {
   }
   if (url.pathname === '/api/dm/file' && req.method === 'POST') return uploadFile(req, res, url, send);
   if (url.pathname === '/api/me/image' && req.method === 'POST') return uploadImage(req, res, url, send);
+  if (url.pathname === '/api/gifs/upload' && req.method === 'POST') return uploadGif(req, res, url, send);
+  if (url.pathname === '/api/sounds/upload' && req.method === 'POST') return uploadSound(req, res, url, send);
   const image = /^\/api\/avatars\/([0-9a-f]{32}\.(png|jpg|webp|gif))$/.exec(url.pathname)?.[1];
-  if (image && req.method === 'GET') return sendImage(res, image, send);
+  if (image && req.method === 'GET') return sendImage(res, AVATARS_DIR, image, send);
+  const gif = /^\/api\/gifs\/([0-9a-f]{64}\.gif)$/.exec(url.pathname)?.[1];
+  if (gif && req.method === 'GET') return sendImage(res, GIFS_DIR, gif, send);
+  const sound = /^\/api\/sounds\/([0-9a-f]{32}\.(wav|mp3|ogg))$/.exec(url.pathname)?.[1];
+  if (sound && req.method === 'GET') return sendImage(res, SOUNDS_DIR, sound, send);
   const fileId = /^\/api\/files\/([0-9a-f]{32})$/.exec(url.pathname)?.[1];
   if (fileId && req.method === 'GET') return downloadFile(req, res, url, fileId, send);
   const handler = routes[`${req.method} ${url.pathname}`];

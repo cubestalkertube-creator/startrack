@@ -55,7 +55,7 @@ export function setSfxVol(v: number) {
 const groupOf = (s: Sfx) => (Object.keys(SFX_GROUPS) as SfxGroup[]).find((g) => (SFX_GROUPS[g].sounds as readonly Sfx[]).includes(s));
 
 let ctx: AudioContext | null = null;
-function audio() {
+export function audio() {
   ctx ??= new AudioContext();
   if (ctx.state === 'suspended') ctx.resume().catch(() => {});
   if (sinkId !== ((ctx as any).sinkId || '')) (ctx as any).setSinkId?.(sinkId).catch(() => {});
