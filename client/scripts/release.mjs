@@ -2,6 +2,8 @@
 //   node scripts/release.mjs 0.1.5 notes.md            — поднять версию, собрать, подписать, сделать latest.json
 //   node scripts/release.mjs 0.1.5 notes.md --publish  — то же, закоммитить версию, запушить и выложить релиз на GitHub
 // Установленные клиенты при запуске смотрят latest.json последнего релиза и сами ставят новую версию.
+// В тот же релиз кладётся APK для Android (scripts/android.mjs); приложение на телефоне находит его
+// в последнем релизе и предлагает скачать. --no-android — выпустить только версию для ПК.
 // Нужен ключ подписи ~/.tauri/startrack-updater.key (или путь в TAURI_SIGNING_PRIVATE_KEY).
 // Без него (или с другим ключом) обновления не установятся — храните его копию в надёжном месте.
 import { execSync } from 'node:child_process';
@@ -12,6 +14,7 @@ import { fileURLToPath } from 'node:url';
 
 const [version, notesFile] = process.argv.slice(2).filter((a) => !a.startsWith('--'));
 const publish = process.argv.includes('--publish');
+const android = !process.argv.includes('--no-android');
 if (!/^\d+\.\d+\.\d+$/.test(version || '')) {
   console.error('Использование: node scripts/release.mjs <версия x.y.z> [файл с описанием] [--publish]');
   process.exit(1);
@@ -51,6 +54,8 @@ const latest = {
 };
 writeFileSync(join(dir, 'latest.json'), JSON.stringify(latest, null, 2) + '\n');
 console.log(`\nГотово: ${dir}\\${exe} (+ .sig, latest.json)`);
+const apk = at(`src-tauri/target/android/Startrack_${version}.apk`);
+if (android) run('node scripts/android.mjs');
 
 if (publish) {
   const files = 'package.json src-tauri/tauri.conf.json src-tauri/Cargo.toml src-tauri/Cargo.lock';
@@ -60,7 +65,7 @@ if (publish) {
   const notesPath = join(dir, 'notes.md');
   writeFileSync(notesPath, notes + '\n');
   run(`gh release create v${version} --repo ${repo} --title "Startrack ${version}" --notes-file "${notesPath}" ` +
-    `"${join(dir, exe)}" "${join(dir, exe + '.sig')}" "${join(dir, 'latest.json')}"`);
+    `"${join(dir, exe)}" "${join(dir, exe + '.sig')}" "${join(dir, 'latest.json')}"${android ? ` "${apk}"` : ''}`);
   console.log('Релиз опубликован — клиенты обновятся при следующем запуске.');
 } else {
   console.log('Чтобы выложить на GitHub, запустите то же самое с --publish.');

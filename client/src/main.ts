@@ -43,6 +43,10 @@ const store = {
   set: (k: string, v: string) => { try { localStorage.setItem(k, v); } catch {} },
 };
 
+// Телефон (APK для Android): узкая раскладка, без демонстрации экрана и автообновления установщиком
+const ANDROID = /Android/i.test(navigator.userAgent);
+if (ANDROID) document.documentElement.classList.add('android');
+
 const S = {
   server: store.get('server') || 'https://185-218-0-111.sslip.io',
   token: store.get('token') || '',
@@ -386,8 +390,9 @@ async function act(b: HTMLElement) {
       } catch (err) { toast((err as Error).message); }
       return;
     }
-    case 'home': return goHome();
-    case 'tab': S.tab = b.dataset.tab as Tab; return goHome();
+    case 'home': goHome(); return mpane(true);
+    case 'tab': S.tab = b.dataset.tab as Tab; goHome(); return mpane(true);
+    case 'back': return mpane(false);
     case 'open': { const u = friend(id); return u && openChat(u); }
     case 'call': {
       const u = friend(id);
@@ -461,6 +466,20 @@ async function act(b: HTMLElement) {
     }
   }
 }
+
+// На узком экране (телефон) видна одна половина: список бесед или открытая беседа.
+// Открытие беседы — шаг в истории, поэтому системная кнопка «Назад» возвращает к списку.
+const narrow = matchMedia('(max-width: 760px)');
+const BACK = `<button class="tb-back" data-act="back" title="Назад">${ic('arrowOut', 24)}</button>`;
+function mpane(main: boolean) {
+  const app = document.querySelector('.app');
+  if (narrow.matches) S.showProfile = false; // на телефоне профиль закрыл бы весь чат — только по кнопке
+  if (!app || app.classList.contains('m-main') === main) return;
+  if (!main && history.state?.mpane) return history.back(); // popstate сам покажет список
+  app.classList.toggle('m-main', main);
+  if (main && narrow.matches) history.pushState({ mpane: 1 }, '');
+}
+window.addEventListener('popstate', () => document.querySelector('.app')?.classList.remove('m-main'));
 
 function goHome() {
   S.peer = null;
@@ -599,7 +618,7 @@ function renderHome() {
   const tab = (t: Tab, title: string, n = 0) =>
     `<button class="tb-tab ${S.tab === t ? 'sel' : ''} ${t === 'add' ? 'add' : ''}" data-act="tab" data-tab="${t}">${title}${n ? `<span class="pill">${n}</span>` : ''}</button>`;
   $('#topbar').innerHTML = `
-    <div class="tb-title">${ic('friends', 24)}<b>Друзья</b></div><span class="tb-div"></span>
+    ${BACK}<div class="tb-title">${ic('friends', 24)}<b>Друзья</b></div><span class="tb-div"></span>
     <nav class="tb-tabs">${tab('online', 'В сети')}${tab('all', 'Все')}${tab('pending', 'Ожидание', incoming.length)}${tab('add', 'Добавить в друзья')}</nav>`;
   $('#profile').hidden = true;
   const chat = $('#chat');
@@ -685,6 +704,7 @@ function openGroup(id: number) {
 async function openConv() {
   const c = conv();
   if (!c) return goHome();
+  mpane(true);
   S.unread.delete(c.key);
   renderFriends();
   renderChat();
@@ -703,7 +723,7 @@ function renderTop() {
   if (g) {
     const inCall = C.state !== 'idle' && C.gid === g.id;
     $('#topbar').innerHTML = `
-      <div class="tb-title">${gavatar(g, 24)}<b class="tb-edit" data-act="grename" data-id="${g.id}" title="Изменить название группы">${esc(gname(g))}</b></div>
+      ${BACK}<div class="tb-title">${gavatar(g, 24)}<b class="tb-edit" data-act="grename" data-id="${g.id}" title="Изменить название группы">${esc(gname(g))}</b></div>
       <div class="tb-actions">
         <button class="tb-btn ${g.call.length && !inCall ? 'live' : ''}" data-act="gcall" data-id="${g.id}" title="${g.call.length ? 'Присоединиться к звонку' : 'Начать голосовой звонок'}">${ic('phone', 22)}</button>
         <button class="tb-btn" data-act="gadd" data-id="${g.id}" title="Добавить друзей в группу">${ic('addFriend', 22)}</button>
@@ -713,7 +733,7 @@ function renderTop() {
   }
   if (!p) return;
   $('#topbar').innerHTML = `
-    <div class="tb-title tb-user" data-act="user" data-id="${p.id}">${avatar(p, 24, true)}<b>${esc(uname(p))}</b></div>
+    ${BACK}<div class="tb-title tb-user" data-act="user" data-id="${p.id}">${avatar(p, 24, true)}<b>${esc(uname(p))}</b></div>
     <div class="tb-actions">
       <button class="tb-btn" data-act="call" data-id="${p.id}" title="Начать голосовой звонок">${ic('phone', 22)}</button>
       <button class="tb-btn" data-act="gnew" data-id="${p.id}" title="Создать группу с ${esc(uname(p))}">${ic('addFriend', 22)}</button>
@@ -3345,7 +3365,7 @@ function stopMicTest() {
 // покажем зелёной кнопкой в левой панели. Пока приложение открыто, проверяем каждые 3 минуты
 // и когда окно снова в фокусе; проверка не прошла (сеть, VPN) — повторяем через минуту.
 const tauri = (window as any).__TAURI_INTERNALS__;
-const U = { version: '', notes: '' };
+const U = { version: '', notes: '', apk: '' };
 let updTimer = 0;
 let updBusy = false;
 let updLast = 0;
@@ -3357,6 +3377,31 @@ let updLast = 0;
     () => tauri.invoke('reveal_file', { path }).catch(() => {}));
 };
 
+// На телефоне WebView не скачивает файлы сам: ссылки на вложения и внешние сайты открываем в браузере
+if (ANDROID && tauri) document.addEventListener('click', (e) => {
+  const a = (e.target as HTMLElement).closest<HTMLAnchorElement>('a[href]');
+  if (!a || !/^https?:/.test(a.href) || new URL(a.href).origin === location.origin) return;
+  e.preventDefault();
+  tauri.invoke('open_url', { url: a.href }).catch(() => toast('Не удалось открыть ссылку'));
+}, true);
+
+// Телефон: новую версию ищем среди релизов на GitHub (APK), ставит её сам Android из браузера
+const versionNum = (v: string) => v.replace(/^v/, '').split('.').map(Number);
+const newer = (a: string, b: string) => {
+  const [x, y] = [versionNum(a), versionNum(b)];
+  for (let i = 0; i < 3; i++) if ((x[i] || 0) !== (y[i] || 0)) return (x[i] || 0) > (y[i] || 0);
+  return false;
+};
+async function checkApk(): Promise<[string, string] | null> {
+  const r = await fetch('https://api.github.com/repos/cubestalkertube-creator/startrack/releases/latest', { signal: AbortSignal.timeout(15000) });
+  if (!r.ok) throw new Error(String(r.status));
+  const rel = await r.json();
+  const apk = rel.assets?.find((a: { name: string }) => a.name.endsWith('.apk'));
+  if (!apk || !newer(rel.tag_name, __APP_VERSION__)) return null;
+  U.apk = apk.browser_download_url;
+  return [rel.tag_name.replace(/^v/, ''), rel.body || ''];
+}
+
 async function checkUpdate() {
   if (!tauri || import.meta.env.DEV || U.version || updBusy) return !!U.version;
   updBusy = true;
@@ -3364,7 +3409,7 @@ async function checkUpdate() {
   clearTimeout(updTimer);
   let ok = false;
   try {
-    const r: [string, string] | null = await tauri.invoke('update_check');
+    const r: [string, string] | null = ANDROID ? await checkApk() : await tauri.invoke('update_check');
     ok = true;
     if (r) { [U.version, U.notes] = r; renderRail(); }
   } catch {}
@@ -3379,6 +3424,10 @@ const mb = (n: number) => (n / 1048576).toFixed(1);
 
 // Скачивает и ставит обновление; box — куда рисовать экран загрузки. onSkip — что делать, если отказались.
 async function installUpdate(box: HTMLElement, onSkip = () => { box.innerHTML = ''; }) {
+  if (U.apk) {
+    toast(`Скачиваю Startrack ${U.version} — откройте загруженный файл, чтобы установить`);
+    return void tauri.invoke('open_url', { url: U.apk }).catch(() => toast('Не удалось открыть ссылку'));
+  }
   box.innerHTML = bootScreen(`
     <div class="upd-box">
       <b>Загрузка обновления ${esc(U.version)}</b>
@@ -3420,7 +3469,8 @@ function enter() {
 }
 
 (async () => {
-  if (tauri && !import.meta.env.DEV) {
+  if (ANDROID) checkUpdate(); // на телефоне не ждём: обновление покажем кнопкой в левой панели
+  else if (tauri && !import.meta.env.DEV) {
     $('#root').innerHTML = bootScreen('<div class="status"><span class="spin"></span>Проверка обновлений…</div>');
     const found = await Promise.race([checkUpdate(), new Promise<boolean>((r) => setTimeout(() => r(false), 6000))]);
     if (found) return installUpdate($('#root'), enter);

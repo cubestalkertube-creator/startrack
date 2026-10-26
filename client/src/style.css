@@ -778,3 +778,53 @@ input[type=range] { accent-color: var(--accent); padding: 0; height: 40px; backg
 #toast.show { opacity: 1; transform: translate(-50%, 0); }
 #toast.show.click { pointer-events: auto; cursor: pointer; }
 #toast.click:hover { background: #1e1f22; }
+
+/* ---------- телефон ---------- */
+.tb-back { display: none; }
+.android [data-act="screen"] { display: none !important; } /* в WebView Android нет демонстрации экрана */
+@media (max-width: 760px) {
+  /* видна одна половина: список бесед (.app) или открытая беседа (.app.m-main) */
+  .app { grid-template-columns: 72px minmax(0, 1fr); }
+  .main { grid-column: 1 / -1; display: none; border: 0; }
+  .app.m-main .main { display: flex; }
+  .app.m-main .rail, .app.m-main .side, .app.m-main .dock { display: none; }
+  .side { border-top-left-radius: 0; }
+  .tb-back { display: grid; place-items: center; width: 36px; height: 36px; margin-left: -8px; border-radius: 8px; color: #b5bac1; flex: none; }
+  .topbar { padding-left: 12px; }
+  .tb-div { display: none; }
+  .tb-tabs { overflow-x: auto; scrollbar-width: none; gap: 4px; }
+  .tb-actions { gap: 0; }
+  /* профиль собеседника и участники группы — поверх чата */
+  .body { position: relative; }
+  #profile:not([hidden]) { display: flex; position: absolute; inset: 0; width: auto; z-index: 6; padding: 8px; background: var(--chat); }
+  .fpage { padding: 12px; }
+  .msg { padding: 2px 12px 2px 60px; }
+  .msg.head .mav { left: 10px; }
+  .msg.cont time { width: 52px; }
+  #send { padding: 0 8px 8px; }
+  .composer { padding: 9px 12px; }
+  /* звонок */
+  #call { padding: 8px 8px 10px; height: 45vh; }
+  .controls { flex-wrap: wrap; gap: 6px; }
+  .cbtn { width: 40px; }
+  .cbtn.hang { width: 52px; }
+  .cbtn.side, .cside { position: static; }
+  .call-grip { display: none; }
+  /* окна */
+  .dlg-bg { padding: 12px; }
+  .dlg-bg.fullpf .dlg { width: 100%; height: 100%; flex-direction: column; overflow-y: auto; }
+  .dlg-bg.fullpf .fp-left { width: auto; overflow: visible; }
+  .incoming { top: 16px; }
+  #toast { bottom: 80px; max-width: calc(100vw - 32px); }
+  /* настройки: разделы — строкой сверху */
+  .settings { flex-direction: column; }
+  .set-nav { flex: none; justify-content: stretch; padding-right: 48px; }
+  .set-nav-in { width: 100%; flex-direction: row; align-items: center; overflow-x: auto; scrollbar-width: none; padding: 8px; gap: 4px; }
+  .set-nav-in .set-me, .set-nav-in h5, .set-nav-in hr { display: none; }
+  .set-nav-in .sn { white-space: nowrap; flex: none; }
+  .set-body { flex: 1; }
+  .set-content { padding: 20px 16px 60px; }
+  .set-close { position: fixed; top: 6px; right: 8px; margin: 0; z-index: 2; }
+  .set-close span { display: none; }
+  .att { width: 100%; }
+}

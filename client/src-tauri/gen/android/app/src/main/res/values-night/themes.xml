@@ -1,0 +1,6 @@
+<resources xmlns:tools="http://schemas.android.com/tools">
+    <!-- Интерфейс всегда тёмный, как в приложении на ПК; фон виден под строкой состояния -->
+    <style name="Theme.startrack" parent="Theme.Material3.Dark.NoActionBar">
+        <item name="android:windowBackground">@color/st_base</item>
+    </style>
+</resources>
