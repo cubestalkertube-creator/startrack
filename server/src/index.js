@@ -70,17 +70,33 @@ addColumn('messages', 'grp', 'INTEGER');
 addColumn('messages', 'kind', 'TEXT');
 addColumn('files', 'grp', 'INTEGER');
 db.exec('CREATE INDEX IF NOT EXISTS messages_grp ON messages (grp, id)');
+// профиль как в Discord: отображаемое имя, «обо мне», местоимения, свой статус («пузырь» у аватарки),
+// аватарка и баннер (файлы в DATA_DIR/avatars) или цвет баннера; status — выбранный онлайн-статус
+for (const col of ['display', 'bio', 'pronouns', 'custom', 'avatar', 'banner', 'bcolor', 'status']) addColumn('users', col, 'TEXT');
+
+const AVATARS_DIR = path.join(DATA_DIR, 'avatars');
+fs.mkdirSync(AVATARS_DIR, { recursive: true });
+const MAX_IMAGE = 8 * 1024 * 1024;
+const IMAGE_EXT = { 'image/png': 'png', 'image/jpeg': 'jpg', 'image/webp': 'webp', 'image/gif': 'gif' };
+const STATUSES = ['online', 'idle', 'dnd', 'invisible'];
+
+// поля пользователя, которые видят другие
+const PUB = ['id', 'username', 'display', 'bio', 'pronouns', 'custom', 'avatar', 'banner', 'bcolor', 'status', 'created'];
+const cols = (t) => PUB.map((c) => `${t}.${c}`).join(', ');
 
 const q = {
   userByName: db.prepare('SELECT * FROM users WHERE username = ?'),
-  userById: db.prepare('SELECT id, username FROM users WHERE id = ?'),
+  userById: db.prepare(`SELECT ${cols('users')} FROM users WHERE id = ?`),
   addUser: db.prepare('INSERT INTO users (username, pass, created) VALUES (?, ?, ?)'),
+  setProfile: db.prepare('UPDATE users SET display = ?, bio = ?, pronouns = ?, custom = ?, bcolor = ? WHERE id = ?'),
+  setImage: { avatar: db.prepare('UPDATE users SET avatar = ? WHERE id = ?'), banner: db.prepare('UPDATE users SET banner = ? WHERE id = ?') },
+  setStatus: db.prepare('UPDATE users SET status = ? WHERE id = ?'),
   rel: db.prepare('SELECT * FROM friends WHERE (a = ? AND b = ?) OR (a = ? AND b = ?)'),
   addRel: db.prepare('INSERT INTO friends (a, b, status) VALUES (?, ?, ?)'),
   acceptRel: db.prepare("UPDATE friends SET status = 'accepted' WHERE a = ? AND b = ?"),
   delRel: db.prepare('DELETE FROM friends WHERE (a = ? AND b = ?) OR (a = ? AND b = ?)'),
   relsOf: db.prepare(`
-    SELECT f.a, f.b, f.status, u.id, u.username FROM friends f
+    SELECT f.a, f.b, f.status AS rel, ${cols('u')} FROM friends f
     JOIN users u ON u.id = CASE WHEN f.a = ? THEN f.b ELSE f.a END
     WHERE f.a = ? OR f.b = ?`),
   addMsg: db.prepare('INSERT INTO messages (sender, recipient, text, created, file, grp, kind) VALUES (?, ?, ?, ?, ?, ?, ?)'),
@@ -99,7 +115,7 @@ const q = {
   file: db.prepare('SELECT * FROM files WHERE id = ?'),
   group: db.prepare('SELECT * FROM groups WHERE id = ?'),
   groupsOf: db.prepare('SELECT g.* FROM groups g JOIN group_members m ON m.grp = g.id WHERE m.uid = ? ORDER BY g.id'),
-  members: db.prepare('SELECT u.id, u.username FROM group_members m JOIN users u ON u.id = m.uid WHERE m.grp = ? ORDER BY m.joined, m.uid'),
+  members: db.prepare(`SELECT ${cols('u')} FROM group_members m JOIN users u ON u.id = m.uid WHERE m.grp = ? ORDER BY m.joined, m.uid`),
   isMember: db.prepare('SELECT 1 FROM group_members WHERE grp = ? AND uid = ?'),
   coMembers: db.prepare('SELECT DISTINCT b.uid FROM group_members a JOIN group_members b ON b.grp = a.grp AND b.uid != a.uid WHERE a.uid = ?'),
   addGroup: db.prepare('INSERT INTO groups (name, owner, created) VALUES (?, ?, ?)'),
@@ -148,11 +164,53 @@ function push(userId, event) {
   for (const ws of sockets.get(userId) || []) ws.send(data);
 }
 function friendIds(userId) {
-  return q.relsOf.all(userId, userId, userId).filter((r) => r.status === 'accepted').map((r) => r.id);
+  return q.relsOf.all(userId, userId, userId).filter((r) => r.rel === 'accepted').map((r) => r.id);
 }
 // кому важен статус «в сети»: друзья и все, с кем есть общая группа
 function contactIds(userId) {
   return [...new Set([...friendIds(userId), ...q.coMembers.all(userId).map((r) => r.uid)])];
+}
+
+// --- профиль и статус ---
+// Статус для других: нет соединения или «невидимка» — не в сети; «в сети», но давно не трогал ПК — неактивен
+const afk = (id) => [...(sockets.get(id) || [])].every((ws) => ws.afk);
+function statusOf(u) {
+  if (!online(u.id) || u.status === 'invisible') return 'offline';
+  const s = STATUSES.includes(u.status) ? u.status : 'online';
+  return s === 'online' && afk(u.id) ? 'idle' : s;
+}
+// online оставлен для клиентов до 0.1.7
+function pub(u) {
+  const status = statusOf(u);
+  return {
+    id: u.id, username: u.username, display: u.display || '', bio: u.bio || '', pronouns: u.pronouns || '',
+    custom: u.custom || '', avatar: u.avatar || '', banner: u.banner || '', bcolor: u.bcolor || '',
+    created: u.created, status, online: status !== 'offline',
+  };
+}
+// себе показываем выбранный статус (в том числе «невидимку»)
+const selfView = (u) => ({ ...pub(u), status: STATUSES.includes(u.status) ? u.status : 'online', online: true });
+
+const shown = new Map(); // id -> статус, который последним разослали контактам
+function announce(id) {
+  const u = q.userById.get(id);
+  if (!u) return;
+  const status = statusOf(u);
+  if (shown.get(id) === status) return;
+  shown.set(id, status);
+  for (const f of contactIds(id)) push(f, { type: 'presence', userId: id, online: status !== 'offline', status });
+}
+// Профиль изменился: контактам — как его видят они, своим вкладкам и устройствам — целиком
+function pushProfile(id) {
+  const u = q.userById.get(id);
+  const view = pub(u);
+  for (const f of contactIds(id)) push(f, { type: 'user', user: view });
+  push(id, { type: 'me', user: selfView(u) });
+}
+function setImage(id, kind, name) {
+  const old = q.userById.get(id)?.[kind];
+  q.setImage[kind].run(name, id);
+  if (old) fs.rmSync(path.join(AVATARS_DIR, old), { force: true });
 }
 function isFriend(a, b) {
   const r = q.rel.get(a, b, b, a);
@@ -170,7 +228,7 @@ function pushGroup(gid, event) {
 function groupView(g) {
   return {
     id: g.id, name: g.name, owner: g.owner, call: callUsers(g.id),
-    members: q.members.all(g.id).map((u) => ({ id: u.id, username: u.username, online: online(u.id) })),
+    members: q.members.all(g.id).map(pub),
   };
 }
 function memberGroup(me, gid) {
@@ -230,8 +288,8 @@ function kickFromCall(gid, uid) {
 function friendsView(userId) {
   const out = { friends: [], incoming: [], outgoing: [] };
   for (const r of q.relsOf.all(userId, userId, userId)) {
-    const u = { id: r.id, username: r.username, online: online(r.id) };
-    if (r.status === 'accepted') out.friends.push(u);
+    const u = pub(r);
+    if (r.rel === 'accepted') out.friends.push(u);
     else if (r.b === userId) out.incoming.push(u);
     else out.outgoing.push(u);
   }
@@ -245,15 +303,51 @@ const routes = {
     if (!/^[\p{L}\d_.-]{2,32}$/u.test(username)) throw [400, 'Ник: 2-32 символа, буквы/цифры/_.-'];
     if (String(b.password || '').length < 6) throw [400, 'Пароль минимум 6 символов'];
     if (q.userByName.get(username)) throw [409, 'Ник занят'];
-    const { lastInsertRowid } = q.addUser.run(username, hashPass(b.password), Date.now());
-    return { token: sign(Number(lastInsertRowid)), user: { id: Number(lastInsertRowid), username } };
+    const id = Number(q.addUser.run(username, hashPass(b.password), Date.now()).lastInsertRowid);
+    return { token: sign(id), user: selfView(q.userById.get(id)) };
   },
   'POST /api/login': async (_u, b) => {
     const u = q.userByName.get(String(b.username || '').trim());
     if (!u || !checkPass(String(b.password || ''), u.pass)) throw [401, 'Неверный ник или пароль'];
-    return { token: sign(u.id), user: { id: u.id, username: u.username } };
+    return { token: sign(u.id), user: selfView(u) };
   },
-  'GET /api/me': async (me) => me,
+  'GET /api/me': async (me) => selfView(me),
+  // Свой профиль: присланные поля меняем, остальные не трогаем; avatar/banner: null — убрать картинку
+  'POST /api/me/profile': async (me, b) => {
+    const str = (k, max, oneLine = true) => {
+      if (b[k] === undefined) return me[k] || '';
+      const s = String(b[k] ?? '');
+      return (oneLine ? s.replace(/\s+/g, ' ') : s.replace(/\r/g, '').replace(/\n{3,}/g, '\n\n')).trim().slice(0, max);
+    };
+    const bcolor = b.bcolor === undefined ? me.bcolor || '' : String(b.bcolor || '');
+    if (bcolor && !/^#[0-9a-f]{6}$/i.test(bcolor)) throw [400, 'Неверный цвет баннера'];
+    q.setProfile.run(str('display', 32), str('bio', 190, false), str('pronouns', 40), str('custom', 128), bcolor, me.id);
+    for (const kind of ['avatar', 'banner']) if (b[kind] === null) setImage(me.id, kind, null);
+    pushProfile(me.id);
+    return selfView(q.userById.get(me.id));
+  },
+  'POST /api/me/status': async (me, b) => {
+    if (!STATUSES.includes(b.status)) throw [400, 'Неизвестный статус'];
+    q.setStatus.run(b.status, me.id);
+    announce(me.id);
+    const view = selfView(q.userById.get(me.id));
+    push(me.id, { type: 'me', user: view });
+    return view;
+  },
+  // Профиль другого человека: друга, участника общей группы или того, с кем есть заявка в друзья
+  'GET /api/users/profile': async (me, _b, url) => {
+    const id = Number(url.searchParams.get('id'));
+    const u = q.userById.get(id);
+    if (!u || !(id === me.id || q.rel.get(me.id, id, id, me.id) || q.coMembers.all(me.id).some((r) => r.uid === id)))
+      throw [404, 'Пользователь не найден'];
+    if (id === me.id) return { ...selfView(u), mutualFriends: [], mutualGroups: [] };
+    const mine = new Set(friendIds(me.id));
+    return {
+      ...pub(u),
+      mutualFriends: friendIds(id).filter((f) => mine.has(f)),
+      mutualGroups: q.groupsOf.all(me.id).filter((g) => isMember(g.id, id)).map((g) => g.id),
+    };
+  },
   'GET /api/friends': async (me) => friendsView(me.id),
   'POST /api/friends/request': async (me, b) => {
     const t = q.userByName.get(String(b.username || '').trim());
@@ -426,6 +520,51 @@ async function uploadFile(req, res, url, send) {
   send(200, msg);
 }
 
+// Аватарка или баннер (?kind=banner): тело — картинка, уже обрезанная и уменьшенная клиентом
+const MAGIC = { png: /^\x89PNG/, jpg: /^\xff\xd8\xff/, gif: /^GIF8/, webp: /^RIFF....WEBP/s };
+async function uploadImage(req, res, url, send) {
+  const me = verify(bearer(req));
+  if (!me) return send(401, { error: 'Нужно войти' });
+  const kind = url.searchParams.get('kind') === 'banner' ? 'banner' : 'avatar';
+  const ext = IMAGE_EXT[String(req.headers['content-type'] || '').toLowerCase()];
+  if (!ext) return send(415, { error: 'Нужна картинка PNG, JPEG, WebP или GIF' });
+  const size = Number(req.headers['content-length']);
+  if (!size) return send(400, { error: 'Пустой файл' });
+  if (size > MAX_IMAGE) return send(413, { error: `Картинка больше ${MAX_IMAGE / 1048576} МБ` });
+  const chunks = [];
+  let got = 0;
+  try {
+    for await (const chunk of req) {
+      got += chunk.length;
+      if (got > size) throw new Error('too long');
+      chunks.push(chunk);
+    }
+  } catch {
+    return res.destroyed || send(400, { error: 'Загрузка прервалась' });
+  }
+  const data = Buffer.concat(chunks);
+  if (got !== size) return send(400, { error: 'Загрузка прервалась' });
+  if (!MAGIC[ext].test(data.subarray(0, 12).toString('latin1'))) return send(415, { error: 'Файл не похож на картинку' });
+  const name = crypto.randomBytes(16).toString('hex') + '.' + ext;
+  fs.writeFileSync(path.join(AVATARS_DIR, name), data);
+  setImage(me.id, kind, name);
+  pushProfile(me.id);
+  send(200, selfView(q.userById.get(me.id)));
+}
+
+// Аватарки и баннеры видны всем, как в Discord; имя файла случайное, а при смене картинки — новое
+function sendImage(res, name, send) {
+  const file = path.join(AVATARS_DIR, name);
+  let st;
+  try { st = fs.statSync(file); } catch { return send(404, { error: 'Нет картинки' }); }
+  const type = Object.keys(IMAGE_EXT).find((t) => name.endsWith('.' + IMAGE_EXT[t]));
+  res.writeHead(200, {
+    'Content-Type': type, 'Content-Length': st.size, 'X-Content-Type-Options': 'nosniff',
+    'Cache-Control': 'public, max-age=31536000, immutable',
+  });
+  fs.createReadStream(file).on('error', () => res.destroy()).pipe(res);
+}
+
 // Картинки, видео и звук показываем прямо в чате, остальное — только скачивание
 const INLINE = /^(image\/(png|jpeg|gif|webp|avif|bmp)|video\/(mp4|webm|ogg)|audio\/[\w.+-]+)$/;
 
@@ -484,6 +623,9 @@ const server = http.createServer(async (req, res) => {
     return fs.createReadStream(RINGTONE).pipe(res);
   }
   if (url.pathname === '/api/dm/file' && req.method === 'POST') return uploadFile(req, res, url, send);
+  if (url.pathname === '/api/me/image' && req.method === 'POST') return uploadImage(req, res, url, send);
+  const image = /^\/api\/avatars\/([0-9a-f]{32}\.(png|jpg|webp|gif))$/.exec(url.pathname)?.[1];
+  if (image && req.method === 'GET') return sendImage(res, image, send);
   const fileId = /^\/api\/files\/([0-9a-f]{32})$/.exec(url.pathname)?.[1];
   if (fileId && req.method === 'GET') return downloadFile(req, res, url, fileId, send);
   const handler = routes[`${req.method} ${url.pathname}`];
@@ -516,11 +658,10 @@ const wss = new WebSocketServer({ server, path: '/ws' });
 wss.on('connection', (ws, req) => {
   const me = verify(new URL(req.url, 'http://x').searchParams.get('token'));
   if (!me) return ws.close(4001, 'unauthorized');
-  const wasOnline = online(me.id);
   if (!sockets.has(me.id)) sockets.set(me.id, new Set());
   sockets.get(me.id).add(ws);
   ws.uid = me.id;
-  if (!wasOnline) for (const f of contactIds(me.id)) push(f, { type: 'presence', userId: me.id, online: true });
+  announce(me.id);
 
   ws.isAlive = true;
   ws.on('pong', () => (ws.isAlive = true));
@@ -528,6 +669,11 @@ wss.on('connection', (ws, req) => {
   ws.on('message', (raw) => {
     let m;
     try { m = JSON.parse(raw); } catch { return; }
+    // клиент давно не трогали (или снова трогают) — «в сети» сам становится «неактивен»
+    if (m.type === 'afk') {
+      ws.afk = !!m.afk;
+      return announce(me.id);
+    }
     // Групповой звонок: вошёл / вышел. ring — первый вошедший звонит остальным
     if (m.type === 'gcall_join' || m.type === 'gcall_leave') {
       const gid = Number(m.group);
@@ -552,10 +698,8 @@ wss.on('connection', (ws, req) => {
     setGcall(ws, 0);
     const set = sockets.get(me.id);
     set?.delete(ws);
-    if (set && set.size === 0) {
-      sockets.delete(me.id);
-      for (const f of contactIds(me.id)) push(f, { type: 'presence', userId: me.id, online: false });
-    }
+    if (set && set.size === 0) sockets.delete(me.id);
+    announce(me.id); // закрылось «активное» окно — остальные могут быть неактивны
   });
 });
 setInterval(() => {

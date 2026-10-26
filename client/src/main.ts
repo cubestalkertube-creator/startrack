@@ -3,8 +3,17 @@ import {
   AudioPresets, DisconnectReason, Room, RoomEvent, Track,
   type LocalTrackPublication, type Participant, type RemoteTrack, type TrackPublication,
 } from 'livekit-client';
+import { closePicker, emojify, isJumbo, loadEmoji, noteUsed, openPicker as openEmojiPicker, replaceCodes, suggest } from './emoji';
 
-type User = { id: number; username: string; online?: boolean };
+// offline — так другие видят «невидимку»
+type Status = 'online' | 'idle' | 'dnd' | 'invisible' | 'offline';
+// профиль как в Discord: display — отображаемое имя, custom — свой статус, avatar/banner — файлы на сервере
+type User = {
+  id: number; username: string; online?: boolean; status?: Status;
+  display?: string; bio?: string; pronouns?: string; custom?: string; avatar?: string; banner?: string; bcolor?: string; created?: number;
+};
+// профиль из /api/users/profile: что у нас с этим человеком общего
+type Profile = User & { mutualFriends: number[]; mutualGroups: number[] };
 // вложение: w/h — размер картинки/видео (для превью без «прыжков» ленты)
 type Att = { id: string; name: string; size: number; type: string; w: number | null; h: number | null };
 // grp — сообщение группы; kind — системное («X добавил(а) Y»); sname — ник автора (в группе)
@@ -42,6 +51,7 @@ const S = {
   filter: '', // поиск по списку бесед
   showProfile: store.get('profile') !== '0',
   uploads: [] as Upload[],
+  profiles: new Map<number, Profile>(), // загруженные профили (общие друзья и группы)
 };
 
 // ---------- иконки и аватарки ----------
@@ -76,31 +86,49 @@ const ICON = {
   arrowIn: 'M12 4l-1.41 1.41L16.17 11H4v2h12.17l-5.58 5.59L12 20l8-8z',
   arrowOut: 'M20 11H7.83l5.59-5.59L12 4l-8 8 8 8 1.41-1.41L7.83 13H20v-2z',
   edit: 'M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zM20.71 7.04c.39-.39.39-1.02 0-1.41l-2.34-2.34c-.39-.39-1.02-.39-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z',
+  chevron: 'M9.29 6.71a1 1 0 0 0 0 1.41L13.17 12l-3.88 3.88a1 1 0 1 0 1.42 1.41l4.59-4.59a1 1 0 0 0 0-1.41L10.7 6.7a1 1 0 0 0-1.41.01z',
+  copy: 'M16 1H4c-1.1 0-2 .9-2 2v14h2V3h12V1zm3 4H8c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm0 16H8V7h11v14z',
+  image: 'M21 19V5c0-1.1-.9-2-2-2H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2zM8.5 13.5l2.5 3.01L14.5 12l4.5 6H5l3.5-4.5z',
 };
 const ic = (n: keyof typeof ICON, s = 20) =>
   `<svg class="ic" width="${s}" height="${s}" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="${ICON[n]}"/></svg>`;
 
 const AV_COLORS = ['#5865f2', '#3ba55c', '#faa61a', '#ed4245', '#eb459e', '#00a8fc', '#9b59b6', '#757e8a'];
 const avColor = (id: number) => AV_COLORS[(Number.isFinite(id) ? id : 0) % AV_COLORS.length];
-// status: undefined — без значка, true/false — в сети / не в сети
-function avatar(u: User, size: number, status?: boolean) {
-  const letter = ([...u.username][0] || '?').toUpperCase();
-  return `<span class="av" style="--s:${size}px;--c:${avColor(u.id)}">${esc(letter)}${
-    status === undefined ? '' : `<i class="st ${status ? 'on' : ''}"></i>`}</span>`;
+// аватарка/баннер на сервере или ещё не сохранённая картинка из редактора профиля (blob:)
+const imgUrl = (name: string) => name.startsWith('blob:') ? name : `${S.server}/api/avatars/${name}`;
+// как в Discord: везде отображаемое имя, ник — в профиле
+const uname = (u: User) => u.display || u.username;
+const ST_NAME: Record<Status, string> = { online: 'В сети', idle: 'Неактивен', dnd: 'Не беспокоить', invisible: 'Невидимый', offline: 'Не в сети' };
+// Свой статус — выбранный (пока нет связи с сервером — «не в сети»), чужой — какой прислал сервер
+function stOf(u: User): Status {
+  if (u.id === S.me?.id) return S.ws?.readyState === WebSocket.OPEN ? S.me.status || 'online' : 'offline';
+  return u.status || (u.online ? 'online' : 'offline');
 }
+// status — показать значок статуса в углу
+function avatar(u: User, size: number, status = false) {
+  const inner = u.avatar ? `<img src="${esc(imgUrl(u.avatar))}" alt="" draggable="false">` : esc(([...u.username][0] || '?').toUpperCase());
+  return `<span class="av" style="--s:${size}px;--c:${avColor(u.id)}">${inner}${status ? `<i class="st ${stOf(u)}"></i>` : ''}</span>`;
+}
+const bannerStyle = (u: User) =>
+  u.banner ? `background:${u.bcolor || avColor(u.id)} url('${esc(imgUrl(u.banner))}') center/cover` : `background:${u.bcolor || avColor(u.id)}`;
 const friend = (id: number) => S.friends.friends.find((f) => f.id === id);
 const group = (id: number) => S.groups.find((g) => g.id === id);
-// без названия группа зовётся по никам участников, как в Discord
+// Кого знаем по id: себя, друзей, участников групп, заявки в друзья
+function userById(id: number): User | undefined {
+  if (id === S.me?.id) return S.me;
+  return friend(id) ?? S.groups.flatMap((g) => g.members).find((u) => u.id === id)
+    ?? [...S.friends.incoming, ...S.friends.outgoing].find((u) => u.id === id);
+}
+// без названия группа зовётся по именам участников, как в Discord
 const gname = (g: Group) =>
-  g.name || g.members.filter((u) => u.id !== S.me?.id).map((u) => u.username).join(', ') || 'Пустая группа';
+  g.name || g.members.filter((u) => u.id !== S.me?.id).map(uname).join(', ') || 'Пустая группа';
 const gavatar = (g: Group, size: number) =>
   `<span class="av grp" style="--s:${size}px;--c:${avColor(g.id + 3)}">${ic('friends', Math.round(size * 0.6))}</span>`;
-// «в сети» знаем и про участников групп, которые нам не друзья
-const isOnline = (id: number) => !!(friend(id)?.online ?? S.groups.flatMap((g) => g.members).find((u) => u.id === id)?.online);
 
 // Открытая беседа: ключ для S.msgs/S.unread, адресат для запросов и имя для подсказок
 function conv() {
-  if (S.peer) return { key: 'u' + S.peer.id, to: { peer: S.peer.id } as Record<string, number>, name: '@' + S.peer.username };
+  if (S.peer) return { key: 'u' + S.peer.id, to: { peer: S.peer.id } as Record<string, number>, name: '@' + uname(S.peer) };
   const g = S.gid ? group(S.gid) : undefined;
   if (g) return { key: 'g' + g.id, to: { group: g.id } as Record<string, number>, name: gname(g) };
   return null;
@@ -237,8 +265,10 @@ async function checkServer() {
 function logout() {
   hangup(true);
   closeIncoming();
-  closeSettings();
+  closeSettings(true);
   closeDlg();
+  closePop();
+  closePicker();
   S.token = '';
   S.me = null;
   S.peer = null;
@@ -305,7 +335,29 @@ function start(me: User) {
 
 async function act(b: HTMLElement) {
   const id = Number(b.dataset.id);
+  // кнопка во всплывающем профиле: сделали дело — профиль закрываем
+  if (b.closest('.pop, .pop-sub') && b.dataset.act !== 'statusmenu') closePop();
   switch (b.dataset.act) {
+    case 'me': return openSelfPop(b);
+    case 'statusmenu': return openStatusMenu(b);
+    case 'user': return id === S.me?.id ? openSelfPop(b) : openUserPop(id, b);
+    case 'fullprofile': return openFullProfile(id);
+    case 'editprofile': return openSettings('profile');
+    case 'setstatus': return setStatus(b.dataset.st as Status);
+    case 'customst': return customStatusDlg();
+    case 'copyid':
+      navigator.clipboard.writeText(String(id)).then(() => toast('ID скопирован'), () => toast('Не удалось скопировать'));
+      return;
+    case 'addfriend': {
+      const u = userById(id);
+      if (!u) return;
+      try {
+        S.friends = await api('/api/friends/request', { username: u.username });
+        renderFriends();
+        toast(friend(id) ? `${uname(u)} теперь в друзьях` : `Запрос дружбы для ${uname(u)} отправлен`);
+      } catch (err) { toast((err as Error).message); }
+      return;
+    }
     case 'home': return goHome();
     case 'tab': S.tab = b.dataset.tab as Tab; return goHome();
     case 'open': { const u = friend(id); return u && openChat(u); }
@@ -428,7 +480,7 @@ const unreadPill = (n: number) => n ? `<span class="pill">${n > 99 ? '99+' : n}<
 function renderDmList() {
   const has = (s: string) => !S.filter || s.toLowerCase().includes(S.filter);
   const groups = S.groups.filter((g) => has(gname(g)));
-  const list = S.friends.friends.filter((u) => has(u.username));
+  const list = S.friends.friends.filter((u) => has(u.username) || has(uname(u)));
   $('#flist').innerHTML = groups.map((g) => {
     const unread = S.unread.get('g' + g.id) || 0;
     const sub = C.state !== 'idle' && C.gid === g.id ? `<small class="incall">${ic('volume', 12)}В звонке</small>`
@@ -443,10 +495,12 @@ function renderDmList() {
   }).join('') + list.map((u) => {
     const unread = S.unread.get('u' + u.id) || 0;
     const inCall = C.state !== 'idle' && !C.gid && C.peer?.id === u.id;
+    // под именем, как в Discord, — свой статус
+    const sub = inCall ? `<small class="incall">${ic('volume', 12)}В звонке</small>` : u.custom && u.online ? `<small>${emojify(u.custom)}</small>` : '';
     return `
       <div class="dm ${S.peer?.id === u.id ? 'sel' : ''} ${unread ? 'unread' : ''}" data-act="open" data-id="${u.id}">
-        ${avatar(u, 32, !!u.online)}
-        <div class="dm-n"><span>${esc(u.username)}</span>${inCall ? `<small class="incall">${ic('volume', 12)}В звонке</small>` : ''}</div>
+        ${avatar(u, 32, true)}
+        <div class="dm-n"><span>${esc(uname(u))}</span>${sub}</div>
         ${unreadPill(unread)}
       </div>`;
   }).join('') || `<div class="muted">${S.filter ? 'Никого не нашлось' : 'Пока никого — добавьте друга'}</div>`;
@@ -467,13 +521,13 @@ function renderRail() {
     const g = key[0] === 'g' ? group(id) : undefined;
     const u = key[0] === 'u' ? friend(id) : undefined;
     if (!g && !u) return '';
-    return `<button class="rb" data-act="${g ? 'gopen' : 'open'}" data-id="${id}" title="${esc(g ? gname(g) : u!.username)}">${g ? gavatar(g, 48) : avatar(u!, 48)}${extra}</button>`;
+    return `<button class="rb" data-act="${g ? 'gopen' : 'open'}" data-id="${id}" title="${esc(g ? gname(g) : uname(u!))}">${g ? gavatar(g, 48) : avatar(u!, 48)}${extra}</button>`;
   };
   const unread = [...S.unread].filter(([key]) => key !== ck);
   rail.innerHTML = `
     <div class="ri sel"><button class="rb home" data-act="home" title="Личные сообщения">${ic('logo', 28)}</button></div>
     ${ck && (callG || C.peer) ? `<div class="ri">${callG ? btn(ck, `<span class="rb-voice">${ic('volume', 12)}</span>`)
-      : `<button class="rb" data-act="open" data-id="${C.peer!.id}" title="${esc(C.peer!.username)} — звонок">${avatar(C.peer!, 48)}<span class="rb-voice">${ic('volume', 12)}</span></button>`}</div>` : ''}
+      : `<button class="rb" data-act="open" data-id="${C.peer!.id}" title="${esc(uname(C.peer!))} — звонок">${avatar(C.peer!, 48)}<span class="rb-voice">${ic('volume', 12)}</span></button>`}</div>` : ''}
     ${unread.map(([key, n]) => { const b = btn(key, `<span class="rb-badge">${n > 99 ? '99+' : n}</span>`); return b && `<div class="ri dot">${b}</div>`; }).join('')}
     <div class="rail-sep"></div>
     <div class="ri"><button class="rb add" data-act="tab" data-tab="add" title="Добавить в друзья">${ic('plus', 24)}</button></div>
@@ -485,9 +539,10 @@ function renderUserbar() {
   if (!box || !S.me) return;
   const muted = C.selfMute || C.deaf;
   const online = S.ws?.readyState === WebSocket.OPEN;
+  // как в Discord: при наведении вместо статуса — ник
   box.innerHTML = `
-    <div class="ub-me" data-act="settings" title="Настройки">${avatar(S.me, 32, online)}
-      <div class="ub-n"><b>${esc(S.me.username)}</b><span>${online ? 'В сети' : 'Подключение…'}</span></div></div>
+    <div class="ub-me" data-act="me">${avatar(S.me, 32, true)}
+      <div class="ub-n"><b>${esc(uname(S.me))}</b><span class="ub-st">${online ? S.me.custom ? emojify(S.me.custom) : ST_NAME[stOf(S.me)] : 'Подключение…'}</span><span class="ub-u">${esc(S.me.username)}</span></div></div>
     <button class="ibtn ${muted ? 'red' : ''}" data-act="mic" title="${muted ? 'Включить микрофон' : 'Выключить микрофон'}">${ic(muted ? 'micOff' : 'mic')}</button>
     <button class="ibtn ${C.deaf ? 'red' : ''}" data-act="deaf" title="${C.deaf ? 'Включить звук' : 'Отключить звук'}">${ic(C.deaf ? 'headsetOff' : 'headset')}</button>
     <button class="ibtn" data-act="settings" title="Настройки пользователя">${ic('gear')}</button>`;
@@ -535,12 +590,14 @@ function renderHome() {
     return;
   }
 
+  // open — строка друга: со статусом, по щелчку — беседа
   const row = (u: User, sub: string, btns: string, open = false) => `
     <div class="frow" ${open ? `data-act="open" data-id="${u.id}"` : ''}>
-      ${avatar(u, 32, sub === 'В сети' ? true : sub === 'Не в сети' ? false : undefined)}
-      <div class="fr-n"><b>${esc(u.username)}</b><span>${sub}</span></div>
+      ${avatar(u, 32, open)}
+      <div class="fr-n"><b>${esc(uname(u))}<i>${esc(u.username)}</i></b><span>${sub}</span></div>
       <div class="fr-btns">${btns}</div>
     </div>`;
+  const friendSub = (u: User) => u.custom && u.online ? emojify(u.custom) : ST_NAME[stOf(u)];
   const rb = (a: string, id: number, icon: keyof typeof ICON, title: string, cls = '') =>
     `<button class="rbtn ${cls}" data-act="${a}" data-id="${id}" title="${title}">${ic(icon)}</button>`;
   let rows: string[];
@@ -555,7 +612,7 @@ function renderHome() {
     empty = 'Запросов дружбы нет.';
   } else {
     const list = S.tab === 'online' ? friends.filter((u) => u.online) : friends;
-    rows = list.map((u) => row(u, u.online ? 'В сети' : 'Не в сети',
+    rows = list.map((u) => row(u, friendSub(u),
       rb('open', u.id, 'chat', 'Написать') + rb('call', u.id, 'phone', 'Позвонить'), true));
     title = S.tab === 'online' ? 'В сети' : 'Все друзья';
     empty = S.tab === 'online' ? 'Сейчас никого нет в сети.' : 'Друзей пока нет — добавьте кого-нибудь по нику.';
@@ -586,6 +643,8 @@ async function openConv() {
   S.unread.delete(c.key);
   renderFriends();
   renderChat();
+  // общие друзья и группы для профиля справа
+  if (S.peer) { const id = S.peer.id; loadProfile(id).then(() => S.peer?.id === id && renderProfile()); }
   if (!S.msgs.has(c.key)) {
     const msgs = await api(S.gid ? '/api/group/messages?group=' + S.gid : '/api/dm/messages?peer=' + S.peer!.id);
     S.msgs.set(c.key, msgs);
@@ -609,10 +668,10 @@ function renderTop() {
   }
   if (!p) return;
   $('#topbar').innerHTML = `
-    <div class="tb-title">${avatar(p, 24, !!friend(p.id)?.online)}<b>${esc(p.username)}</b></div>
+    <div class="tb-title tb-user" data-act="user" data-id="${p.id}">${avatar(p, 24, true)}<b>${esc(uname(p))}</b></div>
     <div class="tb-actions">
       <button class="tb-btn" data-act="call" data-id="${p.id}" title="Начать голосовой звонок">${ic('phone', 22)}</button>
-      <button class="tb-btn" data-act="gnew" data-id="${p.id}" title="Создать группу с ${esc(p.username)}">${ic('addFriend', 22)}</button>
+      <button class="tb-btn" data-act="gnew" data-id="${p.id}" title="Создать группу с ${esc(uname(p))}">${ic('addFriend', 22)}</button>
       <button class="tb-btn ${S.showProfile ? 'on' : ''}" data-act="profile" title="${S.showProfile ? 'Скрыть профиль' : 'Показать профиль'}">${ic('account', 22)}</button>
     </div>`;
 }
@@ -626,14 +685,16 @@ function renderChat() {
   renderTop();
   $('#chat').innerHTML = `
     <div id="msgs"></div>
-    <form id="send"><div class="composer">
+    <form id="send"><div class="ac" hidden></div><div class="composer">
       <button type="button" class="att-btn" id="attach" title="Отправить файл">${ic('attach', 24)}</button>
       <input type="file" id="attfile" multiple hidden>
       <textarea rows="1" maxlength="4000" placeholder="${esc(composerHint(c))}"></textarea>
+      <button type="button" class="emo-btn" id="emobtn" title="Выбрать эмодзи"><span class="emo">${EMO_BTN[0]}</span></button>
     </div></form>`;
   const ta = $<HTMLTextAreaElement>('#send textarea');
   const pick = $<HTMLInputElement>('#attfile');
   $('#attach').onclick = () => pick.click();
+  bindEmoji(ta, $('#emobtn'), $('#send .ac'));
   pick.onchange = () => { if (pick.files?.length) sendFiles(c, pick.files); pick.value = ''; ta.focus(); };
   // вставка из буфера обмена: скриншоты и скопированные в проводнике файлы
   ta.onpaste = (e) => {
@@ -646,17 +707,92 @@ function renderChat() {
   box.addEventListener('load', () => { if (msgStick) box.scrollTop = box.scrollHeight; }, true);
   const grow = () => { ta.style.height = 'auto'; ta.style.height = Math.min(ta.scrollHeight, 300) + 'px'; };
   const send = async () => {
-    const text = ta.value.trim();
+    const text = replaceCodes(ta.value.trim());
     if (!text) return;
     ta.value = '';
     grow();
+    noteUsed(text);
     try { await api(c.to.group ? '/api/group/messages' : '/api/dm/messages', { ...c.to, text }); } catch (err) { toast((err as Error).message); }
   };
-  ta.oninput = grow;
-  ta.onkeydown = (e) => { if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); send(); } };
+  ta.addEventListener('input', grow);
+  ta.addEventListener('keydown', (e) => {
+    if (e.defaultPrevented) return; // Enter выбрал подсказку эмодзи
+    if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); send(); }
+  });
   ta.focus();
   renderMessages();
   renderProfile();
+}
+
+// ---------- эмодзи в поле ввода ----------
+// кнопка как в Discord: серая, при наведении цветная и каждый раз новая рожица
+const EMO_BTN = ['😀', '😁', '😆', '😅', '🤣', '😊', '😇', '🙂', '😉', '😍', '🥰', '😋', '😛', '🤪', '🤓', '😎', '🥳', '😏', '🤗', '🤔', '😮', '😳', '🥺', '😢', '😭', '😤', '😡', '🤯', '😱', '🤠'];
+
+// Вставка в поле ввода на место курсора (с пробелом, если вплотную к тексту)
+function insertText(ta: HTMLTextAreaElement | HTMLInputElement, text: string, from = ta.selectionStart ?? ta.value.length, to = ta.selectionEnd ?? from) {
+  const before = ta.value.slice(0, from);
+  const add = (before && !/\s$/.test(before) && ta instanceof HTMLTextAreaElement ? ' ' : '') + text;
+  if (ta.maxLength > 0 && ta.value.length - (to - from) + add.length > ta.maxLength) return;
+  ta.value = before + add + ta.value.slice(to);
+  const pos = from + add.length;
+  ta.setSelectionRange(pos, pos);
+  ta.dispatchEvent(new Event('input'));
+  ta.focus();
+}
+
+// Кнопка выбора эмодзи у поля и подсказки «:код» (ac — список подсказок; без него — только кнопка)
+function bindEmoji(ta: HTMLTextAreaElement | HTMLInputElement, btn: HTMLElement, ac?: HTMLElement) {
+  btn.onmouseenter = () => { btn.querySelector('.emo')!.textContent = EMO_BTN[Math.floor(Math.random() * EMO_BTN.length)]; };
+  btn.onclick = () => openEmojiPicker(btn, (u) => insertText(ta, u));
+  if (!ac) return;
+  const el: HTMLElement = ta; // у объединения типов addEventListener не знает KeyboardEvent
+  let items: { u: string; name: string }[] = [];
+  let sel = 0;
+  let start = 0; // где начинается «:код»
+  const hide = () => { ac.hidden = true; items = []; };
+  const draw = () => {
+    ac.innerHTML = `<h5>Эмодзи, совпадающие с <b>:${esc(ta.value.slice(start + 1, ta.selectionStart ?? 0))}</b></h5>` + items.map((it, i) =>
+      `<div class="ac-row ${i === sel ? 'sel' : ''}" data-i="${i}"><span class="emo">${it.u}</span><span>:${esc(it.name)}:</span></div>`).join('');
+  };
+  const choose = (i: number) => {
+    const it = items[i];
+    if (!it) return;
+    hide();
+    insertText(ta, it.u + ' ', start, ta.selectionStart ?? start);
+  };
+  el.addEventListener('input', async () => {
+    const pos = ta.selectionStart ?? 0;
+    const m = /(^|\s):([\p{L}\d_+-]{2,})$/u.exec(ta.value.slice(0, pos));
+    if (!m) return hide();
+    await loadEmoji();
+    if ((ta.selectionStart ?? 0) !== pos) return; // пока грузили данные, набрали дальше
+    start = pos - m[2].length - 1;
+    items = suggest(m[2]);
+    sel = 0;
+    if (!items.length) return hide();
+    ac.hidden = false;
+    draw();
+  });
+  el.addEventListener('keydown', (e) => {
+    if (ac.hidden || !items.length) return;
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+      e.preventDefault();
+      sel = (sel + (e.key === 'ArrowDown' ? 1 : -1) + items.length) % items.length;
+      draw();
+    } else if (e.key === 'Enter' || e.key === 'Tab') {
+      e.preventDefault();
+      choose(sel);
+    } else if (e.key === 'Escape') {
+      e.stopPropagation();
+      hide();
+    }
+  });
+  el.addEventListener('blur', () => setTimeout(hide, 150));
+  ac.onmousedown = (e) => {
+    e.preventDefault(); // не теряем фокус поля
+    const row = (e.target as HTMLElement).closest<HTMLElement>('.ac-row');
+    if (row) choose(Number(row.dataset.i));
+  };
 }
 
 const sameDay = (a: number, b: number) => new Date(a).toDateString() === new Date(b).toDateString();
@@ -736,12 +872,12 @@ function renderMessages() {
   const p = S.peer;
   const g = S.gid ? group(S.gid) : undefined;
   let html = p
-    ? `<div class="intro">${avatar(p, 80)}<h1>${esc(p.username)}</h1>
-        <p>Это начало истории ваших личных сообщений с <b>@${esc(p.username)}</b>.</p></div>`
+    ? `<div class="intro">${avatar(p, 80)}<h1>${esc(uname(p))}</h1><div class="intro-u">${esc(p.username)}</div>
+        <p>Это начало истории ваших личных сообщений с <b>${esc(uname(p))}</b>.</p></div>`
     : `<div class="intro">${gavatar(g!, 80)}<h1>${esc(c.name)}</h1>
         <p>Добро пожаловать в начало группы <b>${esc(c.name)}</b>.</p></div>`;
   // автор: в группе — участник (или ник из сообщения, если он уже вышел)
-  const author = (m: Msg): User => m.sender === me.id ? me : p ?? g!.members.find((u) => u.id === m.sender) ?? { id: m.sender, username: m.sname || '???' };
+  const author = (m: Msg): User => m.sender === me.id ? me : p ?? userById(m.sender) ?? { id: m.sender, username: m.sname || '???' };
   let prev: Msg | null = null;
   let last = 0; // время предыдущего сообщения — для разделителя дней
   for (const m of S.msgs.get(c.key) || []) {
@@ -749,17 +885,18 @@ function renderMessages() {
       html += `<div class="day"><span>${new Date(m.created).toLocaleDateString('ru', { day: 'numeric', month: 'long', year: 'numeric' })}</span></div>`;
     last = m.created;
     if (m.kind) {
-      html += renderSys(m, author(m).username);
+      html += renderSys(m, uname(author(m)));
       prev = null;
       continue;
     }
-    const text = (m.text ? `<p>${esc(m.text)}</p>` : '') + (m.file ? renderAtt(m.file) : '');
+    const text = (m.text ? `<p${isJumbo(m.text) ? ' class="jumbo"' : ''}>${emojify(m.text)}</p>` : '') + (m.file ? renderAtt(m.file) : '');
     // подряд идущие сообщения одного автора в пределах 7 минут — одной группой, как в Discord
     if (prev && prev.sender === m.sender && m.created - prev.created < 7 * 60e3 && sameDay(prev.created, m.created)) {
       html += `<div class="msg cont"><time>${new Date(m.created).toLocaleTimeString('ru', { hour: '2-digit', minute: '2-digit' })}</time>${text}</div>`;
     } else {
       const u = author(m);
-      html += `<div class="msg head">${avatar(u, 40)}<div class="mh"><b>${esc(u.username)}</b><time>${stamp(m.created)}</time></div>${text}</div>`;
+      const who = `data-act="user" data-id="${u.id}"`;
+      html += `<div class="msg head"><span class="mav" ${who}>${avatar(u, 40)}</span><div class="mh"><b ${who}>${esc(uname(u))}</b><time>${stamp(m.created)}</time></div>${text}</div>`;
     }
     prev = m;
   }
@@ -886,32 +1023,281 @@ function renderProfile() {
   }
   box.hidden = !p || !S.showProfile || (C.state !== 'idle' && callKey() === 'u' + p.id);
   if (box.hidden || !p) return;
-  const online = !!friend(p.id)?.online;
+  const prof = S.profiles.get(p.id);
+  // общие группы и друзья — сворачиваемыми списками, как в Discord
+  const mutual = (title: string, rows: string[]) => rows.length
+    ? `<details class="pf-mut"><summary>${title} — ${rows.length}${ic('chevron', 16)}</summary>${rows.join('')}</details>` : '';
+  const groups = (prof?.mutualGroups ?? []).map(group).filter((g): g is Group => !!g)
+    .map((g) => `<div class="pf-row" data-act="gopen" data-id="${g.id}">${gavatar(g, 32)}<span>${esc(gname(g))}</span></div>`);
+  const friends = (prof?.mutualFriends ?? []).map(friend).filter((u): u is User => !!u)
+    .map((u) => `<div class="pf-row" data-act="user" data-id="${u.id}">${avatar(u, 32, true)}<span>${esc(uname(u))}</span></div>`);
   box.innerHTML = `
     <div class="pf">
-      <div class="pf-banner" style="--c:${avColor(p.id)}"></div>
-      <div class="pf-av">${avatar(p, 80, online)}</div>
-      <div class="pf-body">
-        <h2>${esc(p.username)}</h2>
-        <div class="pf-u">${esc(p.username)} • #${p.id}</div>
-        <div class="pf-sec"><h4>Статус</h4><span class="pf-st ${online ? 'on' : ''}"><i></i>${online ? 'В сети' : 'Не в сети'}</span></div>
-      </div>
-      <button class="pf-btn" data-act="call" data-id="${p.id}">${ic('phone', 18)}Позвонить</button>
+      ${cardHtml(p, 'side', infoHtml(p) + (groups.length || friends.length
+        ? `<div class="pc-sec pf-muts">${mutual('Общие группы', groups)}${mutual('Общие друзья', friends)}</div>` : ''))}
+      <button class="pf-btn" data-act="fullprofile" data-id="${p.id}">Открыть полный профиль</button>
     </div>`;
+}
+
+// ---------- профили ----------
+const since = (t?: number) => t ? new Date(t).toLocaleDateString('ru', { day: 'numeric', month: 'short', year: 'numeric' }) : '';
+const statusDot = (s: Status) => `<i class="sti ${s}"></i>`;
+
+// Карточка профиля, как в Discord: баннер, аватарка, «пузырь» своего статуса, имя, ник и местоимения.
+// mode: pop — всплывающая, side — справа в беседе, full — полный профиль, preview — в редакторе, self — своя всплывающая
+function cardHtml(u: User, mode: 'pop' | 'side' | 'full' | 'preview' | 'self', body = '') {
+  const bubble = u.custom ? `<div class="pc-bubble" ${mode === 'self' ? 'data-act="customst" title="Изменить статус"' : ''}>${emojify(u.custom)}</div>`
+    : mode === 'self' ? `<div class="pc-bubble empty" data-act="customst">${ic('plus', 14)}Как настроение?</div>`
+    : mode === 'preview' ? '<div class="pc-bubble empty">Свой статус</div>' : '';
+  return `
+    <div class="pc m-${mode}">
+      <div class="pc-banner" style="${bannerStyle(u)}"></div>
+      <div class="pc-av">${avatar(u, mode === 'full' ? 120 : 80, true)}</div>
+      ${bubble}
+      <div class="pc-body">
+        <div class="pc-names"><h2>${esc(uname(u))}</h2><div class="pc-u">${esc(u.username)}${u.pronouns ? `<span>•</span>${esc(u.pronouns)}` : ''}</div></div>
+        ${body}
+      </div>
+    </div>`;
+}
+// «Обо мне» и дата регистрации
+const infoHtml = (u: User) =>
+  (u.bio ? `<div class="pc-sec"><h4>Обо мне</h4><p class="pc-bio">${emojify(u.bio)}</p></div>` : '')
+  + (u.created ? `<div class="pc-sec"><h4>В Startrack с</h4><span>${since(u.created)}</span></div>` : '');
+
+// Профиль с сервера: свежие поля и общие друзья/группы
+async function loadProfile(id: number) {
+  try {
+    const p: Profile = await api('/api/users/profile?id=' + id);
+    S.profiles.set(id, p);
+    const { mutualFriends: _f, mutualGroups: _g, ...u } = p;
+    if (id !== S.me?.id) mergeUser(u);
+    return p;
+  } catch { return null; }
+}
+
+// Новые данные человека — во все места, где он у нас есть (друзья, заявки, участники групп, звонок)
+function mergeUser(u: User) {
+  const copies = [...S.friends.friends, ...S.friends.incoming, ...S.friends.outgoing, ...S.groups.flatMap((g) => g.members),
+    S.peer, C.peer, C.incoming].filter((x): x is User => x?.id === u.id);
+  for (const x of new Set(copies)) Object.assign(x, u);
+}
+
+// ---------- всплывающие окна профиля ----------
+let popAnchor: HTMLElement | null = null;
+function closePop() {
+  document.querySelector('.pop')?.remove();
+  document.querySelector('.pop-sub')?.remove();
+  popAnchor = null;
+}
+// Повторный щелчок по тому же месту закрывает окно
+function popToggled(anchor: HTMLElement) {
+  if (popAnchor === anchor && document.querySelector('.pop')) { closePop(); return true; }
+  return false;
+}
+// place: right — справа от anchor (сообщения), left — слева (участники справа), up — над ним (панель пользователя)
+type Place = 'right' | 'left' | 'up';
+function placePop(el: HTMLElement, anchor: HTMLElement, place: Place) {
+  const r = anchor.getBoundingClientRect();
+  const w = el.offsetWidth, h = el.offsetHeight;
+  const x = place === 'up' ? r.left : place === 'left' ? r.left - w - 12 : r.right + 12;
+  const y = place === 'up' ? r.top - h - 8 : r.top;
+  el.style.left = Math.max(8, Math.min(x, innerWidth - w - 8)) + 'px';
+  el.style.top = Math.max(8, Math.min(y, innerHeight - h - 8)) + 'px';
+}
+function showPop(anchor: HTMLElement, html: string, place: Place) {
+  closePop();
+  const el = document.createElement('div');
+  el.className = 'pop';
+  el.innerHTML = html;
+  el.onclick = (e) => {
+    const b = (e.target as HTMLElement).closest<HTMLElement>('[data-act]');
+    if (b) act(b);
+  };
+  document.body.append(el);
+  popAnchor = anchor;
+  placePop(el, anchor, place);
+  return el;
+}
+document.addEventListener('mousedown', (e) => {
+  const t = e.target as Node;
+  const inside = [document.querySelector('.pop'), document.querySelector('.pop-sub'), popAnchor].some((x) => x?.contains(t));
+  if (document.querySelector('.pop') && !inside) closePop();
+}, true);
+
+const placeFor = (anchor: HTMLElement): Place => anchor.closest('.userbar') ? 'up' : anchor.closest('#profile, .tb-user') ? 'left' : 'right';
+
+// Свой профиль по щелчку на себя внизу слева: «Редактировать профиль», статус, свой статус
+function openSelfPop(anchor: HTMLElement) {
+  if (popToggled(anchor) || !S.me) return;
+  const me = S.me;
+  const st = me.status || 'online';
+  const el = showPop(anchor, cardHtml(me, 'self', `
+    <div class="pop-menu">
+      <button data-act="editprofile">${ic('edit', 18)}<span>Редактировать профиль</span></button>
+      <div class="pm-sep"></div>
+      <button class="pm-st" data-act="statusmenu">${statusDot(st)}<span>${ST_NAME[st]}</span>${ic('chevron', 18)}</button>
+    </div>
+    <div class="pop-menu"><button data-act="copyid" data-id="${me.id}">${ic('copy', 18)}<span>Скопировать ID пользователя</span></button></div>`), placeFor(anchor));
+  const row = $('.pm-st', el);
+  row.onmouseenter = () => openStatusMenu(row);
+  el.querySelectorAll<HTMLElement>('.pop-menu button:not(.pm-st)').forEach((b) => (b.onmouseenter = () => document.querySelector('.pop-sub')?.remove()));
+}
+
+// Подменю статусов справа от строки статуса (как на скриншоте Discord)
+function openStatusMenu(row: HTMLElement) {
+  if (document.querySelector('.pop-sub')) return;
+  const cur = S.me?.status || 'online';
+  const opt = (s: Status, hint = '') =>
+    `<button class="${cur === s ? 'on' : ''}" data-act="setstatus" data-st="${s}">${statusDot(s)}<div><b>${ST_NAME[s]}</b>${hint ? `<span>${hint}</span>` : ''}</div></button>`;
+  const el = document.createElement('div');
+  el.className = 'pop-sub';
+  el.innerHTML = `${opt('online')}<div class="pm-sep"></div>${opt('idle')}${opt('dnd', 'Входящие звонки будут без звука')}${opt('invisible', 'Вы будете казаться не в сети')}`;
+  el.onclick = (e) => {
+    const b = (e.target as HTMLElement).closest<HTMLElement>('[data-act]');
+    if (b) act(b);
+  };
+  document.body.append(el);
+  const r = row.getBoundingClientRect();
+  const left = r.right + 8 + el.offsetWidth < innerWidth ? r.right + 8 : r.left - el.offsetWidth - 8;
+  el.style.left = Math.max(8, left) + 'px';
+  el.style.top = Math.max(8, Math.min(r.top - 8, innerHeight - el.offsetHeight - 8)) + 'px';
+}
+
+async function setStatus(status: Status) {
+  try {
+    Object.assign(S.me!, await api('/api/me/status', { status }));
+    renderMe();
+  } catch (err) { toast((err as Error).message); }
+}
+
+// Всё, где видны свои имя, аватарка и статус (и свои копии в списках участников групп)
+function renderMe() {
+  if (!S.me) return;
+  const { status: _s, ...me } = S.me;
+  mergeUser(me);
+  renderUserbar();
+  renderFriends();
+  renderMessages();
+}
+
+// Кнопки под чужим профилем: написать/позвонить другу или заявка в друзья
+function userActions(u: User) {
+  if (friend(u.id)) return `
+    <div class="pc-btns">
+      <button class="btn" data-act="open" data-id="${u.id}">${ic('chat', 18)}Написать</button>
+      <button class="btn sec pc-call" data-act="call" data-id="${u.id}" title="Позвонить">${ic('phone', 18)}</button>
+    </div>`;
+  if (S.friends.incoming.some((x) => x.id === u.id))
+    return `<div class="pc-btns"><button class="btn green" data-act="accept" data-id="${u.id}">${ic('check', 18)}Принять заявку в друзья</button></div>`;
+  if (S.friends.outgoing.some((x) => x.id === u.id))
+    return `<div class="pc-btns"><button class="btn sec" disabled>Запрос дружбы отправлен</button></div>`;
+  return `<div class="pc-btns"><button class="btn" data-act="addfriend" data-id="${u.id}">${ic('addFriend', 18)}Добавить в друзья</button></div>`;
+}
+
+// «3 общих друга • 2 общие группы» с аватарками, как в Discord
+function mutualLine(id: number) {
+  const p = S.profiles.get(id);
+  if (!p) return '';
+  const fr = p.mutualFriends.map(friend).filter((u): u is User => !!u);
+  const gr = p.mutualGroups.filter((g) => group(g));
+  const parts = [];
+  if (fr.length) parts.push(`<span class="pc-stack">${fr.slice(0, 3).map((u) => avatar(u, 16)).join('')}</span>${fr.length} ${plural(fr.length, 'общий друг', 'общих друга', 'общих друзей')}`);
+  if (gr.length) parts.push(`${gr.length} ${plural(gr.length, 'общая группа', 'общие группы', 'общих групп')}`);
+  return parts.length ? `<div class="pc-mut" data-act="fullprofile" data-id="${id}">${parts.join('<i>•</i>')}</div>` : '';
+}
+
+// Чужой профиль по щелчку на аватарку или имя
+async function openUserPop(id: number, anchor: HTMLElement) {
+  if (popToggled(anchor)) return;
+  if (!userById(id)) return;
+  const place = placeFor(anchor);
+  const draw = () => {
+    const u = userById(id)!;
+    return cardHtml(u, 'pop', mutualLine(id) + infoHtml(u) + userActions(u)
+      + `<button class="pc-full" data-act="fullprofile" data-id="${id}">Открыть полный профиль</button>`);
+  };
+  const el = showPop(anchor, draw(), place);
+  await loadProfile(id);
+  if (!el.isConnected || !userById(id)) return;
+  el.innerHTML = draw();
+  placePop(el, anchor, place);
+}
+
+// Полный профиль: слева карточка, справа общие друзья и группы
+async function openFullProfile(id: number) {
+  if (!userById(id)) return;
+  let tab: 'friends' | 'groups' = 'friends';
+  const draw = () => {
+    const u = userById(id)!;
+    const p = S.profiles.get(id);
+    const fr = (p?.mutualFriends ?? []).map(friend).filter((x): x is User => !!x);
+    const gr = (p?.mutualGroups ?? []).map(group).filter((g): g is Group => !!g);
+    const rows = tab === 'friends'
+      ? fr.map((x) => `<div class="pf-row" data-act="open" data-id="${x.id}">${avatar(x, 40, true)}<div><b>${esc(uname(x))}</b><span>${esc(x.username)}</span></div></div>`)
+      : gr.map((g) => `<div class="pf-row" data-act="gopen" data-id="${g.id}">${gavatar(g, 40)}<div><b>${esc(gname(g))}</b><span>${g.members.length} ${plural(g.members.length, 'участник', 'участника', 'участников')}</span></div></div>`);
+    const self = id === S.me?.id;
+    return `
+      <div class="fp-left">${cardHtml(u, 'full', (self ? '' : userActions(u)) + infoHtml(u))}</div>
+      <div class="fp-right">
+        <nav class="fp-tabs">
+          <button data-tab="friends" class="${tab === 'friends' ? 'sel' : ''}">Общие друзья${p ? ` — ${fr.length}` : ''}</button>
+          <button data-tab="groups" class="${tab === 'groups' ? 'sel' : ''}">Общие группы${p ? ` — ${gr.length}` : ''}</button>
+        </nav>
+        <div class="fp-list">${rows.join('') || `<div class="fp-empty">${!p ? '<span class="spin"></span>' : self ? 'Это вы 🙂' : tab === 'friends' ? 'Нет общих друзей' : 'Нет общих групп'}</div>`}</div>
+      </div>`;
+  };
+  const bg = showDlg('fullpf', draw());
+  const dlg = $('.dlg', bg);
+  bg.onclick = (e) => {
+    const t = e.target as HTMLElement;
+    const tb = t.closest<HTMLElement>('[data-tab]');
+    if (tb) { tab = tb.dataset.tab as typeof tab; dlg.innerHTML = draw(); return; }
+    const b = t.closest<HTMLElement>('[data-act]');
+    if (!b || b.hasAttribute('disabled')) return;
+    if (b.dataset.act !== 'accept' && b.dataset.act !== 'addfriend') closeDlg();
+    act(b).then(() => { if (bg.isConnected) dlg.innerHTML = draw(); });
+  };
+  await loadProfile(id);
+  if (bg.isConnected) dlg.innerHTML = draw();
+}
+
+// Свой статус — «пузырь» у аватарки
+function customStatusDlg() {
+  const bg = showDlg('cstatus', `
+    <h3>Задать свой статус</h3>
+    <p>Его видно в вашем профиле и в списках друзей.</p>
+    <div class="cst-in"><input maxlength="128" placeholder="Чем заняты?" spellcheck="false" value="${esc(S.me?.custom || '')}">
+      <button type="button" class="emo-btn" title="Выбрать эмодзи"><span class="emo">${EMO_BTN[0]}</span></button></div>
+    <div class="dlg-btns"><button class="btn sec" data-r="clear">Очистить</button><span class="grow"></span><button class="btn sec" data-r="0">Отмена</button><button class="btn" data-r="1">Сохранить</button></div>`);
+  const inp = $<HTMLInputElement>('input', bg);
+  bindEmoji(inp, $('.emo-btn', bg));
+  inp.focus();
+  const save = async (custom: string) => {
+    try {
+      Object.assign(S.me!, await api('/api/me/profile', { custom }));
+      closeDlg();
+      renderMe();
+    } catch (err) { toast((err as Error).message); }
+  };
+  inp.onkeydown = (e) => { if (e.key === 'Enter') save(inp.value); };
+  $('[data-r="1"]', bg).onclick = () => save(inp.value);
+  $('[data-r="clear"]', bg).onclick = () => save('');
+  $('[data-r="0"]', bg).onclick = closeDlg;
 }
 
 // Участники группы: в сети сверху, корона у владельца; владелец может исключать
 function renderMembers(box: HTMLElement, g: Group) {
   const me = S.me!;
   const inCall = new Set(g.call);
-  const sorted = [...g.members].sort((a, b) => Number(!!b.online) - Number(!!a.online));
+  const sorted = [...g.members].sort((a, b) => Number(stOf(b) !== 'offline') - Number(stOf(a) !== 'offline'));
   box.innerHTML = `
     <div class="pf mem">
       <h4 class="mem-h">Участники — ${g.members.length}</h4>
       <div class="mem-list">${sorted.map((u) => `
-        <div class="mem-row ${u.online ? '' : 'off'}" ${u.id !== me.id && friend(u.id) ? `data-act="open" data-id="${u.id}"` : ''}>
-          ${avatar(u, 32, !!u.online)}
-          <span class="mem-n">${esc(u.username)}</span>
+        <div class="mem-row ${stOf(u) === 'offline' ? 'off' : ''}" data-act="user" data-id="${u.id}">
+          ${avatar(u, 32, true)}
+          <span class="mem-n"><b>${esc(uname(u))}</b>${u.custom && stOf(u) !== 'offline' ? `<small>${emojify(u.custom)}</small>` : ''}</span>
           ${g.owner === u.id ? `<span class="mem-own" title="Владелец группы">${ic('crown', 14)}</span>` : ''}
           ${inCall.has(u.id) ? `<span class="mem-call" title="В звонке">${ic('volume', 14)}</span>` : ''}
           ${g.owner === me.id && u.id !== me.id ? `<button class="ibtn sm mem-kick" data-act="gkick" data-gid="${g.id}" data-id="${u.id}" title="Исключить из группы">${ic('close', 14)}</button>` : ''}
@@ -968,10 +1354,10 @@ function openPicker(gid: number, preset: number[] = []) {
     const left = room - sel.size;
     $('.pk-left', bg).textContent = left > 0 ? `Можно добавить ещё ${left} ${plural(left, 'друга', 'друзей', 'друзей')}.` : 'Больше добавить нельзя: в группе не больше 10 участников.';
     const f = find.value.trim().toLowerCase();
-    const shown = friends.filter((u) => !f || u.username.toLowerCase().includes(f));
+    const shown = friends.filter((u) => !f || u.username.toLowerCase().includes(f) || uname(u).toLowerCase().includes(f));
     list.innerHTML = shown.map((u) => `
       <label class="pk-row ${sel.has(u.id) ? 'on' : ''}">
-        ${avatar(u, 32, !!u.online)}<span class="pk-n">${esc(u.username)}</span>
+        ${avatar(u, 32, true)}<span class="pk-n">${esc(uname(u))}</span>
         <input type="checkbox" data-id="${u.id}" ${sel.has(u.id) ? 'checked' : ''} ${!sel.has(u.id) && left <= 0 ? 'disabled' : ''}>
       </label>`).join('') || `<div class="muted">${friends.length ? 'Никого не нашлось' : g ? 'Все ваши друзья уже в группе' : 'Сначала добавьте друзей'}</div>`;
     go.textContent = g ? 'Добавить' : 'Создать группу';
@@ -1046,6 +1432,7 @@ function connectWs() {
     loadGroups().catch(() => {});
     // сервер узнаёт, кто в групповом звонке, по соединению — после обрыва напоминаем
     if (C.gid && C.state !== 'idle') wsSend({ type: 'gcall_join', group: C.gid, ring: false });
+    if (afk) wsSend({ type: 'afk', afk: true });
   };
   ws.onmessage = (e) => onEvent(JSON.parse(e.data));
   ws.onclose = () => {
@@ -1055,6 +1442,19 @@ function connectWs() {
   };
 }
 const wsSend = (m: object) => S.ws?.readyState === WebSocket.OPEN && S.ws.send(JSON.stringify(m));
+
+// Как в Discord: 10 минут не трогали мышь и клавиатуру (и не в звонке) — «в сети» становится «неактивен»
+const AFK_MS = 10 * 60e3;
+let afk = false;
+let lastInput = Date.now();
+const touched = () => {
+  lastInput = Date.now();
+  if (afk) { afk = false; wsSend({ type: 'afk', afk: false }); }
+};
+for (const ev of ['mousemove', 'mousedown', 'keydown', 'wheel', 'focus']) window.addEventListener(ev, touched, { passive: true });
+setInterval(() => {
+  if (!afk && C.state === 'idle' && Date.now() - lastInput > AFK_MS) { afk = true; wsSend({ type: 'afk', afk: true }); }
+}, 30e3);
 
 function onEvent(ev: any) {
   switch (ev.type) {
@@ -1069,12 +1469,22 @@ function onEvent(ev: any) {
     case 'friends': loadFriends(); break;
     case 'groups': loadGroups().catch(() => {}); break;
     case 'presence': {
-      const f = friend(ev.userId);
-      if (f) f.online = ev.online;
-      for (const g of S.groups) for (const u of g.members) if (u.id === ev.userId) u.online = ev.online;
+      mergeUser({ id: ev.userId, online: ev.online, status: ev.status } as User);
       renderFriends();
       break;
     }
+    // кто-то из друзей или участников групп поменял профиль
+    case 'user':
+      mergeUser(ev.user);
+      renderFriends();
+      renderMessages();
+      if (C.state !== 'idle') renderPeople();
+      break;
+    // свой профиль или статус поменяли (в том числе на другом устройстве)
+    case 'me':
+      Object.assign(S.me!, ev.user);
+      renderMe();
+      break;
     // кто сейчас в звонке группы
     case 'gcall': {
       const g = group(ev.group);
@@ -1089,7 +1499,7 @@ function onEvent(ev: any) {
     case 'call_invite': onIncoming(ev.from); break;
     case 'call_accept': if (C.peer?.id === ev.from.id) setCallState('incall'); break;
     case 'call_decline':
-      if (C.peer?.id === ev.from.id && C.state === 'calling') { toast(`${ev.from.username} отклонил звонок`); hangup(false); }
+      if (C.peer?.id === ev.from.id && C.state === 'calling') { toast(`${uname(userById(ev.from.id) ?? ev.from)} отклонил(а) звонок`); hangup(false); }
       break;
     case 'call_end':
       if (C.incoming?.id === ev.from.id) closeIncoming();
@@ -1145,7 +1555,7 @@ type Carry = { mic: boolean; tracks: { track: MediaStreamTrack; source: Track.So
 
 // беседа, в которой идёт звонок (тот же ключ, что у conv())
 const callKey = () => C.gid ? 'g' + C.gid : C.peer ? 'u' + C.peer.id : '';
-const callName = () => C.gid ? (group(C.gid) ? gname(group(C.gid)!) : 'Группа') : C.peer?.username ?? '';
+const callName = () => C.gid ? (group(C.gid) ? gname(group(C.gid)!) : 'Группа') : (C.peer ? uname(C.peer) : '');
 const ringing = () => !!C.incoming || !!C.incomingG;
 
 function setRelay(on: boolean) {
@@ -1283,7 +1693,7 @@ async function joinRoom(carry?: Carry, mode: 'auto' | 'all' = 'auto') {
       renderPeople();
       // в группе звонок продолжается, даже если остался один
       if (!peer || room.remoteParticipants.size > 0 || C.state !== 'incall') return;
-      setNet(`${peer.username} переподключается…`);
+      setNet(`${uname(peer)} переподключается…`);
       clearTimeout(C.peerGone);
       C.peerGone = window.setTimeout(() => { if (mine() && room.remoteParticipants.size === 0) { toast('Собеседник отключился'); hangup(true); } }, 20000);
     })
@@ -1368,12 +1778,12 @@ async function startGroupCall(gid: number, ring: boolean) {
 function onGroupRing(gid: number, from: User) {
   const g = group(gid);
   if (!g) return;
-  if (C.state !== 'idle' || ringing()) return toast(`${from.username} начал(а) звонок в «${gname(g)}»`);
+  if (C.state !== 'idle' || ringing()) return toast(`${uname(userById(from.id) ?? from)} начал(а) звонок в «${gname(g)}»`);
   C.incomingG = gid;
   $('#modal').innerHTML = `
     <div class="incoming">
       <div class="in-av">${gavatar(g, 80)}</div>
-      <b>${esc(gname(g))}</b><span>${esc(from.username)} звонит в группе…</span>
+      <b>${esc(gname(g))}</b><span>${esc(uname(userById(from.id) ?? from))} звонит в группе…</span>
       <div class="row">
         <button class="rbtn big red" id="dec" title="Отклонить">${ic('hangup', 26)}</button>
         <button class="rbtn big green" id="acc" title="Присоединиться">${ic('phone', 24)}</button>
@@ -1395,8 +1805,8 @@ function onIncoming(from: User) {
   C.incoming = from;
   $('#modal').innerHTML = `
     <div class="incoming">
-      <div class="in-av">${avatar(from, 80)}</div>
-      <b>${esc(from.username)}</b><span>Входящий звонок…</span>
+      <div class="in-av">${avatar(userById(from.id) ?? from, 80)}</div>
+      <b>${esc(uname(userById(from.id) ?? from))}</b><span>Входящий звонок…</span>
       <div class="row">
         <button class="rbtn big red" id="dec" title="Отклонить">${ic('hangup', 26)}</button>
         <button class="rbtn big green" id="acc" title="Принять">${ic('phone', 24)}</button>
@@ -1453,7 +1863,8 @@ async function ringtone(on: boolean, preview = false) {
     URL.revokeObjectURL(ringAudio.src);
     ringAudio = null;
   }
-  if (!on) return;
+  // «Не беспокоить»: входящий звонок показываем, но без звука
+  if (!on || (!preview && S.me?.status === 'dnd')) return;
   // своя мелодия пользователя, иначе общая мелодия сервера, иначе гудки
   const blob = (await idb<Blob>('readonly', (s) => s.get('ringtone')).catch(() => undefined))
     ?? (await idb<Blob>('readonly', (s) => s.get('serverRingtone')).catch(() => undefined));
@@ -1637,31 +2048,33 @@ function renderPeople() {
   // пока комната подключается — своя аватарка без индикаторов
   let html = !room && S.me ? `<div class="pp">${avatar(S.me, 80)}</div>` : '';
   html += parts.map((p) => {
-    const u = { id: Number(p.identity), username: p.name || p.identity };
-    return `<div class="pp ${p.isSpeaking ? 'speak' : ''}" title="${esc(u.username)}">${avatar(u, 80)}${
+    const u = userById(Number(p.identity)) ?? { id: Number(p.identity), username: p.name || p.identity };
+    return `<div class="pp ${p.isSpeaking ? 'speak' : ''}" title="${esc(uname(u))}" data-act="user" data-id="${u.id}">${avatar(u, 80)}${
       p.isMicrophoneEnabled ? '' : `<span class="pp-mute">${ic('micOff', 14)}</span>`}</div>`;
   }).join('');
   // собеседник ещё не подключился — показываем его аватарку с пульсацией
-  if (C.peer && !room?.remoteParticipants.size) html += `<div class="pp wait" title="${esc(C.peer.username)}">${avatar(C.peer, 80)}</div>`;
+  if (C.peer && !room?.remoteParticipants.size) html += `<div class="pp wait" title="${esc(uname(C.peer))}">${avatar(C.peer, 80)}</div>`;
   box.innerHTML = html;
 }
 
 // ---------- настройки ----------
-type SetTab = 'account' | 'voice' | 'sounds';
+type SetTab = 'account' | 'profile' | 'voice' | 'sounds';
 let setTab: SetTab = 'account';
 let ringPreview = false;
 let micTest: { stream: MediaStream; ctx: AudioContext; audio: HTMLAudioElement; raf: number } | null = null;
 
 function openSettings(tab: SetTab) {
   if (!S.me) return;
+  if (setTab !== tab && profDirty()) return shakeSavebar();
   setTab = tab;
   const navBtn = (t: SetTab, title: string) => `<button class="sn ${setTab === t ? 'sel' : ''}" data-set="${t}">${title}</button>`;
   $('#layer').innerHTML = `
     <div class="settings">
       <nav class="set-nav"><div class="set-nav-in">
-        <div class="set-me">${avatar(S.me, 40)}<div><b>${esc(S.me.username)}</b><span>Startrack ${__APP_VERSION__}</span></div></div>
+        <div class="set-me">${avatar(S.me, 40)}<div><b>${esc(uname(S.me))}</b><span>Startrack ${__APP_VERSION__}</span></div></div>
         <h5>Настройки пользователя</h5>
         ${navBtn('account', 'Моя учётная запись')}
+        ${navBtn('profile', 'Профиль')}
         <h5>Настройки приложения</h5>
         ${navBtn('voice', 'Голос и видео')}
         ${navBtn('sounds', 'Звуки')}
@@ -1678,13 +2091,16 @@ function openSettings(tab: SetTab) {
     if (!b) return;
     const t = b.dataset.set!;
     if (t === 'close') return closeSettings();
-    if (t === 'logout') return logout();
+    if (t === 'logout') return profDirty() ? shakeSavebar() : logout();
     openSettings(t as SetTab);
   };
   renderSettingsTab();
 }
 
-function closeSettings() {
+// force — закрыть, даже если в профиле есть несохранённые изменения (выход из аккаунта)
+function closeSettings(force = false) {
+  if (!force && profDirty()) return shakeSavebar();
+  dropDraft();
   stopMicTest();
   if (ringPreview && !ringing()) ringtone(false);
   ringPreview = false;
@@ -1693,7 +2109,8 @@ function closeSettings() {
 
 document.addEventListener('keydown', (e) => {
   if (e.key !== 'Escape') return;
-  if (document.querySelector('.lightbox')) closeViewer();
+  if (document.querySelector('.pop')) closePop();
+  else if (document.querySelector('.lightbox')) closeViewer();
   else if (document.querySelector('.dlg-bg')) closeDlg();
   else if (document.querySelector('.settings')) closeSettings();
 });
@@ -1703,13 +2120,15 @@ function renderSettingsTab() {
   const box = document.getElementById('setc');
   if (!box || !S.me) return;
   const me = S.me;
+  if (setTab === 'profile') return renderProfileEditor(box);
   if (setTab === 'account') {
     box.innerHTML = `
       <h2>Моя учётная запись</h2>
       <div class="acct">
-        <div class="acct-banner" style="--c:${avColor(me.id)}"></div>
-        <div class="acct-head">${avatar(me, 80, true)}<b>${esc(me.username)}</b></div>
+        <div class="acct-banner" style="${bannerStyle(me)}"></div>
+        <div class="acct-head">${avatar(me, 80, true)}<b>${esc(uname(me))}</b><button class="btn" data-set="profile">Редактировать профиль</button></div>
         <div class="acct-box">
+          <div class="acct-f"><h4>Отображаемое имя</h4><span>${esc(me.display || 'Не задано')}</span></div>
           <div class="acct-f"><h4>Имя пользователя</h4><span>${esc(me.username)}</span></div>
           <div class="acct-f"><h4>ID</h4><span>#${me.id}</span></div>
           <div class="acct-f"><h4>Сервер</h4><span>${esc(S.server)}</span></div>
@@ -1825,6 +2244,230 @@ function renderSettingsTab() {
   };
   $('#smt').onclick = () => (micTest ? stopMicTest() : startMicTest());
   fillDevices();
+}
+
+// ---------- редактор профиля ----------
+// Черновик: что поменяли, но ещё не сохранили. Картинка: { blob, url } — новая, null — убрать, undefined — как было
+type Img = { blob: Blob; url: string } | null | undefined;
+type Draft = { display: string; pronouns: string; bio: string; custom: string; bcolor: string; avatar: Img; banner: Img };
+let draft: Draft | null = null;
+const BANNER_COLORS = ['', '#5865f2', '#3ba55c', '#faa61a', '#ed4245', '#eb459e', '#00a8fc', '#9b59b6', '#1abc9c', '#2b2d31'];
+const TEXT_FIELDS = ['display', 'pronouns', 'bio', 'custom', 'bcolor'] as const;
+
+const newDraft = (): Draft => ({ ...Object.fromEntries(TEXT_FIELDS.map((k) => [k, S.me![k] || ''])) as Pick<Draft, typeof TEXT_FIELDS[number]>, avatar: undefined, banner: undefined });
+function dropDraft() {
+  for (const img of [draft?.avatar, draft?.banner]) if (img) URL.revokeObjectURL(img.url);
+  draft = null;
+}
+const profDirty = () => !!draft && !!S.me && (draft.avatar !== undefined || draft.banner !== undefined
+  || TEXT_FIELDS.some((k) => draft![k] !== (S.me![k] || '')));
+function shakeSavebar() {
+  const bar = document.querySelector<HTMLElement>('.savebar');
+  if (!bar) return;
+  bar.classList.remove('shake');
+  void bar.offsetWidth; // перезапуск анимации
+  bar.classList.add('shake');
+}
+
+// Как будет выглядеть профиль после сохранения
+function draftUser(): User {
+  const d = draft!;
+  const img = (i: Img, cur?: string) => i === undefined ? cur : i?.url ?? '';
+  return { ...S.me!, display: d.display.trim(), pronouns: d.pronouns.trim(), bio: d.bio.trim(), custom: d.custom.trim(), bcolor: d.bcolor,
+    avatar: img(d.avatar, S.me!.avatar), banner: img(d.banner, S.me!.banner) };
+}
+function drawPreview() {
+  const box = document.getElementById('pf-preview');
+  if (!box || !draft) return;
+  const u = draftUser();
+  box.innerHTML = cardHtml(u, 'preview', infoHtml(u) + '<div class="pc-btns"><button class="btn" tabindex="-1">Пример кнопки</button></div>');
+  const bar = document.querySelector<HTMLElement>('.savebar')!;
+  bar.hidden = !profDirty();
+  document.querySelectorAll<HTMLElement>('.pfe-sw').forEach((s) => s.classList.toggle('on', s.dataset.c === draft!.bcolor));
+  $<HTMLButtonElement>('#pf-avdel').disabled = !u.avatar;
+  $<HTMLButtonElement>('#pf-bndel').disabled = !u.banner;
+  $('#pf-bio-n').textContent = String(190 - draft.bio.length);
+}
+
+function renderProfileEditor(box: HTMLElement) {
+  draft ??= newDraft();
+  const d = draft;
+  const me = S.me!;
+  box.innerHTML = `
+    <h2>Профиль</h2>
+    <div class="pfe" id="pfedit">
+      <div class="pfe-form">
+        <label class="fld"><span>Отображаемое имя</span><input id="pf-display" maxlength="32" placeholder="${esc(me.username)}" spellcheck="false"></label>
+        <label class="fld"><span>Местоимения</span><input id="pf-pronouns" maxlength="40" placeholder="Добавьте местоимения" spellcheck="false"></label>
+        <hr>
+        <div class="fld"><span>Аватар</span>
+          <div class="row"><button class="btn" id="pf-av">Сменить аватар</button><button class="btn lnk" id="pf-avdel">Удалить аватар</button></div></div>
+        <hr>
+        <div class="fld"><span>Баннер профиля</span>
+          <div class="row"><button class="btn" id="pf-bn">${ic('image', 18)}Загрузить картинку</button><button class="btn lnk" id="pf-bndel">Убрать картинку</button></div></div>
+        <div class="fld"><span>Цвет баннера</span>
+          <div class="pfe-colors">${BANNER_COLORS.map((c) => `<button class="pfe-sw ${c ? '' : 'auto'}" data-c="${c}" style="background:${c || avColor(me.id)}" title="${c ? c : 'По умолчанию'}"></button>`).join('')}
+            <label class="pfe-sw pick" title="Свой цвет">${ic('edit', 16)}<input type="color" id="pf-color"></label></div></div>
+        <hr>
+        <div class="fld"><span>Свой статус</span>
+          <div class="cst-in"><input id="pf-custom" maxlength="128" placeholder="Чем заняты?" spellcheck="false"><button type="button" class="emo-btn" title="Выбрать эмодзи"><span class="emo">${EMO_BTN[0]}</span></button></div></div>
+        <div class="fld"><span>Обо мне</span>
+          <p class="set-hint">Пара слов о себе — увидят все, кто откроет ваш профиль.</p>
+          <div class="pfe-bio"><textarea id="pf-bio" maxlength="190" rows="4" placeholder="Опишите себя в трёх эмодзи"></textarea>
+            <button type="button" class="emo-btn" title="Выбрать эмодзи"><span class="emo">${EMO_BTN[0]}</span></button><small id="pf-bio-n"></small></div></div>
+      </div>
+      <div class="pfe-prev"><h5>Предпросмотр</h5><div id="pf-preview"></div></div>
+    </div>
+    <input type="file" id="pf-file" accept="image/png,image/jpeg,image/webp,image/gif" hidden>
+    <div class="savebar" hidden><span>Осторожно — у вас есть несохранённые изменения!</span>
+      <button class="btn lnk" id="pf-reset">Сбросить</button><button class="btn green" id="pf-save">Сохранить изменения</button></div>`;
+  for (const k of ['display', 'pronouns', 'custom', 'bio'] as const) {
+    const el = $<HTMLInputElement>('#pf-' + k);
+    el.value = d[k];
+    el.addEventListener('input', () => { d[k] = el.value; drawPreview(); });
+  }
+  bindEmoji($<HTMLInputElement>('#pf-custom'), $('.cst-in .emo-btn', box));
+  bindEmoji($<HTMLTextAreaElement>('#pf-bio'), $('.pfe-bio .emo-btn', box));
+  box.querySelectorAll<HTMLElement>('.pfe-sw[data-c]').forEach((s) => (s.onclick = () => { d.bcolor = s.dataset.c!; drawPreview(); }));
+  const color = $<HTMLInputElement>('#pf-color');
+  color.value = d.bcolor || avColor(me.id);
+  color.oninput = () => { d.bcolor = color.value; drawPreview(); };
+  // картинки: выбрать файл -> обрезать -> в черновик
+  const file = $<HTMLInputElement>('#pf-file');
+  let kind: 'avatar' | 'banner' = 'avatar';
+  const setImg = (k: 'avatar' | 'banner', img: Img) => {
+    const old = d[k];
+    if (old) URL.revokeObjectURL(old.url);
+    d[k] = img === null && !me[k] ? undefined : img; // убрать то, чего и не было, — не изменение
+    drawPreview();
+  };
+  $('#pf-av').onclick = () => { kind = 'avatar'; file.click(); };
+  $('#pf-bn').onclick = () => { kind = 'banner'; file.click(); };
+  $('#pf-avdel').onclick = () => setImg('avatar', null);
+  $('#pf-bndel').onclick = () => setImg('banner', null);
+  file.onchange = async () => {
+    const f = file.files?.[0];
+    file.value = '';
+    if (!f) return;
+    const blob = await cropImage(f, kind);
+    if (blob) setImg(kind, { blob, url: URL.createObjectURL(blob) });
+  };
+  $('#pf-reset').onclick = () => { dropDraft(); renderSettingsTab(); };
+  $('#pf-save').onclick = saveProfile;
+  drawPreview();
+}
+
+async function uploadImage(blob: Blob, kind: 'avatar' | 'banner') {
+  let r: Response;
+  try {
+    r = await fetch(`${S.server}/api/me/image?kind=${kind}`, {
+      method: 'POST', body: blob, signal: AbortSignal.timeout(120000),
+      headers: { Authorization: 'Bearer ' + S.token, 'Content-Type': blob.type },
+    });
+  } catch { throw new Error('Не удалось загрузить картинку: нет связи с сервером'); }
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(data.error || 'Не удалось загрузить картинку: HTTP ' + r.status);
+  return data as User;
+}
+
+async function saveProfile() {
+  const d = draft;
+  const btn = document.querySelector<HTMLButtonElement>('#pf-save');
+  if (!d || !btn) return;
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spin"></span>';
+  try {
+    for (const k of ['avatar', 'banner'] as const) {
+      const img = d[k];
+      if (img) { Object.assign(S.me!, await uploadImage(img.blob, k)); URL.revokeObjectURL(img.url); d[k] = undefined; }
+    }
+    const body: Record<string, unknown> = Object.fromEntries(TEXT_FIELDS.map((k) => [k, d[k]]));
+    for (const k of ['avatar', 'banner'] as const) if (d[k] === null) body[k] = null;
+    Object.assign(S.me!, await api('/api/me/profile', body));
+    dropDraft();
+    renderMe();
+    openSettings('profile');
+    toast('Профиль сохранён');
+  } catch (err) {
+    toast((err as Error).message);
+    btn.disabled = false;
+    btn.textContent = 'Сохранить изменения';
+    drawPreview();
+  }
+}
+
+// Обрезка картинки, как в Discord: двигаем мышью, масштаб — ползунком или колесом.
+// Аватарка — квадрат 512×512 (показывается кругом), баннер — 1500×600. GIF отправляем как есть, чтобы не пропала анимация.
+const CROP = { avatar: { w: 300, h: 300, ow: 512, oh: 512 }, banner: { w: 480, h: 192, ow: 1500, oh: 600 } };
+async function cropImage(file: File, kind: 'avatar' | 'banner'): Promise<Blob | null> {
+  if (!/^image\/(png|jpeg|webp|gif|bmp|avif)$/.test(file.type)) { toast('Нужна картинка: PNG, JPEG, WebP или GIF'); return null; }
+  if (file.type === 'image/gif') {
+    if (file.size <= 8 * 1048576) return file;
+    toast('GIF больше 8 МБ'); return null;
+  }
+  const url = URL.createObjectURL(file);
+  const img = new Image();
+  const ok = await new Promise<boolean>((r) => { img.onload = () => r(true); img.onerror = () => r(false); img.src = url; });
+  if (!ok || !img.naturalWidth) { URL.revokeObjectURL(url); toast('Не удалось открыть картинку'); return null; }
+  const c = CROP[kind];
+  return new Promise((resolve) => {
+    const bg = showDlg('crop', `
+      <h3>Изменить изображение</h3>
+      <div class="crop-box ${kind}" style="width:${c.w}px;height:${c.h}px"><canvas></canvas><div class="crop-mask"></div></div>
+      <div class="crop-zoom">${ic('image', 16)}<input type="range" min="1" max="4" step="0.01" value="1">${ic('image', 24)}</div>
+      <div class="dlg-btns"><button class="btn lnk" data-r="reset">Сбросить</button><span class="grow"></span><button class="btn sec" data-r="0">Отмена</button><button class="btn" data-r="1">Применить</button></div>`);
+    const cv = $<HTMLCanvasElement>('canvas', bg);
+    const zoomEl = $<HTMLInputElement>('input', bg);
+    const dpr = devicePixelRatio || 1;
+    cv.width = c.w * dpr;
+    cv.height = c.h * dpr;
+    const base = Math.max(c.w / img.naturalWidth, c.h / img.naturalHeight); // «cover»: картинка всегда закрывает рамку
+    let zoom = 1, x = 0, y = 0; // сдвиг центра картинки от центра рамки, в пикселях рамки
+    const clamp = () => {
+      const w = img.naturalWidth * base * zoom, h = img.naturalHeight * base * zoom;
+      x = Math.max(-(w - c.w) / 2, Math.min((w - c.w) / 2, x));
+      y = Math.max(-(h - c.h) / 2, Math.min((h - c.h) / 2, y));
+    };
+    const paint = (ctx: CanvasRenderingContext2D, k: number) => {
+      const s = base * zoom * k;
+      ctx.imageSmoothingQuality = 'high';
+      ctx.drawImage(img, (c.w * k) / 2 + x * k - (img.naturalWidth * s) / 2, (c.h * k) / 2 + y * k - (img.naturalHeight * s) / 2, img.naturalWidth * s, img.naturalHeight * s);
+    };
+    const draw = () => {
+      clamp();
+      const ctx = cv.getContext('2d')!;
+      ctx.clearRect(0, 0, cv.width, cv.height);
+      paint(ctx, dpr);
+    };
+    const setZoom = (z: number) => { zoom = Math.max(1, Math.min(4, z)); zoomEl.value = String(zoom); draw(); };
+    zoomEl.oninput = () => setZoom(Number(zoomEl.value));
+    cv.onwheel = (e) => { e.preventDefault(); setZoom(zoom * (e.deltaY < 0 ? 1.1 : 1 / 1.1)); };
+    cv.onpointerdown = (e) => {
+      cv.setPointerCapture(e.pointerId);
+      const sx = e.clientX - x, sy = e.clientY - y;
+      cv.onpointermove = (m) => { x = m.clientX - sx; y = m.clientY - sy; draw(); };
+      cv.onpointerup = () => { cv.onpointermove = null; };
+    };
+    draw();
+    let done = false;
+    const finish = (b: Blob | null) => {
+      if (done) return;
+      done = true;
+      URL.revokeObjectURL(url);
+      resolve(b);
+      closeDlg();
+    };
+    new MutationObserver((_, o) => { if (!bg.isConnected) { o.disconnect(); finish(null); } }).observe(document.body, { childList: true });
+    $('[data-r="0"]', bg).onclick = () => finish(null);
+    $('[data-r="reset"]', bg).onclick = () => { x = 0; y = 0; setZoom(1); };
+    $('[data-r="1"]', bg).onclick = () => {
+      const out = document.createElement('canvas');
+      out.width = c.ow;
+      out.height = c.oh;
+      paint(out.getContext('2d')!, c.ow / c.w);
+      out.toBlob((b) => b ? finish(b) : out.toBlob(finish, 'image/png'), 'image/webp', 0.9);
+    };
+  });
 }
 
 async function fillDevices() {

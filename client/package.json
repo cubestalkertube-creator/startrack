@@ -12,7 +12,9 @@
     "livekit-client": "^2.15.0"
   },
   "devDependencies": {
+    "@sableclient/twemoji-font": "^1.0.4",
     "@tauri-apps/cli": "^2.8.0",
+    "emojibase-data": "^18.0.0",
     "typescript": "^5.9.0",
     "vite": "^7.1.0"
   }
