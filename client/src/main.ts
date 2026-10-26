@@ -5,7 +5,11 @@ import {
 } from 'livekit-client';
 
 type User = { id: number; username: string; online?: boolean };
-type Msg = { id: number; sender: number; recipient: number; text: string; created: number };
+// вложение: w/h — размер картинки/видео (для превью без «прыжков» ленты)
+type Att = { id: string; name: string; size: number; type: string; w: number | null; h: number | null };
+type Msg = { id: number; sender: number; recipient: number; text: string; created: number; file?: Att | null };
+// файл, который сейчас загружается на сервер
+type Upload = { key: number; peer: number; name: string; size: number; sent: number; xhr: XMLHttpRequest; cancelled?: boolean };
 type Tab = 'online' | 'all' | 'pending' | 'add';
 declare const __APP_VERSION__: string; // версия из package.json (vite.config.ts)
 
@@ -29,6 +33,7 @@ const S = {
   tab: 'online' as Tab, // вкладка на странице «Друзья»
   filter: '', // поиск по списку бесед
   showProfile: store.get('profile') !== '0',
+  uploads: [] as Upload[],
 };
 
 // ---------- иконки и аватарки ----------
@@ -55,6 +60,9 @@ const ICON = {
   play: 'M8 5v14l11-7z',
   stop: 'M6 6h12v12H6z',
   download: 'M5 20h14v-2H5v2zM19 9h-4V3H9v6H5l7 7 7-7z',
+  attach: 'M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm5 11h-4v4h-2v-4H7v-2h4V7h2v4h4v2z',
+  file: 'M14 2H6c-1.1 0-1.99.9-1.99 2L4 20c0 1.1.89 2 1.99 2H18c1.1 0 2-.9 2-2V8l-6-6zm2 16H8v-2h8v2zm0-4H8v-2h8v2zm-3-5V3.5L18.5 9H13z',
+  music: 'M12 3v10.55c-.59-.34-1.27-.55-2-.55-2.21 0-4 1.79-4 4s1.79 4 4 4 4-1.79 4-4V7h4V3h-6z',
 };
 const ic = (n: keyof typeof ICON, s = 20) =>
   `<svg class="ic" width="${s}" height="${s}" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="${ICON[n]}"/></svg>`;
@@ -69,11 +77,16 @@ function avatar(u: User, size: number, status?: boolean) {
 }
 const friend = (id: number) => S.friends.friends.find((f) => f.id === id);
 
-function toast(text: string) {
+// onClick — уведомление можно нажать (например, «показать скачанный файл в папке»)
+let toastTimer = 0;
+function toast(text: string, onClick?: () => void) {
   const t = $('#toast');
   t.textContent = text;
   t.classList.add('show');
-  setTimeout(() => t.classList.remove('show'), 3500);
+  t.classList.toggle('click', !!onClick);
+  t.onclick = onClick ? () => { t.classList.remove('show'); onClick(); } : null;
+  clearTimeout(toastTimer);
+  toastTimer = window.setTimeout(() => t.classList.remove('show'), onClick ? 7000 : 3500);
 }
 
 // Сетевая ошибка (сервер недоступен), а не ответ сервера с ошибкой
@@ -229,6 +242,21 @@ function start(me: User) {
     if (b) act(b);
   };
   $<HTMLInputElement>('#find').oninput = (e) => { S.filter = (e.target as HTMLInputElement).value.trim().toLowerCase(); renderDmList(); };
+  // перетаскивание файлов в открытую беседу
+  const chat = $('#chat');
+  const hasFiles = (e: DragEvent) => !!S.peer && !!e.dataTransfer?.types.includes('Files');
+  chat.ondragenter = (e) => {
+    if (!hasFiles(e)) return;
+    chat.dataset.drop = `Отправить файлы @${S.peer!.username}`;
+    chat.classList.add('drop');
+  };
+  chat.ondragover = (e) => { if (hasFiles(e)) e.preventDefault(); };
+  chat.ondragleave = (e) => { if (!chat.contains(e.relatedTarget as Node)) chat.classList.remove('drop'); };
+  chat.ondrop = (e) => {
+    e.preventDefault();
+    chat.classList.remove('drop');
+    if (S.peer && e.dataTransfer?.files.length) sendFiles(S.peer, e.dataTransfer.files);
+  };
   renderFriends();
   renderChat();
   renderUserbar();
@@ -267,6 +295,17 @@ async function act(b: HTMLElement) {
     case 'update':
       if (C.state !== 'idle') return toast('Завершите звонок, чтобы обновиться');
       return installUpdate($('#modal'));
+    // ссылка скачивает файл сама, здесь только подсказка (в приложении файл тихо ложится в «Загрузки»)
+    case 'dl': if (tauri) toast(`Скачиваю «${b.dataset.name}»…`); return;
+    case 'view': {
+      const f = S.msgs.get(S.peer?.id ?? 0)?.find((m) => m.file?.id === b.dataset.fid)?.file;
+      return f && openViewer(f);
+    }
+    case 'upcancel': {
+      const up = S.uploads.find((u) => u.key === id);
+      if (up) { up.cancelled = true; up.xhr.abort(); finishUpload(up); }
+      return;
+    }
   }
 }
 
@@ -459,8 +498,24 @@ function renderChat() {
   renderTop();
   $('#chat').innerHTML = `
     <div id="msgs"></div>
-    <form id="send"><div class="composer"><textarea rows="1" maxlength="4000" placeholder="Написать @${esc(p.username)}"></textarea></div></form>`;
+    <form id="send"><div class="composer">
+      <button type="button" class="att-btn" id="attach" title="Отправить файл">${ic('attach', 24)}</button>
+      <input type="file" id="attfile" multiple hidden>
+      <textarea rows="1" maxlength="4000" placeholder="Написать @${esc(p.username)}"></textarea>
+    </div></form>`;
   const ta = $<HTMLTextAreaElement>('#send textarea');
+  const pick = $<HTMLInputElement>('#attfile');
+  $('#attach').onclick = () => pick.click();
+  pick.onchange = () => { if (pick.files?.length) sendFiles(p, pick.files); pick.value = ''; ta.focus(); };
+  // вставка из буфера обмена: скриншоты и скопированные в проводнике файлы
+  ta.onpaste = (e) => {
+    const files = e.clipboardData?.files;
+    if (files?.length) { e.preventDefault(); sendFiles(p, files); }
+  };
+  const box = $('#msgs');
+  box.onscroll = () => { msgStick = box.scrollHeight - box.scrollTop - box.clientHeight < 80; };
+  // картинка без известного размера догрузилась — не даём ленте уехать вверх
+  box.addEventListener('load', () => { if (msgStick) box.scrollTop = box.scrollHeight; }, true);
   const grow = () => { ta.style.height = 'auto'; ta.style.height = Math.min(ta.scrollHeight, 300) + 'px'; };
   const send = async () => {
     const text = ta.value.trim();
@@ -484,6 +539,53 @@ function stamp(t: number) {
   return new Date(t).toLocaleDateString('ru') + ' ' + hm;
 }
 
+const fsize = (n: number) =>
+  n < 1024 ? `${n} Б` : n < 1048576 ? `${(n / 1024).toFixed(1)} КБ` : n < 1073741824 ? `${(n / 1048576).toFixed(1)} МБ` : `${(n / 1073741824).toFixed(2)} ГБ`;
+// токен в ссылке: <img> и <video> не умеют слать заголовок Authorization
+const fileUrl = (f: Att, dl = false) => `${S.server}/api/files/${f.id}?${dl ? 'dl=1&' : ''}token=${encodeURIComponent(S.token)}`;
+// что показываем прямо в чате (то же, что сервер отдаёт inline)
+const IMG_RE = /^image\/(png|jpeg|gif|webp|avif|bmp)$/;
+const VID_RE = /^video\/(mp4|webm|ogg)$/;
+
+// Превью не больше 520×350, с заранее известным размером (лента не дёргается при загрузке)
+function mediaBox(f: Att) {
+  if (!f.w || !f.h) return 'max-width:520px;max-height:350px';
+  const k = Math.min(1, 520 / f.w, 350 / f.h);
+  return `width:${Math.max(1, Math.round(f.w * k))}px;aspect-ratio:${f.w}/${f.h}`;
+}
+
+function renderAtt(f: Att) {
+  const dl = `href="${esc(fileUrl(f, true))}" data-act="dl" data-name="${esc(f.name)}"`;
+  if (IMG_RE.test(f.type))
+    return `<div class="att-media img" style="${mediaBox(f)}" data-act="view" data-fid="${f.id}" title="${esc(f.name)}"><img data-fid="${f.id}" src="${esc(fileUrl(f))}" alt="${esc(f.name)}" draggable="false"></div>`;
+  if (VID_RE.test(f.type))
+    return `<div class="att-media" style="${mediaBox(f)}"><video data-fid="${f.id}" src="${esc(fileUrl(f))}" controls preload="metadata"></video></div>
+      <div class="att-cap"><a ${dl}>${esc(f.name)}</a><span>${fsize(f.size)}</span></div>`;
+  const audio = f.type.startsWith('audio/');
+  return `
+    <div class="att ${audio ? 'audio' : ''}">
+      <span class="att-ic">${ic(audio ? 'music' : 'file', 30)}</span>
+      <div class="att-n"><a ${dl} title="${esc(f.name)}">${esc(f.name)}</a><span>${fsize(f.size)}</span></div>
+      <a class="att-dl" ${dl} title="Скачать">${ic('download', 22)}</a>
+      ${audio ? `<audio data-fid="${f.id}" src="${esc(fileUrl(f))}" controls preload="none"></audio>` : ''}
+    </div>`;
+}
+
+function renderUpload(u: Upload) {
+  const pct = u.size ? Math.min(100, (u.sent / u.size) * 100) : 0;
+  return `
+    <div class="msg cont up" data-up="${u.key}">
+      <div class="att">
+        <span class="att-ic">${ic('file', 30)}</span>
+        <div class="att-n"><b title="${esc(u.name)}">${esc(u.name)}</b>
+          <div class="up-bar"><i style="width:${pct}%"></i></div>
+          <span class="up-txt">${fsize(u.sent)} из ${fsize(u.size)}</span></div>
+        <button class="att-dl" data-act="upcancel" data-id="${u.key}" title="Отменить">${ic('close', 22)}</button>
+      </div>
+    </div>`;
+}
+
+let msgStick = true; // лента прокручена до конца — новые сообщения держим в поле зрения
 function renderMessages() {
   const box = document.getElementById('msgs');
   const p = S.peer;
@@ -496,7 +598,7 @@ function renderMessages() {
   for (const m of S.msgs.get(p.id) || []) {
     if (!prev || !sameDay(prev.created, m.created))
       html += `<div class="day"><span>${new Date(m.created).toLocaleDateString('ru', { day: 'numeric', month: 'long', year: 'numeric' })}</span></div>`;
-    const text = `<p>${esc(m.text)}</p>`;
+    const text = (m.text ? `<p>${esc(m.text)}</p>` : '') + (m.file ? renderAtt(m.file) : '');
     // подряд идущие сообщения одного автора в пределах 7 минут — одной группой, как в Discord
     if (prev && prev.sender === m.sender && m.created - prev.created < 7 * 60e3 && sameDay(prev.created, m.created)) {
       html += `<div class="msg cont"><time>${new Date(m.created).toLocaleTimeString('ru', { hour: '2-digit', minute: '2-digit' })}</time>${text}</div>`;
@@ -506,9 +608,113 @@ function renderMessages() {
     }
     prev = m;
   }
+  html += S.uploads.filter((u) => u.peer === p.id).map(renderUpload).join('');
+  // уже показанные картинки и плееры переносим в новую разметку как есть:
+  // не перекачиваются, а видео/музыка не останавливаются, когда приходит новое сообщение
+  const keep = new Map([...box.querySelectorAll<HTMLElement>('img[data-fid], video[data-fid], audio[data-fid]')].map((el) => [el.dataset.fid!, el]));
   box.innerHTML = html;
+  box.querySelectorAll<HTMLElement>('img[data-fid], video[data-fid], audio[data-fid]').forEach((el) => {
+    const old = keep.get(el.dataset.fid!);
+    if (old) el.replaceWith(old);
+  });
   box.scrollTop = box.scrollHeight;
+  msgStick = true;
 }
+
+// ---------- файлы ----------
+const MAX_FILE = 500 * 1024 * 1024; // как на сервере
+let upSeq = 0;
+
+function sendFiles(peer: User, files: FileList) {
+  for (const f of [...files]) uploadFile(peer, f);
+}
+
+// Размер картинки/видео для превью (читаем локальный файл, на сервер это не уходит)
+function mediaSize(file: File): Promise<[number, number] | null> {
+  const img = IMG_RE.test(file.type);
+  if (!img && !VID_RE.test(file.type)) return Promise.resolve(null);
+  return new Promise((resolve) => {
+    const url = URL.createObjectURL(file);
+    const end = (r: [number, number] | null) => { URL.revokeObjectURL(url); resolve(r); };
+    setTimeout(() => end(null), 5000);
+    if (img) {
+      const i = new Image();
+      i.onload = () => end(i.naturalWidth ? [i.naturalWidth, i.naturalHeight] : null);
+      i.onerror = () => end(null);
+      i.src = url;
+    } else {
+      const v = document.createElement('video');
+      v.preload = 'metadata';
+      v.muted = true;
+      v.onloadedmetadata = () => end(v.videoWidth ? [v.videoWidth, v.videoHeight] : null);
+      v.onerror = () => end(null);
+      v.src = url;
+    }
+  });
+}
+
+function finishUpload(up: Upload, err?: string) {
+  const i = S.uploads.indexOf(up);
+  if (i < 0) return;
+  S.uploads.splice(i, 1);
+  document.querySelector(`[data-up="${up.key}"]`)?.remove();
+  if (err) toast(err);
+}
+
+// Файл уходит на сервер одним запросом; сообщение с ним придёт обоим через WebSocket
+async function uploadFile(peer: User, file: File) {
+  if (!file.size) return toast(`«${file.name}» — пустой файл (папки отправить нельзя)`);
+  if (file.size > MAX_FILE) return toast(`«${file.name}» больше ${MAX_FILE / 1048576} МБ`);
+  const up: Upload = { key: ++upSeq, peer: peer.id, name: file.name, size: file.size, sent: 0, xhr: new XMLHttpRequest() };
+  S.uploads.push(up);
+  if (S.peer?.id === peer.id) renderMessages();
+  const dims = await mediaSize(file);
+  if (up.cancelled) return;
+  const qs = new URLSearchParams({ peer: String(peer.id), name: file.name });
+  if (dims) { qs.set('w', String(dims[0])); qs.set('h', String(dims[1])); }
+  const xhr = up.xhr;
+  const fail = (why: string) => `Не удалось отправить «${file.name}»: ${why}`;
+  xhr.open('POST', `${S.server}/api/dm/file?${qs}`);
+  xhr.setRequestHeader('Authorization', 'Bearer ' + S.token);
+  xhr.setRequestHeader('Content-Type', file.type || 'application/octet-stream');
+  xhr.upload.onprogress = (e) => {
+    up.sent = e.loaded;
+    const row = document.querySelector(`[data-up="${up.key}"]`);
+    if (!row) return;
+    $('.up-bar i', row).style.width = `${Math.min(100, (e.loaded / up.size) * 100)}%`;
+    $('.up-txt', row).textContent = e.loaded >= up.size ? 'Обработка…' : `${fsize(e.loaded)} из ${fsize(up.size)}`;
+  };
+  xhr.onload = () => {
+    if (xhr.status === 200) return finishUpload(up);
+    let why = 'HTTP ' + xhr.status;
+    try { why = JSON.parse(xhr.responseText).error || why; } catch {}
+    finishUpload(up, fail(why));
+  };
+  xhr.onerror = () => finishUpload(up, fail('нет связи с сервером'));
+  xhr.onabort = () => finishUpload(up);
+  xhr.send(file);
+}
+
+// Просмотр картинки во весь экран
+function openViewer(f: Att) {
+  closeViewer();
+  const lb = document.createElement('div');
+  lb.className = 'lightbox';
+  lb.innerHTML = `
+    <img src="${esc(fileUrl(f))}" alt="${esc(f.name)}">
+    <div class="lb-bar"><span>${esc(f.name)} • ${fsize(f.size)}</span>
+      <a href="${esc(fileUrl(f, true))}" class="lb-dl">${ic('download', 18)}Скачать</a></div>`;
+  lb.onclick = (e) => {
+    if ((e.target as HTMLElement).closest('.lb-dl')) { if (tauri) toast(`Скачиваю «${f.name}»…`); return; }
+    if ((e.target as HTMLElement).tagName !== 'IMG') closeViewer();
+  };
+  document.body.append(lb);
+}
+const closeViewer = () => document.querySelector('.lightbox')?.remove();
+
+// Файл, брошенный мимо чата, не должен открываться в окне приложения вместо Startrack
+document.addEventListener('dragover', (e) => e.preventDefault());
+document.addEventListener('drop', (e) => e.preventDefault());
 
 // Профиль собеседника справа (во время звонка с ним прячется, как в Discord)
 function renderProfile() {
@@ -1107,7 +1313,9 @@ function closeSettings() {
 }
 
 document.addEventListener('keydown', (e) => {
-  if (e.key === 'Escape' && document.querySelector('.settings')) closeSettings();
+  if (e.key !== 'Escape') return;
+  if (document.querySelector('.lightbox')) closeViewer();
+  else if (document.querySelector('.settings')) closeSettings();
 });
 
 function renderSettingsTab() {
@@ -1314,6 +1522,13 @@ function stopMicTest() {
 // покажем зелёной кнопкой в левой панели. Пока приложение открыто, проверяем раз в полчаса.
 const tauri = (window as any).__TAURI_INTERNALS__;
 const U = { version: '', notes: '' };
+
+// Скачанный файл: приложение (download.rs) сообщает, куда его сохранило
+(window as any).__stDownload = (path: string | null, ok: boolean) => {
+  if (!ok || !path) return toast('Не удалось скачать файл');
+  toast(`Сохранено в «Загрузки»: ${path.split(/[\\/]/).pop()} — нажмите, чтобы показать в папке`,
+    () => tauri.invoke('reveal_file', { path }).catch(() => {}));
+};
 
 async function checkUpdate() {
   if (!tauri || import.meta.env.DEV || U.version) return !!U.version;

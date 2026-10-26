@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod bypass;
+mod download;
 mod update;
 
 #[cfg(not(debug_assertions))]
@@ -24,6 +25,7 @@ fn main() {
         .manage(update::Pending::default())
         .invoke_handler(tauri::generate_handler![
             route_adapter,
+            download::reveal_file,
             update::update_check,
             update::update_install,
             update::update_progress
@@ -53,6 +55,9 @@ fn main() {
                 .inner_size(1200.0, 760.0)
                 .min_inner_size(800.0, 500.0)
                 .additional_browser_args(&args)
+                // перетаскивание файлов в чат обрабатывает страница (HTML5 drag-and-drop), а не Tauri
+                .disable_drag_drop_handler()
+                .on_download(download::on_download)
                 .build()?;
             #[cfg(windows)]
             allow_media(&win);
