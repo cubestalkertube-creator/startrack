@@ -1519,9 +1519,13 @@ function stopMicTest() {
 // ---------- обновления ----------
 // Как в Discord: при запуске проверяем релиз на GitHub; есть новее — сразу скачиваем и ставим.
 // Не успели проверить за несколько секунд — пускаем в приложение, а найденное обновление
-// покажем зелёной кнопкой в левой панели. Пока приложение открыто, проверяем раз в полчаса.
+// покажем зелёной кнопкой в левой панели. Пока приложение открыто, проверяем каждые 3 минуты
+// и когда окно снова в фокусе; проверка не прошла (сеть, VPN) — повторяем через минуту.
 const tauri = (window as any).__TAURI_INTERNALS__;
 const U = { version: '', notes: '' };
+let updTimer = 0;
+let updBusy = false;
+let updLast = 0;
 
 // Скачанный файл: приложение (download.rs) сообщает, куда его сохранило
 (window as any).__stDownload = (path: string | null, ok: boolean) => {
@@ -1531,13 +1535,21 @@ const U = { version: '', notes: '' };
 };
 
 async function checkUpdate() {
-  if (!tauri || import.meta.env.DEV || U.version) return !!U.version;
+  if (!tauri || import.meta.env.DEV || U.version || updBusy) return !!U.version;
+  updBusy = true;
+  updLast = Date.now();
+  clearTimeout(updTimer);
+  let ok = false;
   try {
     const r: [string, string] | null = await tauri.invoke('update_check');
+    ok = true;
     if (r) { [U.version, U.notes] = r; renderRail(); }
   } catch {}
+  updBusy = false;
+  if (!U.version) updTimer = window.setTimeout(checkUpdate, ok ? 3 * 60e3 : 60e3);
   return !!U.version;
 }
+window.addEventListener('focus', () => { if (Date.now() - updLast > 60e3) checkUpdate(); });
 
 const bootScreen = (body: string) => `<div class="auth-bg"><div class="boot">${ic('logo', 64)}${body}</div></div>`;
 const mb = (n: number) => (n / 1048576).toFixed(1);
@@ -1588,7 +1600,6 @@ function enter() {
   if (tauri && !import.meta.env.DEV) {
     $('#root').innerHTML = bootScreen('<div class="status"><span class="spin"></span>Проверка обновлений…</div>');
     const found = await Promise.race([checkUpdate(), new Promise<boolean>((r) => setTimeout(() => r(false), 6000))]);
-    setInterval(checkUpdate, 30 * 60e3);
     if (found) return installUpdate($('#root'), enter);
   }
   enter();

@@ -17,13 +17,19 @@ pub struct Pending {
 /// Есть ли версия новее. Возвращает (версия, описание изменений) или None.
 #[tauri::command]
 pub async fn update_check(app: AppHandle, state: State<'_, Pending>) -> Result<Option<(String, String)>, String> {
-    // таймаут общий для проверки и скачивания, поэтому большой; клиент сам не ждёт проверку дольше нескольких секунд
+    // проверка короткая: зависшее соединение (бывает через VPN) не должно откладывать следующую попытку
     let updater = app
         .updater_builder()
-        .timeout(Duration::from_secs(600))
+        .timeout(Duration::from_secs(15))
+        .header("Cache-Control", "no-cache")
+        .map_err(|e| e.to_string())?
         .build()
         .map_err(|e| e.to_string())?;
-    let update = updater.check().await.map_err(|e| e.to_string())?;
+    let mut update = updater.check().await.map_err(|e| e.to_string())?;
+    // а на скачивание установщика времени даём много
+    if let Some(u) = update.as_mut() {
+        u.timeout = Some(Duration::from_secs(600));
+    }
     let info = update.as_ref().map(|u| (u.version.clone(), u.body.clone().unwrap_or_default()));
     *state.update.lock().unwrap() = update;
     Ok(info)
