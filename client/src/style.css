@@ -276,6 +276,9 @@ button { font: inherit; color: inherit; cursor: pointer; border: 0; background: 
 /* сообщение из одних эмодзи — крупно, как в Discord */
 .msg p.jumbo .emo { font-size: 48px; line-height: 1.15; vertical-align: bottom; }
 /* системные сообщения группы */
+.msg-del { position: absolute; right: 16px; top: -14px; width: 32px; height: 28px; display: none; align-items: center; justify-content: center; background: #313338; border: 1px solid #1e1f22; border-radius: 6px; color: #b5bac1; z-index: 2; }
+.msg-del:hover { color: #f23f43; background: #3a3c42; }
+.msg:hover > .msg-del { display: flex; }
 .msg.sys { margin-top: 8px; padding-top: 4px; padding-bottom: 4px; }
 .msg.sys + .msg.sys { margin-top: 0; }
 .msg.sys p { color: var(--muted); }

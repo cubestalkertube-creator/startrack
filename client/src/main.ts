@@ -77,6 +77,7 @@ const ICON = {
   screen: 'M20 18c1.1 0 1.99-.9 1.99-2L22 6c0-1.11-.9-2-2-2H4c-1.11 0-2 .89-2 2v10c0 1.1.89 2 2 2H0v2h24v-2h-4zm-7-3.53v-2.19c-2.78 0-4.61.85-6 2.72.56-2.67 2.11-5.33 6-5.87V7l4 3.73-4 3.74z',
   account: 'M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm0 3c1.66 0 3 1.34 3 3s-1.34 3-3 3-3-1.34-3-3 1.34-3 3-3zm0 14.2c-2.5 0-4.71-1.28-6-3.22.03-1.99 4-3.08 6-3.08 1.99 0 5.97 1.09 6 3.08-1.29 1.94-3.5 3.22-6 3.22z',
   chat: 'M20 2H4c-1.1 0-1.99.9-1.99 2L2 22l4-4h14c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zM6 9h12v2H6V9zm8 5H6v-2h8v2zm4-6H6V6h12v2z',
+  trash: 'M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z',
   close: 'M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z',
   check: 'M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z',
   plus: 'M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6v2z',
@@ -394,6 +395,10 @@ async function act(b: HTMLElement) {
       if (S.peer?.id !== u.id) openChat(u);
       return startCall(u);
     }
+    case 'delmsg':
+      if (await confirmDlg('Удалить сообщение', 'Сообщение исчезнет у всех в беседе. Это нельзя отменить.', 'Удалить'))
+        try { await api('/api/messages/delete', { id }); } catch (err) { toast((err as Error).message); }
+      return;
     case 'gopen': return group(id) && openGroup(id);
     case 'gcall':
       if (S.gid !== id) openGroup(id);
@@ -1047,16 +1052,17 @@ function renderMessages() {
       prev = null;
       continue;
     }
+    const del = m.sender === me.id ? `<button class="msg-del" data-act="delmsg" data-id="${m.id}" title="Удалить у всех">${ic('trash', 18)}</button>` : '';
     const link = m.text ? imageLink(m.text) : '';
     const text = link ? `<div class="att-media link"><img src="${esc(link)}" alt="${esc(m.text)}" title="${esc(m.text)}" referrerpolicy="no-referrer" draggable="false"></div>`
       : (m.text ? `<p${isJumbo(m.text) ? ' class="jumbo"' : ''}>${emojify(m.text)}</p>` : '') + (m.file ? renderAtt(m.file) : '');
     // подряд идущие сообщения одного автора в пределах 7 минут — одной группой, как в Discord
     if (prev && prev.sender === m.sender && m.created - prev.created < 7 * 60e3 && sameDay(prev.created, m.created)) {
-      html += `<div class="msg cont"><time>${new Date(m.created).toLocaleTimeString('ru', { hour: '2-digit', minute: '2-digit' })}</time>${text}</div>`;
+      html += `<div class="msg cont" data-mid="${m.id}">${del}<time>${new Date(m.created).toLocaleTimeString('ru', { hour: '2-digit', minute: '2-digit' })}</time>${text}</div>`;
     } else {
       const u = author(m);
       const who = `data-act="user" data-id="${u.id}"`;
-      html += `<div class="msg head"><span class="mav" ${who}>${avatar(u, 40)}</span><div class="mh"><b ${who}>${esc(uname(u))}</b><time>${stamp(m.created)}</time></div>${text}</div>`;
+      html += `<div class="msg head" data-mid="${m.id}">${del}<span class="mav" ${who}>${avatar(u, 40)}</span><div class="mh"><b ${who}>${esc(uname(u))}</b><time>${stamp(m.created)}</time></div>${text}</div>`;
     }
     prev = m;
   }
@@ -1632,6 +1638,16 @@ function onEvent(ev: any) {
       else if (m.sender !== S.me!.id) { S.unread.set(key, (S.unread.get(key) || 0) + 1); renderFriends(); }
       // как в Discord: молчим про открытую беседу, пока окно в фокусе, и в «Не беспокоить»
       if (m.sender !== S.me!.id && !m.kind && S.me!.status !== 'dnd' && !(convKey() === key && document.hasFocus())) sfx('message');
+      break;
+    }
+    case 'message_deleted': {
+      const key = ev.grp ? 'g' + ev.grp : 'u' + (ev.sender === S.me!.id ? ev.peer : ev.sender);
+      const list = S.msgs.get(key);
+      if (list) {
+        const i = list.findIndex((m) => m.id === ev.id);
+        if (i >= 0) list.splice(i, 1);
+      }
+      if (convKey() === key) { const st = msgStick; const box = document.getElementById('msgs'); const top = box?.scrollTop ?? 0; renderMessages(); if (!st && box) { box.scrollTop = top; msgStick = false; } }
       break;
     }
     case 'friends': loadFriends(); break;

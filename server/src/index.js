@@ -122,6 +122,9 @@ const q = {
     JOIN users u ON u.id = CASE WHEN f.a = ? THEN f.b ELSE f.a END
     WHERE f.a = ? OR f.b = ?`),
   addMsg: db.prepare('INSERT INTO messages (sender, recipient, text, created, file, grp, kind) VALUES (?, ?, ?, ?, ?, ?, ?)'),
+  msg: db.prepare('SELECT * FROM messages WHERE id = ?'),
+  delMsg: db.prepare('DELETE FROM messages WHERE id = ?'),
+  delFile: db.prepare('DELETE FROM files WHERE id = ?'),
   history: db.prepare(`
     SELECT m.*, f.name AS fname, f.size AS fsize, f.type AS ftype, f.w AS fw, f.h AS fh, f.gif AS fgif FROM messages m
     LEFT JOIN files f ON f.id = m.file
@@ -454,6 +457,21 @@ const routes = {
     push(peer, { type: 'message', msg });
     push(me.id, { type: 'message', msg });
     return msg;
+  },
+  // Удалить своё сообщение у всех (вместе с вложением)
+  'POST /api/messages/delete': async (me, b) => {
+    const m = q.msg.get(Number(b.id));
+    if (!m || m.sender !== me.id || m.kind) throw [404, 'Сообщение не найдено'];
+    if (m.grp && !isMember(m.grp, me.id)) throw [404, 'Сообщение не найдено'];
+    q.delMsg.run(m.id);
+    if (m.file) {
+      q.delFile.run(m.file);
+      fs.rmSync(path.join(FILES_DIR, m.file), { force: true });
+    }
+    const event = { type: 'message_deleted', id: m.id, grp: m.grp || null, peer: m.grp ? null : m.recipient, sender: m.sender };
+    if (m.grp) pushGroup(m.grp, event);
+    else { push(m.recipient, event); push(me.id, event); }
+    return { ok: true };
   },
   'GET /api/groups': async (me) => q.groupsOf.all(me.id).map(groupView),
   // Новая группа из друзей; имя можно не задавать
