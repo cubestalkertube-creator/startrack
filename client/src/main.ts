@@ -4,6 +4,7 @@ import {
   type LocalTrackPublication, type Participant, type RemoteTrack, type TrackPublication,
 } from 'livekit-client';
 import { closePicker, emojify, isJumbo, loadEmoji, noteUsed, openPicker as openEmojiPicker, replaceCodes, suggest } from './emoji';
+import { SFX_GROUPS, setSfxOn, setSfxOutput, setSfxVol, sfx, sfxLoop, sfxOn, sfxVol, type SfxGroup } from './sounds';
 
 // offline — так другие видят «невидимку»
 type Status = 'online' | 'idle' | 'dnd' | 'invisible' | 'offline';
@@ -1464,6 +1465,8 @@ function onEvent(ev: any) {
       if (S.msgs.has(key)) S.msgs.get(key)!.push(m);
       if (convKey() === key) renderMessages();
       else if (m.sender !== S.me!.id) { S.unread.set(key, (S.unread.get(key) || 0) + 1); renderFriends(); }
+      // как в Discord: молчим про открытую беседу, пока окно в фокусе, и в «Не беспокоить»
+      if (m.sender !== S.me!.id && !m.kind && S.me!.status !== 'dnd' && !(convKey() === key && document.hasFocus())) sfx('message');
       break;
     }
     case 'friends': loadFriends(); break;
@@ -1553,6 +1556,8 @@ const C = {
 
 type Carry = { mic: boolean; tracks: { track: MediaStreamTrack; source: Track.Source }[] };
 
+setSfxOutput(C.outId);
+
 // беседа, в которой идёт звонок (тот же ключ, что у conv())
 const callKey = () => C.gid ? 'g' + C.gid : C.peer ? 'u' + C.peer.id : '';
 const callName = () => C.gid ? (group(C.gid) ? gname(group(C.gid)!) : 'Группа') : (C.peer ? uname(C.peer) : '');
@@ -1572,7 +1577,9 @@ function setNet(text: string) {
 
 async function setMute(mute: boolean) {
   C.selfMute = mute;
+  // включили микрофон при отключённом звуке — звук тоже возвращается, играет его сигнал
   if (!mute && C.deaf) setDeaf(false);
+  else sfx(mute ? 'mute' : 'unmute');
   try {
     await C.room?.localParticipant.setMicrophoneEnabled(!mute);
   } catch {
@@ -1584,6 +1591,7 @@ async function setMute(mute: boolean) {
 // Как в Discord: без звука — значит и без микрофона; при возврате звука микрофон как был
 function setDeaf(deaf: boolean) {
   C.deaf = deaf;
+  sfx(deaf ? 'deafen' : 'undeafen');
   document.querySelectorAll<HTMLAudioElement>('#audio audio').forEach((a) => (a.muted = C.deaf));
   C.room?.localParticipant.setMicrophoneEnabled(!deaf && !C.selfMute).then(renderCall, () => {});
   renderCall();
@@ -1677,17 +1685,23 @@ async function joinRoom(carry?: Carry, mode: 'auto' | 'all' = 'auto') {
     .on(RoomEvent.TrackUnsubscribed, (track: RemoteTrack) => { track.detach(); syncAudio(room); renderStage(); })
     .on(RoomEvent.Reconnected, () => syncAudio(room))
     .on(RoomEvent.LocalTrackPublished, renderStage)
-    .on(RoomEvent.LocalTrackUnpublished, (pub: LocalTrackPublication) => { pub.track?.detach().forEach((e) => e.remove()); renderStage(); })
+    .on(RoomEvent.LocalTrackUnpublished, (pub: LocalTrackPublication) => {
+      pub.track?.detach().forEach((e) => e.remove());
+      if (mine() && pub.source === Track.Source.ScreenShare) sfx('streamEnd');
+      renderStage();
+    })
     .on(RoomEvent.TrackMuted, renderPeople)
     .on(RoomEvent.TrackUnmuted, renderPeople)
     .on(RoomEvent.ActiveSpeakersChanged, renderPeople)
     .on(RoomEvent.ParticipantConnected, () => {
+      if (C.room === room) sfx('join');
       clearTimeout(C.peerGone);
       setNet('');
       setCallState('incall');
     })
     // Собеседник пропал — ждём, вдруг переподключается. Явное «Завершить» придёт через call_end
     .on(RoomEvent.ParticipantDisconnected, () => {
+      if (C.room === room) sfx('leave');
       syncAudio(room);
       renderStage();
       renderPeople();
@@ -1733,6 +1747,7 @@ async function joinRoom(carry?: Carry, mode: 'auto' | 'all' = 'auto') {
     return joinRoom(carry);
   }
   if (room.remoteParticipants.size > 0) { C.state = 'incall'; setNet(''); }
+  if (!carry && C.state === 'incall') sfx('connect');
   for (const t of carry?.tracks || [])
     if (t.track.readyState === 'live')
       await room.localParticipant.publishTrack(t.track, { source: t.source, ...screenPublishOpts() }).catch(() => {});
@@ -1853,11 +1868,9 @@ function idb<T>(mode: IDBTransactionMode, fn: (s: IDBObjectStore) => IDBRequest 
   });
 }
 
-let ringCtx: AudioContext | null = null;
 let ringAudio: HTMLAudioElement | null = null;
 async function ringtone(on: boolean, preview = false) {
-  ringCtx?.close();
-  ringCtx = null;
+  sfxLoop('ring', false);
   if (ringAudio) {
     ringAudio.pause();
     URL.revokeObjectURL(ringAudio.src);
@@ -1873,22 +1886,9 @@ async function ringtone(on: boolean, preview = false) {
     const a = (ringAudio = new Audio(URL.createObjectURL(blob)));
     a.loop = true;
     a.volume = 0.7;
-    return a.play().catch(() => beep());
+    return a.play().catch(() => sfxLoop('ring', true));
   }
-  beep();
-}
-
-function beep() {
-  const ctx = (ringCtx = new AudioContext());
-  for (let i = 0; i < 15; i++) {
-    const o = ctx.createOscillator(), g = ctx.createGain();
-    o.frequency.value = i % 2 ? 660 : 880;
-    g.gain.setValueAtTime(0.08, ctx.currentTime + i);
-    g.gain.setValueAtTime(0, ctx.currentTime + i + 0.4);
-    o.connect(g).connect(ctx.destination);
-    o.start(ctx.currentTime + i);
-    o.stop(ctx.currentTime + i + 0.4);
-  }
+  sfxLoop('ring', true);
 }
 
 function setCallState(s: typeof C.state) {
@@ -1898,6 +1898,7 @@ function setCallState(s: typeof C.state) {
 }
 
 function hangup(notify: boolean) {
+  if (C.state !== 'idle') sfx('disconnect');
   C.gen++;
   clearTimeout(C.ringTimer);
   clearTimeout(C.peerGone);
@@ -1927,6 +1928,7 @@ async function toggleScreen() {
       contentHint: C.hint,
       resolution: { width: q.w, height: q.h, frameRate: q.fps },
     }, screenPublishOpts());
+    if (lp.isScreenShareEnabled) sfx('streamStart');
   } catch (err) {
     if ((err as Error).name !== 'NotAllowedError') toast('Демонстрация не запустилась: ' + (err as Error).message);
   }
@@ -1940,6 +1942,7 @@ function syncCallBox() {
 }
 
 function renderCall() {
+  sfxLoop('calling', C.state === 'calling');
   renderUserbar();
   renderVoicebar();
   if (S.me) { renderDmList(); renderRail(); }
@@ -2149,14 +2152,27 @@ function renderSettingsTab() {
       <div class="ring-card">
         <span class="ring-ic">${ic('bell', 22)}</span>
         <div><b>${name ? esc(name) : server ? 'Мелодия сервера' : 'Стандартная'}</b>
-          <span>${name ? 'Своя мелодия — хранится на этом компьютере' : server ? 'Общая мелодия, загружена с сервера' : 'Простые гудки'}</span></div>
+          <span>${name ? 'Своя мелодия — хранится на этом компьютере' : server ? 'Общая мелодия, загружена с сервера' : 'Мелодия Startrack'}</span></div>
         <button class="rbtn" id="rplay" title="Прослушать">${ic(ringPreview ? 'stop' : 'play')}</button>
       </div>
       <div class="row">
         <button class="btn" id="rpick">Выбрать файл…</button>
         <button class="btn sec" id="rdef" ${name ? '' : 'disabled'}>По умолчанию</button>
       </div>
-      <input type="file" id="rfile" accept="audio/*" hidden>`;
+      <input type="file" id="rfile" accept="audio/*" hidden>
+      <hr>
+      <h3>Звуки приложения</h3>
+      <label class="fld sfx-vol"><span>Громкость звуков</span><input type="range" id="sfxvol" min="0" max="100" value="${Math.round(sfxVol * 100)}"></label>
+      ${(Object.keys(SFX_GROUPS) as SfxGroup[]).map((g) => `
+        <div class="switch-row sfx-row"><div><b>${SFX_GROUPS[g].title}</b><span>${SFX_GROUPS[g].hint}</span></div>
+          <button class="rbtn" data-sfx="${g}" title="Прослушать">${ic('play')}</button>
+          <input type="checkbox" class="switch" data-sfxon="${g}" ${sfxOn(g) ? 'checked' : ''}></div>`).join('')}`;
+    $<HTMLInputElement>('#sfxvol').onchange = (e) => { setSfxVol(Number((e.target as HTMLInputElement).value) / 100); sfx('message', true); };
+    box.querySelectorAll<HTMLElement>('[data-sfx]').forEach((b) => (b.onclick = () => {
+      const all = SFX_GROUPS[b.dataset.sfx as SfxGroup].sounds;
+      all.forEach((x, i) => setTimeout(() => sfx(x, true), i * 700));
+    }));
+    box.querySelectorAll<HTMLInputElement>('[data-sfxon]').forEach((c) => (c.onchange = () => setSfxOn(c.dataset.sfxon as SfxGroup, c.checked)));
     $('#rplay').onclick = () => {
       if (ringing()) return;
       ringPreview = !ringPreview;
@@ -2482,6 +2498,7 @@ async function fillDevices() {
     el.onchange = () => {
       C[key] = el.value;
       store.set(key, el.value);
+      if (key === 'outId') setSfxOutput(el.value);
       C.room?.switchActiveDevice(kind, el.value).catch(() => toast('Не удалось переключить устройство'));
       if (micTest) { stopMicTest(); startMicTest(); }
     };

@@ -375,7 +375,7 @@ button { font: inherit; color: inherit; cursor: pointer; border: 0; background: 
 .tile:fullscreen video { max-height: none; }
 .tile span { position: absolute; left: 8px; bottom: 8px; background: rgba(0, 0, 0, .6); padding: 2px 8px; border-radius: 4px; font-size: 13px; font-weight: 500; }
 #people { display: flex; gap: 16px; justify-content: center; flex-wrap: wrap; padding: 8px 0; }
-.pp { position: relative; border-radius: 50%; box-shadow: 0 0 0 3px #000; transition: box-shadow .1s; cursor: pointer; }
+.pp { position: relative; display: grid; border-radius: 50%; box-shadow: 0 0 0 3px #000; transition: box-shadow .1s; cursor: pointer; }
 .pp.speak { box-shadow: 0 0 0 3px #000, 0 0 0 6px var(--green); }
 .pp.wait .av { opacity: .5; }
 .pp.wait::after { content: ""; position: absolute; inset: -6px; border-radius: 50%; border: 2px solid rgba(255, 255, 255, .25); animation: ringing 1.4s ease-out infinite; }
@@ -395,7 +395,7 @@ button { font: inherit; color: inherit; cursor: pointer; border: 0; background: 
 .incoming b { color: var(--head); font-size: 18px; font-weight: 700; margin-top: 12px; }
 .incoming > span { color: var(--muted); font-size: 14px; }
 .incoming .row { gap: 32px; margin-top: 20px; }
-.in-av { position: relative; border-radius: 50%; }
+.in-av { position: relative; display: grid; border-radius: 50%; }
 .in-av::after { content: ""; position: absolute; inset: -4px; border-radius: 50%; border: 3px solid var(--green); animation: ringing 1.2s ease-out infinite; }
 @keyframes pop { from { opacity: 0; transform: translate(-50%, -8px) scale(.96); } }
 
@@ -461,6 +461,9 @@ input[type=range] { accent-color: var(--accent); padding: 0; height: 40px; backg
 .ring-card div { flex: 1; min-width: 0; }
 .ring-card b { display: block; color: var(--head); font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ring-card span { color: var(--muted); font-size: 13px; }
+.sfx-vol { max-width: 340px; margin: 4px 0 8px; }
+.sfx-row { padding: 12px 0; border-bottom: 1px solid var(--line); cursor: default; }
+.sfx-row:last-child { border-bottom: 0; }
 .ring-ic { width: 40px; height: 40px; border-radius: 50%; background: var(--accent); color: #fff; display: grid; place-items: center; flex: none; }
 
 /* ---------- окна: выбор друзей, подтверждение ---------- */
