@@ -5,8 +5,10 @@ set -e
 cd /opt/startrack
 [ -f .env ] || {
   cp .env.example .env
-  sed -i "s/^APP_SECRET=.*/APP_SECRET=$(openssl rand -hex 32)/; s/^LK_SECRET=.*/LK_SECRET=$(openssl rand -hex 32)/" .env
+  sed -i "s/^APP_SECRET=.*/APP_SECRET=$(openssl rand -hex 32)/; s/^LK_SECRET=.*/LK_SECRET=$(openssl rand -hex 32)/; s/^ADMIN_TOKEN=.*/ADMIN_TOKEN=$(openssl rand -hex 24)/" .env
 }
+# .env до появления админки: дописываем токен
+grep -q '^ADMIN_TOKEN=' .env || echo "ADMIN_TOKEN=$(openssl rand -hex 24)" >> .env
 . ./.env
 TURN_TLS_PORT=${TURN_TLS_PORT:-5349}
 CERT_DIR=/opt/startrack/caddy/caddy/certificates/acme-v02.api.letsencrypt.org-directory/turn.${DOMAIN}
@@ -104,6 +106,7 @@ After=network-online.target startrack-livekit.service
 WorkingDirectory=/opt/startrack/server
 Environment=HOST=127.0.0.1 PORT=${API_PORT} DATA_DIR=/opt/startrack/data APP_SECRET=${APP_SECRET}
 Environment=LIVEKIT_URL=wss://${DOMAIN} LIVEKIT_API_KEY=${LK_KEY} LIVEKIT_API_SECRET=${LK_SECRET}
+Environment=ADMIN_TOKEN=${ADMIN_TOKEN} ADMIN_PORT=${ADMIN_PORT:-8081}
 ExecStart=/opt/startrack/node/bin/node src/index.js
 Restart=always
 [Install]

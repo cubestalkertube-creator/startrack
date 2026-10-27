@@ -1,0 +1,468 @@
+<!doctype html>
+<!-- Админка Startrack: отдаёт admin-сервер из index.js на 127.0.0.1:ADMIN_PORT (только через SSH-туннель) -->
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Startrack · админка</title>
+<style>
+:root {
+  --base: #2c2d32; --chat: #323339; --card: #393a41; --card-hi: #3f4048; --deep: #1e1f22; --pop: #232428;
+  --line: rgba(255, 255, 255, .06); --line2: rgba(255, 255, 255, .1);
+  --text: #dbdee1; --head: #f2f3f5; --muted: #949ba4; --faint: #80848e;
+  --hover: rgba(78, 80, 88, .3); --sel: rgba(78, 80, 88, .6);
+  --accent: #5865f2; --accent-hi: #4752c4; --green: #23a55a; --red: #da373c; --red-hi: #a12828; --yellow: #f0b232;
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+html, body { height: 100%; margin: 0; }
+body { background: var(--base); color: var(--text); font: 14px/1.4 "gg sans", "Segoe UI", system-ui, sans-serif; }
+input { background: var(--deep); color: var(--text); border: 1px solid transparent; border-radius: 8px; padding: 9px 10px; font: inherit; outline: none; width: 100%; }
+input:focus { border-color: var(--accent); }
+button { font: inherit; color: inherit; cursor: pointer; border: 0; background: none; padding: 0; }
+[hidden] { display: none !important; }
+h2 { color: var(--head); font-size: 16px; margin: 0 0 12px; }
+.muted { color: var(--muted); }
+.btn { background: var(--accent); color: #fff; border-radius: 8px; padding: 0 14px; height: 34px; font-weight: 500; display: inline-flex; align-items: center; gap: 6px; transition: background .15s; white-space: nowrap; }
+.btn:hover { background: var(--accent-hi); }
+.btn.sec { background: #4e5058; } .btn.sec:hover { background: #6d6f78; }
+.btn.red { background: var(--red); } .btn.red:hover { background: var(--red-hi); }
+.btn.green { background: var(--green); } .btn.green:hover { background: #1a8a49; }
+.btn:disabled { opacity: .5; cursor: not-allowed; }
+::-webkit-scrollbar { width: 8px; } ::-webkit-scrollbar-thumb { background: #1a1b1e; border-radius: 4px; }
+
+/* вход */
+.login { height: 100%; display: grid; place-items: center; background: var(--deep); }
+.login form { width: min(400px, calc(100% - 32px)); background: var(--base); border-radius: 12px; padding: 28px; display: grid; gap: 12px; box-shadow: 0 8px 30px rgba(0,0,0,.4); }
+.login h1 { margin: 0; color: var(--head); font-size: 20px; }
+.err { color: #fa777c; min-height: 18px; }
+
+/* каркас */
+.app { height: 100%; display: grid; grid-template-rows: auto auto 1fr; }
+header { display: flex; align-items: center; gap: 16px; padding: 10px 16px; background: var(--deep); flex-wrap: wrap; }
+header .logo { color: var(--head); font-weight: 700; font-size: 16px; }
+.stats { display: flex; gap: 6px; flex-wrap: wrap; flex: 1; }
+.chip { background: var(--card); border-radius: 6px; padding: 4px 9px; font-size: 13px; white-space: nowrap; }
+.chip b { color: var(--head); font-weight: 600; }
+.chip.warn b { color: var(--yellow); }
+nav { display: flex; gap: 4px; padding: 8px 16px 0; border-bottom: 1px solid var(--line2); }
+nav button { padding: 8px 14px; border-radius: 6px 6px 0 0; color: var(--muted); font-weight: 500; }
+nav button:hover { color: var(--text); background: var(--hover); }
+nav button.on { color: var(--head); background: var(--chat); }
+main { min-height: 0; overflow: auto; background: var(--chat); }
+.pane { padding: 16px; }
+
+/* пользователи */
+.users { display: grid; grid-template-columns: 320px 1fr; height: 100%; min-height: 0; }
+.ulist { border-right: 1px solid var(--line2); display: flex; flex-direction: column; min-height: 0; }
+.ulist .search { padding: 12px; }
+.ulist .items { overflow: auto; flex: 1; padding: 0 8px 8px; }
+.urow { display: flex; align-items: center; gap: 10px; padding: 6px 8px; border-radius: 6px; cursor: pointer; }
+.urow:hover { background: var(--hover); }
+.urow.on { background: var(--sel); }
+.urow .nm { flex: 1; min-width: 0; }
+.urow .nm div { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.urow .nm .sub { color: var(--muted); font-size: 12px; }
+.av { width: 32px; height: 32px; border-radius: 50%; background: var(--accent) center/cover; display: grid; place-items: center; color: #fff; font-weight: 600; flex: none; position: relative; text-transform: uppercase; }
+.av.big { width: 72px; height: 72px; font-size: 28px; }
+.av .dot { position: absolute; right: -2px; bottom: -2px; width: 12px; height: 12px; border-radius: 50%; background: var(--green); border: 3px solid var(--chat); }
+.av.big .dot { width: 20px; height: 20px; border-width: 4px; }
+.tag { font-size: 11px; font-weight: 600; padding: 1px 6px; border-radius: 4px; background: var(--card-hi); color: var(--muted); white-space: nowrap; }
+.tag.red { background: rgba(218,55,60,.2); color: #fa777c; }
+.tag.green { background: rgba(35,165,90,.2); color: #57d28f; }
+.card { padding: 20px; overflow: auto; min-height: 0; }
+.card .top { display: flex; gap: 16px; align-items: center; margin-bottom: 16px; }
+.card .top h1 { margin: 0; color: var(--head); font-size: 22px; }
+.grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 8px; margin-bottom: 16px; }
+.tile { background: var(--card); border-radius: 8px; padding: 10px 12px; }
+.tile .k { color: var(--muted); font-size: 12px; }
+.tile .v { color: var(--head); font-size: 17px; font-weight: 600; margin-top: 2px; }
+.tile .v.sm { font-size: 14px; font-weight: 500; }
+.banbox { background: rgba(218,55,60,.12); border: 1px solid rgba(218,55,60,.4); border-radius: 8px; padding: 10px 12px; margin-bottom: 16px; }
+.actions { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 20px; }
+.chips { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 16px; }
+.chips button { background: var(--card); border-radius: 6px; padding: 4px 9px; }
+.chips button:hover { background: var(--card-hi); }
+.empty { color: var(--muted); padding: 40px; text-align: center; }
+
+/* таблицы и сервер */
+table { width: 100%; border-collapse: collapse; }
+th, td { text-align: left; padding: 7px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
+th { color: var(--muted); font-weight: 500; font-size: 12px; text-transform: uppercase; }
+td.num { text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.section { background: var(--base); border-radius: 10px; padding: 16px; margin-bottom: 16px; max-width: 900px; }
+.bar { height: 10px; background: var(--deep); border-radius: 5px; overflow: hidden; margin: 8px 0; }
+.bar div { height: 100%; background: var(--accent); }
+.row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+
+/* диалоги и уведомления */
+dialog { background: var(--base); color: var(--text); border: 0; border-radius: 12px; padding: 0; width: min(460px, calc(100% - 32px)); box-shadow: 0 8px 40px rgba(0,0,0,.5); }
+dialog::backdrop { background: rgba(0,0,0,.7); }
+dialog form { padding: 20px; display: grid; gap: 12px; }
+dialog h3 { margin: 0; color: var(--head); font-size: 18px; }
+dialog p { margin: 0; }
+.dlg-btns { display: flex; flex-direction: row-reverse; gap: 8px; }
+.secret { display: flex; gap: 8px; align-items: center; background: var(--deep); border-radius: 8px; padding: 10px 12px; font: 18px/1 Consolas, monospace; color: var(--head); letter-spacing: .5px; user-select: all; }
+.secret span { flex: 1; }
+.toast { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); background: var(--pop); border-radius: 8px; padding: 10px 16px; box-shadow: 0 4px 20px rgba(0,0,0,.5); max-width: calc(100% - 32px); }
+.toast.bad { background: var(--red-hi); color: #fff; }
+
+@media (max-width: 760px) {
+  .users { grid-template-columns: 1fr; grid-template-rows: 40% 1fr; }
+  .ulist { border-right: 0; border-bottom: 1px solid var(--line2); }
+}
+</style>
+</head>
+<body>
+<div id="login" class="login" hidden>
+  <form>
+    <h1>Startrack · админка</h1>
+    <p class="muted" style="margin:0">Токен — ADMIN_TOKEN из /opt/startrack/.env. Хранится только до закрытия вкладки.</p>
+    <input name="token" type="password" placeholder="ADMIN_TOKEN" autocomplete="off">
+    <button class="btn">Войти</button>
+    <div class="err"></div>
+  </form>
+</div>
+
+<div id="app" class="app" hidden>
+  <header>
+    <span class="logo">Startrack · админка</span>
+    <div class="stats" id="stats"></div>
+    <button class="btn sec" id="out">Выйти</button>
+  </header>
+  <nav>
+    <button data-tab="users" class="on">Пользователи</button>
+    <button data-tab="server">Сервер</button>
+    <button data-tab="audit">Журнал</button>
+  </nav>
+  <main>
+    <section id="tab-users" class="users">
+      <div class="ulist">
+        <div class="search"><input id="q" placeholder="Поиск по нику, имени или id" spellcheck="false" autocomplete="off"></div>
+        <div class="items" id="ulist"></div>
+      </div>
+      <div class="card" id="card"><div class="empty">Выберите пользователя слева</div></div>
+    </section>
+    <section id="tab-server" class="pane" hidden></section>
+    <section id="tab-audit" class="pane" hidden></section>
+  </main>
+</div>
+<dialog id="dlg"></dialog>
+
+<script>
+const $ = (s, el = document) => el.querySelector(s);
+const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
+const num = (n) => Number(n || 0).toLocaleString('ru-RU');
+const size = (n) => n < 1024 ? n + ' Б' : n < 1048576 ? (n / 1024).toFixed(1) + ' КБ'
+  : n < 1073741824 ? (n / 1048576).toFixed(1) + ' МБ' : (n / 1073741824).toFixed(2) + ' ГБ';
+const date = (t) => t ? new Date(t).toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' }) : '—';
+function ago(t) {
+  if (!t) return 'нет данных';
+  const s = (Date.now() - t) / 1000;
+  if (s < 60) return 'только что';
+  if (s < 3600) return Math.floor(s / 60) + ' мин назад';
+  if (s < 86400) return Math.floor(s / 3600) + ' ч назад';
+  if (s < 30 * 86400) return Math.floor(s / 86400) + ' дн назад';
+  return date(t);
+}
+const uptime = (s) => s < 3600 ? Math.floor(s / 60) + ' мин' : s < 86400 ? Math.floor(s / 3600) + ' ч' : Math.floor(s / 86400) + ' дн';
+
+let token = sessionStorage.getItem('adminToken') || '';
+let sel = 0; // открытая карточка
+let tab = 'users';
+
+class AuthError extends Error {}
+async function api(path, body, file) {
+  const headers = { Authorization: 'Bearer ' + token };
+  if (file) headers['Content-Type'] = 'audio/mpeg';
+  else if (body !== undefined) headers['Content-Type'] = 'application/json';
+  const r = await fetch(path, {
+    method: body !== undefined || file ? 'POST' : 'GET', headers,
+    body: file || (body !== undefined ? JSON.stringify(body) : undefined),
+  });
+  const data = await r.json().catch(() => ({}));
+  if (r.status === 401) { showLogin(data.error); throw new AuthError(data.error); }
+  if (!r.ok) throw new Error(data.error || 'HTTP ' + r.status);
+  return data;
+}
+function toast(text, bad = false) {
+  const t = document.createElement('div');
+  t.className = 'toast' + (bad ? ' bad' : '');
+  t.textContent = text;
+  document.body.append(t);
+  setTimeout(() => t.remove(), bad ? 6000 : 3000);
+}
+const fail = (e) => e instanceof AuthError || toast(e.message, true);
+
+// Диалог: resolve(значение поля | true) при подтверждении, null — отмена.
+// input.match — кнопка активна, только когда введён точно этот текст
+function modal({ title, text = '', html = '', input = null, ok = 'ОК', danger = false, cancel = 'Отмена' }) {
+  return new Promise((resolve) => {
+    const d = $('#dlg');
+    d.innerHTML = `<form><h3>${esc(title)}</h3>${text ? `<p>${text}</p>` : ''}${html}
+      ${input ? `<input name="v" placeholder="${esc(input.placeholder || '')}" maxlength="${input.max || 200}" autocomplete="off" spellcheck="false">` : ''}
+      <div class="dlg-btns"><button class="btn ${danger ? 'red' : ''}" data-ok>${esc(ok)}</button>${cancel ? `<button type="button" class="btn sec" data-no>${esc(cancel)}</button>` : ''}</div></form>`;
+    const inp = $('input[name=v]', d);
+    const okBtn = $('[data-ok]', d);
+    if (input?.match) { okBtn.disabled = true; inp.oninput = () => (okBtn.disabled = inp.value !== input.match); }
+    // результат — сразу по кнопке, а не по событию close: оно приходит не во всех браузерах
+    const done = (v) => { d.close(); resolve(v); };
+    $('form', d).onsubmit = (e) => { e.preventDefault(); done(inp ? inp.value : true); };
+    if (cancel) $('[data-no]', d).onclick = () => done(null);
+    d.onkeydown = (e) => { if (e.key === 'Escape') { e.preventDefault(); done(cancel ? null : true); } };
+    d.showModal();
+    (inp || okBtn).focus();
+  });
+}
+
+// ---------- вход ----------
+function showLogin(error = '') {
+  token = '';
+  sessionStorage.removeItem('adminToken');
+  $('#app').hidden = true;
+  $('#login').hidden = false;
+  $('#login .err').textContent = error || '';
+  $('#login input').focus();
+}
+$('#login form').onsubmit = async (e) => {
+  e.preventDefault();
+  token = $('#login input').value.trim();
+  try {
+    await api('/api/stats');
+    sessionStorage.setItem('adminToken', token);
+    $('#login input').value = '';
+    enter();
+  } catch (err) { if (!(err instanceof AuthError)) $('#login .err').textContent = err.message; }
+};
+$('#out').onclick = () => showLogin();
+
+function enter() {
+  $('#login').hidden = true;
+  $('#app').hidden = false;
+  loadStats();
+  loadUsers();
+}
+
+// ---------- статистика ----------
+let stats = null;
+async function loadStats() {
+  try { stats = await api('/api/stats'); } catch (e) { return fail(e); }
+  const low = stats.disk.free < 2 * 1073741824;
+  $('#stats').innerHTML = `
+    <span class="chip">Пользователей <b>${num(stats.users)}</b>${stats.banned ? ` · забанено <b>${num(stats.banned)}</b>` : ''}</span>
+    <span class="chip">Онлайн <b>${num(stats.online)}</b></span>
+    <span class="chip">Сообщений <b>${num(stats.messages)}</b></span>
+    <span class="chip">Данные <b>${size(stats.data)}</b></span>
+    <span class="chip ${low ? 'warn' : ''}">Свободно <b>${size(stats.disk.free)}</b> из ${size(stats.disk.total)}</span>`;
+  if (tab === 'server') renderServer();
+}
+setInterval(() => token && !$('#app').hidden && loadStats(), 15000);
+
+// ---------- пользователи ----------
+const avatar = (u, big = false) => `<div class="av${big ? ' big' : ''}" style="${u.avatar ? `background-image:url('/avatars/${esc(u.avatar)}')` : ''}">${u.avatar ? '' : esc((u.display || u.username)[0])}${u.online ? '<span class="dot"></span>' : ''}</div>`;
+
+let searchTimer = 0;
+$('#q').oninput = () => { clearTimeout(searchTimer); searchTimer = setTimeout(loadUsers, 200); };
+async function loadUsers() {
+  let list;
+  try { list = await api('/api/users?q=' + encodeURIComponent($('#q').value.trim())); } catch (e) { return fail(e); }
+  $('#ulist').innerHTML = list.length ? list.map((u) => `
+    <div class="urow ${u.id === sel ? 'on' : ''}" data-id="${u.id}">
+      ${avatar(u)}
+      <div class="nm"><div>${esc(u.display || u.username)}</div><div class="sub">@${esc(u.username)} · #${u.id}</div></div>
+      ${u.banned ? '<span class="tag red">бан</span>' : ''}
+    </div>`).join('') : '<div class="empty">Никого не нашлось</div>';
+}
+$('#ulist').onclick = (e) => {
+  const row = e.target.closest('.urow');
+  if (row) openUser(Number(row.dataset.id));
+};
+async function openUser(id) {
+  sel = id;
+  document.querySelectorAll('.urow').forEach((r) => r.classList.toggle('on', Number(r.dataset.id) === id));
+  try { renderCard(await api('/api/user?id=' + id)); } catch (e) { fail(e); }
+}
+
+const STATUS = { online: 'в сети', idle: 'неактивен', dnd: 'не беспокоить', invisible: 'невидимка' };
+function renderCard(u) {
+  const c = u.counts;
+  const rel = { friend: '', in: ' (входящая заявка)', out: ' (исходящая заявка)' };
+  $('#card').innerHTML = `
+    <div class="top">
+      ${avatar(u, true)}
+      <div>
+        <h1>${esc(u.display || u.username)}</h1>
+        <div class="row muted">@${esc(u.username)} · id ${u.id}
+          ${u.online ? `<span class="tag green">в сети · ${STATUS[u.status] || 'в сети'} · окон: ${u.sessions}</span>` : '<span class="tag">не в сети</span>'}
+          ${u.banned ? '<span class="tag red">заблокирован</span>' : ''}
+        </div>
+      </div>
+    </div>
+    ${u.banned ? `<div class="banbox">Заблокирован ${date(u.banned)}. Причина: ${u.ban_reason ? esc(u.ban_reason) : '<span class="muted">не указана</span>'}</div>` : ''}
+    <div class="grid">
+      <div class="tile"><div class="k">Регистрация</div><div class="v sm">${date(u.created)}</div></div>
+      <div class="tile"><div class="k">Последняя активность</div><div class="v sm">${u.online ? 'сейчас' : ago(u.seen)}</div></div>
+      <div class="tile"><div class="k">Друзья</div><div class="v">${num(c.friends)}${c.requests ? ` <span class="muted" style="font-size:13px">+${c.requests} заявок</span>` : ''}</div></div>
+      <div class="tile"><div class="k">Группы</div><div class="v">${num(c.grps)}</div></div>
+      <div class="tile"><div class="k">Сообщений отправлено</div><div class="v">${num(c.messages)}</div></div>
+      <div class="tile"><div class="k">Файлы</div><div class="v">${num(c.files)} <span class="muted" style="font-size:13px">${size(c.filesSize)}</span></div></div>
+      <div class="tile"><div class="k">Гифки / звуки</div><div class="v">${num(c.gifs)} / ${num(c.sounds)}</div></div>
+      <div class="tile"><div class="k">Версия токенов</div><div class="v">${u.tokver}</div></div>
+    </div>
+    <div class="actions">
+      <button class="btn" data-a="reset">Сбросить пароль</button>
+      <button class="btn sec" data-a="logout">Выйти на всех устройствах</button>
+      ${u.banned ? '<button class="btn green" data-a="unban">Разблокировать</button>' : '<button class="btn red" data-a="ban">Заблокировать</button>'}
+      <button class="btn red" data-a="delete">Удалить аккаунт</button>
+    </div>
+    <h2>Друзья и заявки</h2>
+    <div class="chips">${u.friends.length ? u.friends.map((f) => `<button data-open="${f.id}">${esc(f.username)}${rel[f.rel]}</button>`).join('') : '<span class="muted">нет</span>'}</div>
+    <h2>Группы</h2>
+    <div class="chips">${u.groups.length ? u.groups.map((g) => `<span class="chip">${esc(g.name || 'без названия')} · ${g.members} уч.${g.owner ? ' · владелец' : ''}</span>`).join('') : '<span class="muted">нет</span>'}</div>`;
+  $('#card').onclick = (e) => {
+    const o = e.target.closest('[data-open]');
+    if (o) return openUser(Number(o.dataset.open));
+    const b = e.target.closest('[data-a]');
+    if (b) action(b.dataset.a, u, b);
+  };
+}
+
+async function action(a, u, btn) {
+  const who = `<b>${esc(u.username)}</b>`;
+  let body = { id: u.id };
+  if (a === 'reset' && !(await modal({ title: 'Сбросить пароль?', text: `У ${who} будет новый временный пароль, все сессии завершатся.`, ok: 'Сбросить' }))) return;
+  if (a === 'logout' && !(await modal({ title: 'Выйти на всех устройствах?', text: `Все сессии ${who} завершатся, войти можно будет снова с тем же паролем.`, ok: 'Завершить сессии' }))) return;
+  if (a === 'unban' && !(await modal({ title: 'Разблокировать?', text: `${who} снова сможет войти.`, ok: 'Разблокировать' }))) return;
+  if (a === 'ban') {
+    const reason = await modal({ title: 'Заблокировать ' + u.username + '?', text: 'Аккаунт сразу выкинет из приложения и звонков, войти будет нельзя. Причина покажется при попытке входа.', input: { placeholder: 'Причина (необязательно)' }, ok: 'Заблокировать', danger: true });
+    if (reason === null) return;
+    body.reason = reason;
+  }
+  if (a === 'delete') {
+    const confirm = await modal({
+      title: 'Удалить аккаунт навсегда?', danger: true, ok: 'Удалить',
+      text: `Удалятся аккаунт ${who}, все личные переписки с ним в обе стороны, его сообщения и вложения в группах, аватар, гифки, звуки, дружбы и членство в группах. Перед удалением сервер сделает бэкап базы, но файлы с диска не вернуть.<br><br>Введите ник для подтверждения:`,
+      input: { placeholder: u.username, match: u.username, max: 32 },
+    });
+    if (confirm === null) return;
+    body.confirm = confirm;
+  }
+  btn.disabled = true;
+  try {
+    const r = await api('/api/user/' + a, body);
+    if (a === 'reset') {
+      renderCard(r.user);
+      await modal({
+        title: 'Новый пароль для ' + u.username, cancel: '', ok: 'Готово',
+        html: `<div class="secret"><span>${esc(r.password)}</span><button type="button" class="btn sec" id="copy">Копировать</button></div>
+          <p class="muted">Показывается один раз — скопируйте и передайте владельцу аккаунта.</p>`,
+      });
+    } else if (a === 'delete') {
+      toast(`Аккаунт ${u.username} удалён. Бэкап: ${r.backup}`);
+      sel = 0;
+      $('#card').innerHTML = '<div class="empty">Выберите пользователя слева</div>';
+    } else {
+      renderCard(r);
+      toast({ ban: 'Заблокирован', unban: 'Разблокирован', logout: 'Сессии завершены' }[a]);
+    }
+    loadUsers();
+    loadStats();
+  } catch (e) { fail(e); btn.disabled = false; }
+}
+document.addEventListener('click', (e) => {
+  if (e.target.id !== 'copy') return;
+  navigator.clipboard.writeText($('.secret span').textContent).then(() => (e.target.textContent = 'Скопировано'), () => toast('Не удалось скопировать — выделите вручную', true));
+});
+
+// ---------- вкладки ----------
+document.querySelector('nav').onclick = (e) => {
+  const b = e.target.closest('[data-tab]');
+  if (!b) return;
+  tab = b.dataset.tab;
+  document.querySelectorAll('nav button').forEach((x) => x.classList.toggle('on', x === b));
+  for (const t of ['users', 'server', 'audit']) $('#tab-' + t).hidden = t !== tab;
+  if (tab === 'server') loadStats();
+  if (tab === 'audit') loadAudit();
+};
+
+// ---------- сервер ----------
+function renderServer() {
+  const s = stats;
+  if (!s) return;
+  const used = s.disk.total - s.disk.free;
+  $('#tab-server').innerHTML = `
+    <div class="section">
+      <h2>Диск</h2>
+      <div class="bar"><div style="width:${(used / s.disk.total * 100).toFixed(1)}%"></div></div>
+      <div class="muted">Занято ${size(used)} из ${size(s.disk.total)}, свободно ${size(s.disk.free)}. Данные Startrack: ${size(s.data)}. API работает ${uptime(s.uptime)}, соединений WebSocket: ${s.connections}.</div>
+    </div>
+    <div class="section">
+      <h2>Папка data</h2>
+      <table><tr><th>Что</th><th class="num">Размер</th></tr>
+        ${s.parts.map((p) => `<tr><td>${esc(p.name)}</td><td class="num">${size(p.size)}</td></tr>`).join('')}
+      </table>
+      <p class="muted">Групп: ${num(s.grps)}, вложений: ${num(s.files)} (${size(s.filesSize)}).</p>
+    </div>
+    <div class="section">
+      <h2>Мелодия звонка</h2>
+      <p class="muted">${s.ringtone ? `ringtone.mp3, ${size(s.ringtone.size)}, обновлена ${date(s.ringtone.updated)}` : 'Не задана — у всех звучит встроенная.'}</p>
+      <div class="row">
+        ${s.ringtone ? '<button class="btn sec" id="play">▶ Прослушать</button>' : ''}
+        <label class="btn">Загрузить MP3<input type="file" id="ring" accept="audio/mpeg,.mp3" hidden></label>
+      </div>
+    </div>
+    <div class="section">
+      <h2>Бэкапы базы</h2>
+      <p class="muted">VACUUM INTO в data/backups, хранятся последние 5. Автоматически — перед каждым удалением аккаунта.</p>
+      <div class="row" style="margin-bottom:8px"><button class="btn" id="bk">Сделать бэкап сейчас</button></div>
+      <table>${s.backups.length ? s.backups.map((b) => `<tr><td>${esc(b.name)}</td><td class="num">${size(b.size)}</td></tr>`).join('') : '<tr><td class="muted">пока нет</td></tr>'}</table>
+    </div>`;
+  $('#bk').onclick = async (e) => {
+    e.target.disabled = true;
+    try { const r = await api('/api/backup', {}); toast('Готово: ' + r.file); loadStats(); } catch (err) { fail(err); e.target.disabled = false; }
+  };
+  $('#ring').onchange = async (e) => {
+    const f = e.target.files[0];
+    if (!f) return;
+    if (!(await modal({ title: 'Заменить мелодию звонка?', text: `<b>${esc(f.name)}</b>, ${size(f.size)}. Клиенты подхватят её при следующей проверке.`, ok: 'Заменить' }))) return;
+    try { await api('/api/ringtone', undefined, f); toast('Мелодия обновлена'); loadStats(); } catch (err) { fail(err); }
+  };
+  $('#play')?.addEventListener('click', playRingtone);
+}
+let audio = null;
+async function playRingtone() {
+  if (audio) { audio.pause(); URL.revokeObjectURL(audio.src); audio = null; return; }
+  try {
+    const r = await fetch('/api/ringtone', { headers: { Authorization: 'Bearer ' + token } });
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    audio = new Audio(URL.createObjectURL(await r.blob()));
+    audio.onended = () => { URL.revokeObjectURL(audio.src); audio = null; };
+    await audio.play();
+  } catch (e) { audio = null; fail(e); }
+}
+
+// ---------- журнал ----------
+const ACTIONS = { reset_password: 'Сброс пароля', ban: 'Бан', unban: 'Разбан', logout: 'Выход везде', delete: 'Удаление аккаунта', backup: 'Бэкап базы', ringtone: 'Мелодия звонка' };
+async function loadAudit() {
+  let list;
+  try { list = await api('/api/audit'); } catch (e) { return fail(e); }
+  const info = (a) => {
+    const d = a.details || {};
+    if (a.action === 'ban') return d.reason ? 'причина: ' + esc(d.reason) : '';
+    if (a.action === 'delete') return 'бэкап: ' + esc(d.backup);
+    if (a.action === 'backup') return esc(d.file);
+    if (a.action === 'ringtone') return size(d.size);
+    return '';
+  };
+  $('#tab-audit').innerHTML = `<div class="section" style="max-width:none"><h2>Журнал действий</h2>
+    ${list.length ? `<table><tr><th>Когда</th><th>Действие</th><th>Кого</th><th>Подробности</th><th>Кто</th></tr>
+      ${list.map((a) => `<tr><td style="white-space:nowrap">${date(a.at)}</td><td>${esc(ACTIONS[a.action] || a.action)}</td>
+        <td>${a.target ? `${esc(a.details?.username || '')} <span class="muted">#${a.target}</span>` : '—'}</td><td>${info(a)}</td><td class="muted">${esc(a.actor)}</td></tr>`).join('')}
+    </table>` : '<p class="muted">Пока пусто</p>'}</div>`;
+}
+
+if (token) api('/api/stats').then(enter).catch((e) => e instanceof AuthError || showLogin(e.message));
+else showLogin();
+</script>
+</body>
+</html>

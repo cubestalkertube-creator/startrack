@@ -76,7 +76,7 @@ deploy/   setup.sh — установка на Linux-сервер в /opt/startr
 
 В /opt/startrack должны лежать node/ (Node.js 24), bin/livekit-server, bin/caddy (сборка с модулем caddy-l4), папка server/, а также setup.sh и .env.example. Их копируют из deploy/.
 Запуск: sh /opt/startrack/setup.sh.
-Скрипт создаёт .env со случайными APP_SECRET и LK_SECRET, если файла ещё нет. Затем генерирует livekit.yaml и Caddyfile, ставит npm-зависимости сервера и заводит три systemd-службы: startrack-api, startrack-livekit, startrack-caddy. Есть ещё startrack-cert.path, который перезапускает LiveKit после продления TURN-сертификата.
+Скрипт создаёт .env со случайными APP_SECRET, LK_SECRET и ADMIN_TOKEN, если файла ещё нет. Затем генерирует livekit.yaml и Caddyfile, ставит npm-зависимости сервера и заводит три systemd-службы: startrack-api, startrack-livekit, startrack-caddy. Есть ещё startrack-cert.path, который перезапускает LiveKit после продления TURN-сертификата.
 Caddy на 443 разделяет трафик по SNI: turn.* уходит в TURN/TLS LiveKit, остальное на сайт и API.
 Порты: 80 и 443 (TCP), 7881 (TCP), 50000–50200 (UDP).
 
@@ -88,3 +88,14 @@ Windows: cd client, затем npm install и npx tauri build. Установщ�
 Android: node scripts/android.mjs собирает APK. Подписывается ключом ~/.tauri/startrack-android.jks.
 Выпуск обновления: node scripts/release.mjs <версия> notes.md --publish. Скрипт поднимает версию, собирает и подписывает установщик и APK, пушит и публикует релиз на GitHub. Подпись делается ключом ~/.tauri/startrack-updater.key, его копию стоит хранить отдельно.
 
+## Админка
+
+Отдельный порт `127.0.0.1:8081` в том же процессе API, наружу не открыт (Caddy его не проксирует).
+Пользователи (поиск, карточка без текста переписки), сброс пароля, бан, «выйти везде», удаление аккаунта
+(с автоматическим бэкапом базы), статистика и место на диске, мелодия звонка, бэкапы, журнал действий.
+
+```bash
+ssh -i ~/.ssh/startrack_ed25519 -N -L 8081:127.0.0.1:8081 root@185.218.0.111
+```
+
+Потом открыть http://localhost:8081 и ввести `ADMIN_TOKEN` из `/opt/startrack/.env`.

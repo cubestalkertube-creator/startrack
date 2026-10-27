@@ -87,7 +87,18 @@ db.exec(`
     file TEXT NOT NULL, vol REAL NOT NULL, created INTEGER NOT NULL
   );
   CREATE INDEX IF NOT EXISTS sounds_uid ON sounds (uid);
+  -- журнал действий админа
+  CREATE TABLE IF NOT EXISTS audit (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, at INTEGER NOT NULL, actor TEXT NOT NULL,
+    action TEXT NOT NULL, target INTEGER, details TEXT
+  );
 `);
+// banned — когда заблокирован (NULL — нет); tokver — версия токенов, +1 = выйти на всех устройствах;
+// seen — последняя активность (вход, подключение и отключение WebSocket)
+addColumn('users', 'banned', 'INTEGER');
+addColumn('users', 'ban_reason', 'TEXT');
+addColumn('users', 'tokver', 'INTEGER NOT NULL DEFAULT 0');
+addColumn('users', 'seen', 'INTEGER');
 
 const AVATARS_DIR = path.join(DATA_DIR, 'avatars');
 const GIFS_DIR = path.join(DATA_DIR, 'gifs');
@@ -109,6 +120,8 @@ const cols = (t) => PUB.map((c) => `${t}.${c}`).join(', ');
 const q = {
   userByName: db.prepare('SELECT * FROM users WHERE username = ?'),
   userById: db.prepare(`SELECT ${cols('users')} FROM users WHERE id = ?`),
+  authUser: db.prepare(`SELECT ${cols('users')}, banned, tokver FROM users WHERE id = ?`),
+  seen: db.prepare('UPDATE users SET seen = ? WHERE id = ?'),
   addUser: db.prepare('INSERT INTO users (username, pass, created) VALUES (?, ?, ?)'),
   setProfile: db.prepare('UPDATE users SET display = ?, bio = ?, pronouns = ?, custom = ?, bcolor = ? WHERE id = ?'),
   setImage: { avatar: db.prepare('UPDATE users SET avatar = ? WHERE id = ?'), banner: db.prepare('UPDATE users SET banner = ? WHERE id = ?') },
@@ -182,16 +195,21 @@ function checkPass(pass, stored) {
   const [salt, hash] = stored.split(':');
   return crypto.timingSafeEqual(Buffer.from(hash, 'hex'), crypto.scryptSync(pass, salt, 32));
 }
-function sign(userId) {
+// Версия токенов (tokver) входит в подпись, поэтому «выйти везде» — просто tokver + 1.
+// При tokver = 0 подпись прежняя: токены, выданные до появления версий, продолжают работать
+const mac = (body, ver) => crypto.createHmac('sha256', SECRET).update(ver ? `${body}.${ver}` : body).digest('base64url');
+function sign(userId, ver = 0) {
   const body = `${userId}.${Date.now() + 30 * 864e5}`;
-  return body + '.' + crypto.createHmac('sha256', SECRET).update(body).digest('base64url');
+  return body + '.' + mac(body, ver);
 }
 function verify(token) {
   const [id, exp, sig] = String(token || '').split('.');
   if (!sig || Number(exp) < Date.now()) return null;
-  const good = crypto.createHmac('sha256', SECRET).update(`${id}.${exp}`).digest('base64url');
+  const u = q.authUser.get(Number(id));
+  if (!u || u.banned) return null;
+  const good = mac(`${id}.${exp}`, u.tokver);
   if (sig.length !== good.length || !crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(good))) return null;
-  return q.userById.get(Number(id)) || null;
+  return u;
 }
 
 // --- realtime ---
@@ -374,12 +392,16 @@ const routes = {
     if (String(b.password || '').length < 6) throw [400, 'Пароль минимум 6 символов'];
     if (q.userByName.get(username)) throw [409, 'Ник занят'];
     const id = Number(q.addUser.run(username, hashPass(b.password), Date.now()).lastInsertRowid);
+    q.seen.run(Date.now(), id);
     return { token: sign(id), user: selfView(q.userById.get(id)) };
   },
   'POST /api/login': async (_u, b) => {
     const u = q.userByName.get(String(b.username || '').trim());
     if (!u || !checkPass(String(b.password || ''), u.pass)) throw [401, 'Неверный ник или пароль'];
-    return { token: sign(u.id), user: selfView(u) };
+    // причину видит только тот, кто знает пароль; старые клиенты показывают текст ошибки как есть
+    if (u.banned) throw [403, 'Аккаунт заблокирован' + (u.ban_reason ? ': ' + u.ban_reason : '')];
+    q.seen.run(Date.now(), u.id);
+    return { token: sign(u.id, u.tokver), user: selfView(u) };
   },
   'GET /api/me': async (me) => selfView(me),
   // Свой профиль: присланные поля меняем, остальные не трогаем; avatar/banner: null — убрать картинку
@@ -876,6 +898,7 @@ wss.on('connection', (ws, req) => {
   if (!sockets.has(me.id)) sockets.set(me.id, new Set());
   sockets.get(me.id).add(ws);
   ws.uid = me.id;
+  q.seen.run(Date.now(), me.id);
   announce(me.id);
 
   ws.isAlive = true;
@@ -914,6 +937,7 @@ wss.on('connection', (ws, req) => {
     const set = sockets.get(me.id);
     set?.delete(ws);
     if (set && set.size === 0) sockets.delete(me.id);
+    q.seen.run(Date.now(), me.id);
     announce(me.id); // закрылось «активное» окно — остальные могут быть неактивны
   });
 });
@@ -925,4 +949,293 @@ setInterval(() => {
   }
 }, 30000);
 
+// --- админка ---
+// Отдельный HTTP-сервер только на 127.0.0.1, Caddy туда не проксирует: заходить через
+// ssh -L 8081:127.0.0.1:8081 и вводить ADMIN_TOKEN. Без токена админка не запускается
+const ADMIN_TOKEN = process.env.ADMIN_TOKEN || '';
+const ADMIN_PORT = Number(process.env.ADMIN_PORT || 8081);
+const ADMIN_HTML = new URL('./admin.html', import.meta.url);
+const BACKUPS_DIR = path.join(DATA_DIR, 'backups');
+const KEEP_BACKUPS = 5;
+const MAX_RINGTONE = 5 * 1024 * 1024;
+
+const qa = {
+  users: db.prepare('SELECT id, username, display, avatar, created, seen, banned FROM users ORDER BY id DESC'),
+  user: db.prepare('SELECT id, username, display, avatar, banner, status, created, seen, banned, ban_reason, tokver FROM users WHERE id = ?'),
+  counts: db.prepare(`SELECT
+    (SELECT COUNT(*) FROM friends WHERE (a = $id OR b = $id) AND status = 'accepted') AS friends,
+    (SELECT COUNT(*) FROM friends WHERE (a = $id OR b = $id) AND status = 'pending') AS requests,
+    (SELECT COUNT(*) FROM group_members WHERE uid = $id) AS grps,
+    (SELECT COUNT(*) FROM messages WHERE sender = $id AND kind IS NULL) AS messages,
+    (SELECT COUNT(*) FROM files WHERE sender = $id) AS files,
+    (SELECT COALESCE(SUM(size), 0) FROM files WHERE sender = $id) AS filesSize,
+    (SELECT COUNT(*) FROM gifs WHERE uid = $id) AS gifs,
+    (SELECT COUNT(*) FROM sounds WHERE uid = $id) AS sounds`),
+  stats: db.prepare(`SELECT
+    (SELECT COUNT(*) FROM users) AS users, (SELECT COUNT(*) FROM users WHERE banned IS NOT NULL) AS banned,
+    (SELECT COUNT(*) FROM messages WHERE kind IS NULL) AS messages, (SELECT COUNT(*) FROM groups) AS grps,
+    (SELECT COUNT(*) FROM files) AS files, (SELECT COALESCE(SUM(size), 0) FROM files) AS filesSize`),
+  // бан заодно отзывает токены: после разбана старые сессии не оживают
+  ban: db.prepare('UPDATE users SET banned = ?, ban_reason = ?, tokver = tokver + 1 WHERE id = ?'),
+  unban: db.prepare('UPDATE users SET banned = NULL, ban_reason = NULL WHERE id = ?'),
+  bumpTok: db.prepare('UPDATE users SET tokver = tokver + 1 WHERE id = ?'),
+  setPass: db.prepare('UPDATE users SET pass = ?, tokver = tokver + 1 WHERE id = ?'),
+  // всё, что удаляется вместе с аккаунтом: личные переписки в обе стороны, его сообщения и вложения в группах
+  userGroupMsgs: db.prepare('SELECT id, grp FROM messages WHERE sender = ? AND grp IS NOT NULL'),
+  delUserMsgs: db.prepare('DELETE FROM messages WHERE sender = ? OR (grp IS NULL AND recipient = ?)'),
+  userFiles: db.prepare('SELECT id FROM files WHERE sender = ? OR (grp IS NULL AND recipient = ?)'),
+  delUserFiles: db.prepare('DELETE FROM files WHERE sender = ? OR (grp IS NULL AND recipient = ?)'),
+  userGifs: db.prepare('SELECT hash FROM gifs WHERE uid = ?'),
+  delUserGifs: db.prepare('DELETE FROM gifs WHERE uid = ?'),
+  delUserSounds: db.prepare('DELETE FROM sounds WHERE uid = ?'),
+  delUserRels: db.prepare('DELETE FROM friends WHERE a = ? OR b = ?'),
+  delUser: db.prepare('DELETE FROM users WHERE id = ?'),
+  addAudit: db.prepare('INSERT INTO audit (at, actor, action, target, details) VALUES (?, ?, ?, ?, ?)'),
+  audit: db.prepare('SELECT * FROM audit ORDER BY id DESC LIMIT 300'),
+};
+
+const auditLog = (req, action, target = null, details = null) =>
+  qa.addAudit.run(Date.now(), 'admin@' + (req.socket.remoteAddress || '?'), action, target, details && JSON.stringify(details));
+
+function adminUser(id) {
+  const u = qa.user.get(Number(id));
+  if (!u) throw [404, 'Пользователь не найден'];
+  return u;
+}
+// Карточка без текста переписки: только счётчики, друзья и группы
+function userCard(u) {
+  return {
+    ...u, online: online(u.id), sessions: sockets.get(u.id)?.size || 0,
+    counts: qa.counts.get({ id: u.id }),
+    friends: q.relsOf.all(u.id, u.id, u.id).map((r) => ({
+      id: r.id, username: r.username, rel: r.rel === 'accepted' ? 'friend' : r.a === u.id ? 'out' : 'in',
+    })),
+    groups: q.groupsOf.all(u.id).map((g) => ({ id: g.id, name: g.name, owner: g.owner === u.id, members: memberIds(g.id).length })),
+  };
+}
+
+// Закрыть все соединения человека и выкинуть его из звонков. Клиент переподключится,
+// получит отказ, на первом же запросе — 401 и экран входа
+function dropSessions(uid) {
+  for (const ws of sockets.get(uid) || []) ws.close(4001, 'unauthorized');
+  for (const g of q.groupsOf.all(uid)) lk.removeParticipant(groupRoom(g.id), String(uid)).catch(() => {});
+  for (const f of friendIds(uid)) lk.removeParticipant(roomFor(uid, f), String(uid)).catch(() => {});
+}
+
+function deleteUser(u) {
+  const rels = q.relsOf.all(u.id, u.id, u.id).map((r) => r.id);
+  const groups = q.groupsOf.all(u.id);
+  const groupMsgs = qa.userGroupMsgs.all(u.id);
+  const files = qa.userFiles.all(u.id, u.id).map((f) => f.id);
+  const gifs = qa.userGifs.all(u.id).map((g) => g.hash);
+  const sounds = q.soundsOf.all(u.id).map((s) => s.file);
+  dropSessions(u.id);
+  db.exec('BEGIN');
+  try {
+    qa.delUserMsgs.run(u.id, u.id);
+    qa.delUserFiles.run(u.id, u.id);
+    qa.delUserGifs.run(u.id);
+    qa.delUserSounds.run(u.id);
+    qa.delUserRels.run(u.id, u.id);
+    for (const g of groups) {
+      q.delMember.run(g.id, u.id);
+      const rest = memberIds(g.id);
+      if (rest.length) {
+        if (g.owner === u.id) q.setOwner.run(rest[0], g.id); // владение — следующему, как при выходе
+        continue;
+      }
+      // никого не осталось — удаляем группу целиком (файлы с диска — после COMMIT)
+      files.push(...q.groupFiles.all(g.id).map((f) => f.id));
+      q.delGroupFiles.run(g.id);
+      q.delGroupMsgs.run(g.id);
+      q.delGroup.run(g.id);
+    }
+    qa.delUser.run(u.id);
+    db.exec('COMMIT');
+  } catch (e) {
+    db.exec('ROLLBACK');
+    throw e;
+  }
+  for (const id of files) fs.rmSync(path.join(FILES_DIR, id), { force: true });
+  for (const h of gifs) if (!q.gifUsers.get(h).n) fs.rmSync(gifPath(h), { force: true });
+  for (const f of sounds) fs.rmSync(path.join(SOUNDS_DIR, f), { force: true });
+  for (const f of [u.avatar, u.banner]) if (f) fs.rmSync(path.join(AVATARS_DIR, f), { force: true });
+  shown.delete(u.id);
+  for (const id of rels) push(id, { type: 'friends' });
+  const members = new Map(groups.map((g) => [g.id, memberIds(g.id)]));
+  for (const m of groupMsgs)
+    for (const id of members.get(m.grp) || []) push(id, { type: 'message_deleted', id: m.id, grp: m.grp, peer: null, sender: u.id });
+  for (const g of groups) pushGroup(g.id, { type: 'groups' });
+}
+
+// Копия базы через VACUUM INTO (cp пропустил бы WAL); храним последние KEEP_BACKUPS
+function backup(tag) {
+  fs.mkdirSync(BACKUPS_DIR, { recursive: true });
+  const stamp = new Date().toISOString().replace(/[-:]/g, '').replace('T', '-').replace('.', '').slice(0, 18);
+  const file = path.join(BACKUPS_DIR, `startrack-${stamp}-${tag}.db`);
+  db.exec(`VACUUM INTO '${file.replaceAll("'", "''")}'`);
+  const all = fs.readdirSync(BACKUPS_DIR).filter((f) => /^startrack-.+\.db$/.test(f)).sort();
+  for (const f of all.slice(0, -KEEP_BACKUPS)) fs.rmSync(path.join(BACKUPS_DIR, f), { force: true });
+  return path.basename(file);
+}
+const backupsList = () => {
+  try {
+    return fs.readdirSync(BACKUPS_DIR).filter((f) => f.endsWith('.db')).sort().reverse()
+      .map((f) => ({ name: f, size: fs.statSync(path.join(BACKUPS_DIR, f)).size }));
+  } catch { return []; }
+};
+
+function dirSize(dir) {
+  let n = 0;
+  for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+    const p = path.join(dir, e.name);
+    try { n += e.isDirectory() ? dirSize(p) : fs.statSync(p).size; } catch {}
+  }
+  return n;
+}
+function ringtoneInfo() {
+  try {
+    const st = fs.statSync(RINGTONE);
+    return { size: st.size, updated: Math.floor(st.mtimeMs) };
+  } catch { return null; }
+}
+// Временный пароль без похожих символов (l/1, O/0)
+const PASS_CHARS = 'abcdefghijkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+const tempPass = () => Array.from({ length: 12 }, () => PASS_CHARS[crypto.randomInt(PASS_CHARS.length)]).join('');
+
+const adminRoutes = {
+  'GET /api/stats': () => {
+    const disk = fs.statfsSync(DATA_DIR);
+    const parts = fs.readdirSync(DATA_DIR, { withFileTypes: true }).map((e) => {
+      const p = path.join(DATA_DIR, e.name);
+      return { name: e.name + (e.isDirectory() ? '/' : ''), size: e.isDirectory() ? dirSize(p) : fs.statSync(p).size };
+    }).sort((a, b) => b.size - a.size);
+    return {
+      ...qa.stats.get(), online: sockets.size, connections: wss.clients.size, uptime: Math.round(process.uptime()),
+      data: parts.reduce((s, p) => s + p.size, 0), parts,
+      disk: { free: disk.bavail * disk.bsize, total: disk.blocks * disk.bsize },
+      ringtone: ringtoneInfo(), backups: backupsList(),
+    };
+  },
+  // Поиск по нику и отображаемому имени (без учёта регистра, в том числе для кириллицы)
+  'GET /api/users': (_b, url) => {
+    const s = String(url.searchParams.get('q') || '').trim().toLowerCase();
+    return qa.users.all()
+      .filter((u) => !s || u.username.toLowerCase().includes(s) || (u.display || '').toLowerCase().includes(s) || String(u.id) === s)
+      .slice(0, 200).map((u) => ({ ...u, online: online(u.id) }));
+  },
+  'GET /api/user': (_b, url) => userCard(adminUser(url.searchParams.get('id'))),
+  // Новый пароль показываем один раз; старые сессии разлогиниваются
+  'POST /api/user/reset': (b, _url, req) => {
+    const u = adminUser(b.id);
+    const password = tempPass();
+    qa.setPass.run(hashPass(password), u.id);
+    dropSessions(u.id);
+    auditLog(req, 'reset_password', u.id, { username: u.username });
+    return { password, user: userCard(adminUser(u.id)) };
+  },
+  'POST /api/user/ban': (b, _url, req) => {
+    const u = adminUser(b.id);
+    const reason = String(b.reason || '').replace(/\s+/g, ' ').trim().slice(0, 200);
+    qa.ban.run(Date.now(), reason || null, u.id);
+    dropSessions(u.id);
+    auditLog(req, 'ban', u.id, { username: u.username, reason });
+    return userCard(adminUser(u.id));
+  },
+  'POST /api/user/unban': (b, _url, req) => {
+    const u = adminUser(b.id);
+    qa.unban.run(u.id);
+    auditLog(req, 'unban', u.id, { username: u.username });
+    return userCard(adminUser(u.id));
+  },
+  'POST /api/user/logout': (b, _url, req) => {
+    const u = adminUser(b.id);
+    qa.bumpTok.run(u.id);
+    dropSessions(u.id);
+    auditLog(req, 'logout', u.id, { username: u.username });
+    return userCard(adminUser(u.id));
+  },
+  // Удаление — только с ником в подтверждении и после бэкапа базы
+  'POST /api/user/delete': (b, _url, req) => {
+    const u = adminUser(b.id);
+    if (b.confirm !== u.username) throw [400, 'Для подтверждения введите ник точно'];
+    const file = backup('delete-' + u.id);
+    deleteUser(u);
+    auditLog(req, 'delete', u.id, { username: u.username, backup: file });
+    return { ok: true, backup: file };
+  },
+  'POST /api/backup': (_b, _url, req) => {
+    const file = backup('manual');
+    auditLog(req, 'backup', null, { file });
+    return { file, backups: backupsList() };
+  },
+  'GET /api/audit': () => qa.audit.all().map((a) => ({ ...a, details: a.details ? JSON.parse(a.details) : null })),
+};
+
+// Новая мелодия звонка: тело — mp3. Клиенты увидят новую версию по времени изменения файла
+async function uploadRingtone(req, res, send) {
+  const bad = sizeError(req, MAX_RINGTONE, 'Мелодия');
+  if (bad) return send(bad[0], { error: bad[1] });
+  const data = await readBody(req, Number(req.headers['content-length']));
+  if (!data) return res.destroyed || send(400, { error: 'Загрузка прервалась' });
+  if (!SOUND_MAGIC.mp3.test(data.subarray(0, 4).toString('latin1'))) return send(415, { error: 'Нужен файл MP3' });
+  fs.writeFileSync(RINGTONE + '.part', data);
+  fs.renameSync(RINGTONE + '.part', RINGTONE);
+  auditLog(req, 'ringtone', null, { size: data.length });
+  send(200, ringtoneInfo());
+}
+
+// сравнение без утечки длины и содержимого по времени ответа
+const sameSecret = (a, b) => crypto.timingSafeEqual(
+  crypto.createHash('sha256').update(String(a)).digest(), crypto.createHash('sha256').update(String(b)).digest());
+
+const admin = http.createServer(async (req, res) => {
+  const url = new URL(req.url, 'http://x');
+  const send = (code, body) => {
+    res.writeHead(code, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+    res.end(JSON.stringify(body));
+  };
+  // только localhost по имени: защита от DNS rebinding
+  if (!/^(127\.0\.0\.1|localhost)(:\d+)?$/.test(req.headers.host || '')) return send(403, { error: 'Forbidden' });
+  if (url.pathname === '/' && req.method === 'GET') {
+    res.writeHead(200, {
+      'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store', 'X-Frame-Options': 'DENY',
+      'Content-Security-Policy': "default-src 'self'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; media-src blob:",
+    });
+    return fs.createReadStream(ADMIN_HTML).on('error', () => res.destroy()).pipe(res);
+  }
+  const image = /^\/avatars\/([0-9a-f]{32}\.(png|jpg|webp|gif))$/.exec(url.pathname)?.[1];
+  if (image && req.method === 'GET') return sendImage(res, AVATARS_DIR, image, send);
+  if (!sameSecret(bearer(req), ADMIN_TOKEN)) return send(401, { error: 'Неверный токен админки' });
+  if (url.pathname === '/api/ringtone' && req.method === 'POST') return uploadRingtone(req, res, send);
+  if (url.pathname === '/api/ringtone' && req.method === 'GET') {
+    let st;
+    try { st = fs.statSync(RINGTONE); } catch { return send(404, { error: 'Мелодия не задана' }); }
+    res.writeHead(200, { 'Content-Type': 'audio/mpeg', 'Content-Length': st.size, 'Cache-Control': 'no-store' });
+    return fs.createReadStream(RINGTONE).pipe(res);
+  }
+  const handler = adminRoutes[`${req.method} ${url.pathname}`];
+  if (!handler) return send(404, { error: 'Not found' });
+  try {
+    let body = {};
+    if (req.method === 'POST') {
+      let raw = '';
+      for await (const chunk of req) {
+        raw += chunk;
+        if (raw.length > 1e5) throw [413, 'Слишком большой запрос'];
+      }
+      body = raw ? JSON.parse(raw) : {};
+    }
+    send(200, await handler(body, url, req));
+  } catch (e) {
+    if (Array.isArray(e)) return send(e[0], { error: e[1] });
+    console.error(e);
+    send(500, { error: 'Ошибка сервера: ' + (e?.message || e) });
+  }
+});
+// занятый порт не должен ронять основной API
+admin.on('error', (e) => console.error('Админка не запустилась:', e.message));
+
 server.listen(PORT, process.env.HOST || '0.0.0.0', () => console.log(`Startrack API on :${PORT}, LiveKit ${LK_URL}`));
+if (ADMIN_TOKEN.length >= 16) admin.listen(ADMIN_PORT, '127.0.0.1', () => console.log(`Админка на 127.0.0.1:${ADMIN_PORT}`));
+else console.log('ADMIN_TOKEN не задан или короче 16 символов — админка выключена');
