@@ -46,7 +46,7 @@ jobs:
             $jksBytes = [Convert]::FromBase64String($b64)
             [System.IO.File]::WriteAllBytes("$HOME\.tauri\startrack-android.jks", $jksBytes)
             $jksPath = "$HOME/.tauri/startrack-android.jks".Replace("\", "/")
-            $pass = $env:KEYSTORE_PASSWORD.Trim()
+            $pass = $env:KEYSTORE_PASSWORD.Trim().Trim('"').Trim("'").Trim()
             $props = "storeFile=$jksPath`nkeyAlias=startrack`npassword=$pass"
             [System.IO.File]::WriteAllText("$HOME\.tauri\startrack-android.properties", $props, $utf8NoBom)
             New-Item -ItemType Directory -Path "$HOME\.gradle" -Force | Out-Null
