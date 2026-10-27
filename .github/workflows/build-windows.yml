@@ -49,6 +49,8 @@ jobs:
             $pass = $env:KEYSTORE_PASSWORD.Trim()
             $props = "storeFile=$jksPath`nkeyAlias=startrack`npassword=$pass"
             [System.IO.File]::WriteAllText("$HOME\.tauri\startrack-android.properties", $props, $utf8NoBom)
+            New-Item -ItemType Directory -Path "$HOME\.gradle" -Force | Out-Null
+            "kotlin.incremental=false" | Set-Content "$HOME\.gradle\gradle.properties" -Encoding utf8
           }
       - name: Build NSIS Installer (.exe)
         working-directory: ./client

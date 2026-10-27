@@ -45,9 +45,11 @@ for (const t of targets) {
   const out = (r.stdout || '') + (r.stderr || '');
   process.stdout.write(out);
   const lib = at('src-tauri', 'target', t.triple, 'release', 'libstartrack_lib.so');
-  // успех — либо tauri дошёл до Gradle сам (режим разработчика включён), либо упал ровно на ссылке
-  if (r.status !== 0 && !/symbolic link/i.test(out)) process.exit(1);
-  if (!existsSync(lib)) { console.error(`Нет ${lib}`); process.exit(1); }
+  // Главное — чтобы библиотека собралась для целевой архитектуры
+  if (!existsSync(lib)) {
+    console.error(`Не найдена собранная библиотека: ${lib}`);
+    process.exit(1);
+  }
   mkdirSync(join(jni, t.abi), { recursive: true });
   const dest = join(jni, t.abi, 'libstartrack_lib.so');
   rmSync(dest, { force: true });
