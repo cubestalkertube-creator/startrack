@@ -1648,6 +1648,16 @@ setInterval(() => {
   if (!afk && C.state === 'idle' && Date.now() - lastInput > AFK_MS) { afk = true; wsSend({ type: 'afk', afk: true }); }
 }, 30e3);
 
+// Уведомление Windows о сообщении, пока окно свёрнуто или не в фокусе (выключается в настройках)
+function notifyMsg(m: Msg) {
+  if (!tauri || ANDROID || store.get('notify') === '0') return;
+  const u = userById(m.sender);
+  const who = u ? uname(u) : m.sname || 'Сообщение';
+  const g = m.grp ? group(m.grp) : undefined;
+  const text = m.text.trim() || (m.file ? '📎 ' + m.file.name : '');
+  tauri.invoke('notify', { title: g ? `${who} — ${gname(g)}` : who, body: text.length > 200 ? text.slice(0, 200) + '…' : text }).catch(() => {});
+}
+
 function onEvent(ev: any) {
   switch (ev.type) {
     case 'message': {
@@ -1658,6 +1668,7 @@ function onEvent(ev: any) {
       else if (m.sender !== S.me!.id) { S.unread.set(key, (S.unread.get(key) || 0) + 1); renderFriends(); }
       // как в Discord: молчим про открытую беседу, пока окно в фокусе, и в «Не беспокоить»
       if (m.sender !== S.me!.id && !m.kind && S.me!.status !== 'dnd' && !(convKey() === key && document.hasFocus())) sfx('message');
+      if (m.sender !== S.me!.id && !m.kind && S.me!.status !== 'dnd' && !document.hasFocus()) notifyMsg(m);
       break;
     }
     case 'message_deleted': {
@@ -1748,6 +1759,8 @@ const C = {
   relayAuto: false, // включили сами в этой сессии из-за обрывов
   relayBroken: false, // TURN/TLS в этой сети не подключается — больше не пробуем
   vpn: null as string | null, // адаптер VPN, через который идёт трафик к серверу
+  tcp: false, // текущее подключение звонка идёт через TURN/TLS
+  brCap: 0, // потолок битрейта демонстрации от регулятора задержки (0 — без ограничения)
   switching: false,
   gen: 0, // номер звонка: после сброса незавершённые подключения закрываются
   rejoins: 0,
@@ -1821,12 +1834,20 @@ async function detectVpn(serverUrl: string): Promise<string | null> {
   }
 }
 
-const screenPublishOpts = () => {
+// В TCP-режиме (TURN/TLS) потери превращаются в очередь: 8 Мбит/с демонстрации забивают канал,
+// и звук обеих сторон отстаёт на секунды. Поэтому там потолок ниже, а голос всегда важнее картинки.
+const RELAY_MAX_BR = 2_500_000;
+const RELAY_MAX_FPS = 30;
+const screenCaps = () => {
   const q = QUALITY[C.quality];
+  return C.tcp ? { br: Math.min(q.br, RELAY_MAX_BR), fps: Math.min(q.fps, RELAY_MAX_FPS) } : { br: q.br, fps: q.fps };
+};
+const screenPublishOpts = () => {
+  const cap = screenCaps();
   return {
     videoCodec: C.codec,
     simulcast: false,
-    screenShareEncoding: { maxBitrate: q.br, maxFramerate: q.fps, priority: 'high' as const },
+    screenShareEncoding: { maxBitrate: cap.br, maxFramerate: cap.fps, priority: 'medium' as const },
     degradationPreference: (C.hint === 'motion' ? 'maintain-framerate' : 'maintain-resolution') as RTCDegradationPreference,
     audioPreset: AudioPresets.musicHighQualityStereo,
     dtx: false,
@@ -1880,10 +1901,12 @@ async function joinRoom(carry?: Carry, mode: 'auto' | 'all' = 'auto') {
     dynacast: true,
     audioCaptureDefaults: { deviceId: C.micId || undefined, echoCancellation: C.ns, noiseSuppression: C.ns, autoGainControl: C.ns },
     audioOutput: C.outId ? { deviceId: C.outId } : undefined,
-    // RED + Opus 48 кбит/с: устойчивый к потерям чистый голос
-    publishDefaults: { dtx: true, red: true, audioPreset: AudioPresets.music },
+    // RED + Opus 48 кбит/с: устойчивый к потерям чистый голос; приоритет выше демонстрации
+    publishDefaults: { dtx: true, red: true, audioPreset: { ...AudioPresets.music, priority: 'high' } },
   });
   C.room = room;
+  C.tcp = relay;
+  C.brCap = 0;
   let reconnTimer = 0;
   let reconnCount = 0;
   let joined = false; // до успешного connect обрывы обрабатывает catch ниже, а не события
@@ -2146,7 +2169,7 @@ async function toggleScreen() {
       selfBrowserSurface: 'exclude',
       surfaceSwitching: 'include',
       contentHint: C.hint,
-      resolution: { width: q.w, height: q.h, frameRate: q.fps },
+      resolution: { width: q.w, height: q.h, frameRate: screenCaps().fps },
     }, screenPublishOpts());
     if (lp.isScreenShareEnabled) sfx('streamStart');
   } catch (err) {
@@ -2154,6 +2177,33 @@ async function toggleScreen() {
   }
   renderCall();
 }
+
+// Регулятор задержки демонстрации. Когда канал не тянет, пакеты копятся в очереди (особенно по TCP)
+// и вместе с картинкой опаздывает голос. Очередь видна по росту RTT над обычным для этой сети:
+// растёт — режем битрейт, канал снова свободен — понемногу возвращаем.
+const gov = { room: null as Room | null, base: Infinity };
+setInterval(async () => {
+  const room = C.room;
+  const sender = room?.localParticipant.getTrackPublication(Track.Source.ScreenShare)?.track?.sender;
+  if (!room || !sender) { C.brCap = 0; return; }
+  if (gov.room !== room) { gov.room = room; gov.base = Infinity; }
+  let rtt = 0;
+  (await sender.getStats().catch(() => null))?.forEach((s: any) => {
+    if (s.type === 'candidate-pair' && s.nominated && s.state === 'succeeded' && s.currentRoundTripTime) rtt = Math.max(rtt, s.currentRoundTripTime);
+    if (s.type === 'remote-inbound-rtp' && s.kind === 'video' && s.roundTripTime) rtt = Math.max(rtt, s.roundTripTime);
+  });
+  if (!rtt || C.room !== room) return;
+  gov.base = Math.min(gov.base, rtt);
+  const max = screenCaps().br;
+  const cur = C.brCap || max;
+  const next = rtt > gov.base + 0.25 ? Math.max(400_000, cur * 0.6) : rtt < gov.base + 0.08 ? Math.min(max, cur * 1.15) : cur;
+  if (next === cur) return;
+  const p = sender.getParameters();
+  if (!p.encodings?.length) return;
+  p.encodings[0].maxBitrate = Math.round(next);
+  await sender.setParameters(p).catch(() => {});
+  C.brCap = next >= max ? 0 : next;
+}, 2000);
 
 // Панель звонка видна только в беседе, где идёт звонок; «Скрыть чат» растягивает её на всю высоту
 function syncCallBox() {
@@ -2934,6 +2984,9 @@ function renderSettingsTab() {
       </div>
       <input type="file" id="rfile" accept="audio/*" hidden>
       <hr>
+      ${tauri && !ANDROID ? `<div class="switch-row"><div><b>Уведомления Windows</b><span>Показывать новые сообщения, когда окно Startrack свёрнуто или не в фокусе</span></div>
+        <input type="checkbox" class="switch" id="notifyon" ${store.get('notify') !== '0' ? 'checked' : ''}></div>
+      <hr>` : ''}
       <h3>Звуки приложения</h3>
       <label class="fld sfx-vol"><span>Громкость звуков</span><input type="range" id="sfxvol" min="0" max="100" value="${Math.round(sfxVol * 100)}"></label>
       ${(Object.keys(SFX_GROUPS) as SfxGroup[]).map((g) => `
@@ -2946,6 +2999,8 @@ function renderSettingsTab() {
       all.forEach((x, i) => setTimeout(() => sfx(x, true), i * 700));
     }));
     box.querySelectorAll<HTMLInputElement>('[data-sfxon]').forEach((c) => (c.onchange = () => setSfxOn(c.dataset.sfxon as SfxGroup, c.checked)));
+    const nt = document.getElementById('notifyon') as HTMLInputElement | null;
+    if (nt) nt.onchange = () => store.set('notify', nt.checked ? '1' : '0');
     $('#rplay').onclick = () => {
       if (ringing()) return;
       ringPreview = !ringPreview;

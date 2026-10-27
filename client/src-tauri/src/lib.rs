@@ -5,7 +5,7 @@ mod download;
 #[cfg(desktop)]
 mod update;
 
-#[cfg(all(desktop, not(debug_assertions)))]
+#[cfg(desktop)]
 use tauri::Manager;
 use tauri::{WebviewUrl, WebviewWindowBuilder};
 
@@ -58,9 +58,11 @@ fn desktop() {
     }));
     builder
         .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_notification::init())
         .manage(update::Pending::default())
         .invoke_handler(tauri::generate_handler![
             route_adapter,
+            notify,
             download::reveal_file,
             update::update_check,
             update::update_install,
@@ -101,6 +103,17 @@ fn desktop() {
         })
         .run(tauri::generate_context!())
         .expect("error while running Startrack");
+}
+
+// Новое сообщение, пока окно не в фокусе: уведомление Windows и мигающая кнопка на панели задач
+#[cfg(desktop)]
+#[tauri::command]
+fn notify(app: tauri::AppHandle, title: String, body: String) {
+    use tauri_plugin_notification::NotificationExt;
+    let _ = app.notification().builder().title(title).body(body).show();
+    if let Some(w) = app.get_webview_window("main") {
+        let _ = w.request_user_attention(Some(tauri::UserAttentionType::Informational));
+    }
 }
 
 #[cfg(desktop)]
