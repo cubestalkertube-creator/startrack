@@ -60,15 +60,36 @@ jobs:
           $env:TAURI_SIGNING_PRIVATE_KEY = $keyPath
           npx tauri build --bundles nsis
       - name: Build Android APK
+        shell: pwsh
         working-directory: ./client
-        env:
-          ANDROID_HOME: ${{ env.ANDROID_HOME }}
-          NDK_HOME: ${{ env.ANDROID_NDK_LATEST_HOME }}
         run: |
           if (Test-Path "$HOME\.tauri\startrack-android.properties") {
+            $sdk = if (Test-Path "C:\Android\android-sdk") { "C:\Android\android-sdk" } elseif ($env:ANDROID_HOME -and (Test-Path $env:ANDROID_HOME)) { $env:ANDROID_HOME } else { "$env:LOCALAPPDATA\Android\Sdk" }
+            $ndk = ""
+            if (Test-Path "$sdk\ndk") {
+              $ndkDir = Get-ChildItem -Path "$sdk\ndk" -Directory | Sort-Object Name -Descending | Select-Object -First 1
+              if ($ndkDir) { $ndk = $ndkDir.FullName }
+            }
+            if (-not $ndk -and $env:ANDROID_NDK_HOME -and (Test-Path $env:ANDROID_NDK_HOME)) {
+              $ndk = $env:ANDROID_NDK_HOME
+            }
+            if (-not $ndk -and $env:ANDROID_NDK_LATEST_HOME -and (Test-Path $env:ANDROID_NDK_LATEST_HOME)) {
+              $ndk = $env:ANDROID_NDK_LATEST_HOME
+            }
+            if (-not $ndk) {
+              Write-Host "NDK not found, attempting install via sdkmanager..."
+              & "$sdk\cmdline-tools\latest\bin\sdkmanager.bat" --install "ndk;26.1.10909125"
+              if (Test-Path "$sdk\ndk") {
+                $ndk = (Get-ChildItem -Path "$sdk\ndk" -Directory | Sort-Object Name -Descending | Select-Object -First 1).FullName
+              }
+            }
+            $env:ANDROID_HOME = $sdk
+            $env:NDK_HOME = $ndk
+            Write-Host "ANDROID_HOME=$sdk"
+            Write-Host "NDK_HOME=$ndk"
             node scripts/android.mjs
           } else {
-            echo "No Android keystore configured, skipping APK build"
+            Write-Host "No Android keystore configured, skipping APK build"
           }
       - name: Publish GitHub Release
         shell: pwsh
@@ -100,9 +121,10 @@ jobs:
           $files = @("$dir/$exe", "$dir/$exe.sig", "$dir/latest.json")
           if (Test-Path $apk) { $files += $apk }
           
-          gh release view "v$ver" 2>$null
+          $rel = gh release view "v$ver" 2>&1
           if ($LASTEXITCODE -eq 0) {
             gh release upload "v$ver" $files --clobber
+            gh release edit "v$ver" --draft=false
           } else {
             gh release create "v$ver" $files --title "Startrack $ver" --notes-file "$dir/release-notes.md"
           }
