@@ -612,14 +612,61 @@ function renderUserbar() {
     <button class="ibtn" data-act="settings" title="Настройки пользователя">${ic('gear')}</button>`;
 }
 
+// Горизонтальная прокрутка полосы вкладок (Друзья, Настройки на телефоне): свайп пальцем, перетаскивание мышью и колёсико
+function hScroll(el: HTMLElement | null, prevLeft = 0) {
+  if (!el) return;
+  if (prevLeft > 0) el.scrollLeft = prevLeft;
+  else {
+    const sel = el.querySelector<HTMLElement>('.sel');
+    sel?.scrollIntoView({ inline: 'nearest', block: 'nearest' });
+  }
+  el.onwheel = (e) => {
+    if (Math.abs(e.deltaY) > Math.abs(e.deltaX)) {
+      e.preventDefault();
+      el.scrollLeft += e.deltaY;
+    }
+  };
+  let down = false, startX = 0, startLeft = 0, moved = false;
+  el.onpointerdown = (e) => {
+    if (e.pointerType === 'touch') return; // тач-свайп нативно работает через touch-action: pan-x
+    down = true;
+    moved = false;
+    startX = e.clientX;
+    startLeft = el.scrollLeft;
+  };
+  el.onpointermove = (e) => {
+    if (!down) return;
+    const dx = e.clientX - startX;
+    if (!moved && Math.abs(dx) > 5) {
+      moved = true;
+      el.classList.add('dragging');
+      el.setPointerCapture(e.pointerId);
+    }
+    if (moved) el.scrollLeft = startLeft - dx;
+  };
+  const stop = () => {
+    if (!down) return;
+    down = false;
+    el.classList.remove('dragging');
+    if (moved) {
+      el.addEventListener('click', (ev) => { ev.stopPropagation(); ev.preventDefault(); }, { capture: true, once: true });
+      moved = false;
+    }
+  };
+  el.onpointerup = stop;
+  el.onpointercancel = stop;
+}
+
 // ---------- страница «Друзья» ----------
 function renderHome() {
   const { friends, incoming, outgoing } = S.friends;
+  const prevScroll = document.querySelector<HTMLElement>('.tb-tabs')?.scrollLeft ?? 0;
   const tab = (t: Tab, title: string, n = 0) =>
     `<button class="tb-tab ${S.tab === t ? 'sel' : ''} ${t === 'add' ? 'add' : ''}" data-act="tab" data-tab="${t}">${title}${n ? `<span class="pill">${n}</span>` : ''}</button>`;
   $('#topbar').innerHTML = `
     ${BACK}<div class="tb-title">${ic('friends', 24)}<b>Друзья</b></div><span class="tb-div"></span>
     <nav class="tb-tabs">${tab('online', 'В сети')}${tab('all', 'Все')}${tab('pending', 'Ожидание', incoming.length)}${tab('add', 'Добавить в друзья')}</nav>`;
+  hScroll(document.querySelector<HTMLElement>('.tb-tabs'), prevScroll);
   $('#profile').hidden = true;
   const chat = $('#chat');
 
@@ -2888,6 +2935,7 @@ let micTest: { stream: MediaStream; ctx: AudioContext; audio: HTMLAudioElement; 
 function openSettings(tab: SetTab) {
   if (!S.me) return;
   if (setTab !== tab && profDirty()) return shakeSavebar();
+  const prevScroll = document.querySelector<HTMLElement>('.set-nav-in')?.scrollLeft ?? 0;
   setTab = tab;
   const navBtn = (t: SetTab, title: string) => `<button class="sn ${setTab === t ? 'sel' : ''}" data-set="${t}">${title}</button>`;
   $('#layer').innerHTML = `
@@ -2908,6 +2956,9 @@ function openSettings(tab: SetTab) {
         <button class="set-close" data-set="close" title="Закрыть">${ic('close', 18)}<span>ESC</span></button>
       </div>
     </div>`;
+  const navIn = document.querySelector<HTMLElement>('.set-nav-in');
+  hScroll(navIn, prevScroll);
+  navIn?.querySelector<HTMLElement>('.sn.sel')?.scrollIntoView({ inline: 'nearest', block: 'nearest' });
   $('#layer').onclick = (e) => {
     const b = (e.target as HTMLElement).closest<HTMLElement>('[data-set]');
     if (!b) return;
@@ -3268,7 +3319,7 @@ async function cropImage(file: File, kind: 'avatar' | 'banner'): Promise<Blob | 
     const bg = showDlg('crop', `
       <h3>Изменить изображение</h3>
       ${anim ? `<p>Анимированный GIF — анимация сохранится (${anim.count} ${plural(anim.count, 'кадр', 'кадра', 'кадров')}).</p>` : ''}
-      <div class="crop-box ${kind}" style="width:${c.w}px;height:${c.h}px"><canvas></canvas><div class="crop-mask"></div></div>
+      <div class="crop-box ${kind}" style="--cw:${c.w}px;--ch:${c.h}px;aspect-ratio:${c.w}/${c.h}"><canvas></canvas><div class="crop-mask"></div></div>
       <div class="crop-zoom">${ic('image', 16)}<input type="range" min="1" max="4" step="0.01" value="1">${ic('image', 24)}</div>
       <div class="dlg-btns"><button class="btn lnk" data-r="reset">Сбросить</button><span class="grow"></span><button class="btn sec" data-r="0">Отмена</button><button class="btn" data-r="1">Применить</button></div>`);
     const cv = $<HTMLCanvasElement>('canvas', bg);
@@ -3297,12 +3348,45 @@ async function cropImage(file: File, kind: 'avatar' | 'banner'): Promise<Blob | 
     const setZoom = (z: number) => { zoom = Math.max(1, Math.min(4, z)); zoomEl.value = String(zoom); draw(); };
     zoomEl.oninput = () => setZoom(Number(zoomEl.value));
     cv.onwheel = (e) => { e.preventDefault(); setZoom(zoom * (e.deltaY < 0 ? 1.1 : 1 / 1.1)); };
+
+    // Перетаскивание одним пальцем / мышью и масштабирование двумя пальцами (pinch-to-zoom) с учётом реального размера холста
+    const pts = new Map<number, { x: number; y: number }>();
+    let pinchDist = 0, pinchZoom = 1;
+    const scaleOf = () => c.w / (cv.clientWidth || c.w);
     cv.onpointerdown = (e) => {
       cv.setPointerCapture(e.pointerId);
-      const sx = e.clientX - x, sy = e.clientY - y;
-      cv.onpointermove = (m) => { x = m.clientX - sx; y = m.clientY - sy; draw(); };
-      cv.onpointerup = () => { cv.onpointermove = null; };
+      pts.set(e.pointerId, { x: e.clientX, y: e.clientY });
+      if (pts.size === 2) {
+        const [a, b] = [...pts.values()];
+        pinchDist = Math.hypot(a.x - b.x, a.y - b.y) || 1;
+        pinchZoom = zoom;
+      }
     };
+    cv.onpointermove = (e) => {
+      const prev = pts.get(e.pointerId);
+      if (!prev) return;
+      const cur = { x: e.clientX, y: e.clientY };
+      pts.set(e.pointerId, cur);
+      const sc = scaleOf();
+      if (pts.size === 1) {
+        x += (cur.x - prev.x) * sc;
+        y += (cur.y - prev.y) * sc;
+        draw();
+      } else if (pts.size === 2) {
+        const [a, b] = [...pts.values()];
+        const dist = Math.hypot(a.x - b.x, a.y - b.y) || 1;
+        x += ((cur.x - prev.x) * 0.5) * sc;
+        y += ((cur.y - prev.y) * 0.5) * sc;
+        setZoom(pinchZoom * (dist / pinchDist));
+      }
+    };
+    const endPtr = (e: PointerEvent) => {
+      pts.delete(e.pointerId);
+      if (pts.size < 2) pinchDist = 0;
+    };
+    cv.onpointerup = endPtr;
+    cv.onpointercancel = endPtr;
+
     draw();
     let done = false;
     const finish = (b: Blob | null) => {
