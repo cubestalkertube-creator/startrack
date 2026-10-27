@@ -195,7 +195,7 @@ function toast(text, bad = false) {
 const fail = (e) => e instanceof AuthError || toast(e.message, true);
 
 // Диалог: resolve(значение поля | true) при подтверждении, null — отмена.
-// input.match — кнопка активна, только когда введён точно этот текст
+// input.match — кнопка активна, только когда введён точно этот текст; input.min — минимальная длина
 function modal({ title, text = '', html = '', input = null, ok = 'ОК', danger = false, cancel = 'Отмена' }) {
   return new Promise((resolve) => {
     const d = $('#dlg');
@@ -205,6 +205,7 @@ function modal({ title, text = '', html = '', input = null, ok = 'ОК', danger 
     const inp = $('input[name=v]', d);
     const okBtn = $('[data-ok]', d);
     if (input?.match) { okBtn.disabled = true; inp.oninput = () => (okBtn.disabled = inp.value !== input.match); }
+    if (input?.min) { okBtn.disabled = true; inp.oninput = () => (okBtn.disabled = inp.value.length < input.min); }
     // результат — сразу по кнопке, а не по событию close: оно приходит не во всех браузерах
     const done = (v) => { d.close(); resolve(v); };
     $('form', d).onsubmit = (e) => { e.preventDefault(); done(inp ? inp.value : true); };
@@ -311,6 +312,7 @@ function renderCard(u) {
     </div>
     <div class="actions">
       <button class="btn" data-a="reset">Сбросить пароль</button>
+      <button class="btn" data-a="password">Задать пароль</button>
       <button class="btn sec" data-a="logout">Выйти на всех устройствах</button>
       ${u.banned ? '<button class="btn green" data-a="unban">Разблокировать</button>' : '<button class="btn red" data-a="ban">Заблокировать</button>'}
       <button class="btn red" data-a="delete">Удалить аккаунт</button>
@@ -332,7 +334,16 @@ async function action(a, u, btn) {
   let body = { id: u.id };
   if (a === 'reset' && !(await modal({ title: 'Сбросить пароль?', text: `У ${who} будет новый временный пароль, все сессии завершатся.`, ok: 'Сбросить' }))) return;
   if (a === 'logout' && !(await modal({ title: 'Выйти на всех устройствах?', text: `Все сессии ${who} завершатся, войти можно будет снова с тем же паролем.`, ok: 'Завершить сессии' }))) return;
-  if (a === 'unban' && !(await modal({ title: 'Разблокировать?', text: `${who} снова сможет войти.`, ok: 'Разблокировать' }))) return;
+  if (a === 'password') {
+    const password = await modal({
+      title: 'Задать пароль для ' + u.username, ok: 'Сохранить',
+      text: 'Не меньше 6 символов. Все сессии аккаунта завершатся, войти можно будет уже с новым паролем.',
+      input: { placeholder: 'Новый пароль', min: 6, max: 128 },
+    });
+    if (password === null) return;
+    body.password = password;
+  }
+  if (a === 'unban' &&!(await modal({ title: 'Разблокировать?', text: `${who} снова сможет войти.`, ok: 'Разблокировать' }))) return;
   if (a === 'ban') {
     const reason = await modal({ title: 'Заблокировать ' + u.username + '?', text: 'Аккаунт сразу выкинет из приложения и звонков, войти будет нельзя. Причина покажется при попытке входа.', input: { placeholder: 'Причина (необязательно)' }, ok: 'Заблокировать', danger: true });
     if (reason === null) return;
@@ -363,7 +374,7 @@ async function action(a, u, btn) {
       $('#card').innerHTML = '<div class="empty">Выберите пользователя слева</div>';
     } else {
       renderCard(r);
-      toast({ ban: 'Заблокирован', unban: 'Разблокирован', logout: 'Сессии завершены' }[a]);
+      toast({ ban: 'Заблокирован', unban: 'Разблокирован', logout: 'Сессии завершены', password: 'Пароль изменён' }[a]);
     }
     loadUsers();
     loadStats();
@@ -442,7 +453,7 @@ async function playRingtone() {
 }
 
 // ---------- журнал ----------
-const ACTIONS = { reset_password: 'Сброс пароля', ban: 'Бан', unban: 'Разбан', logout: 'Выход везде', delete: 'Удаление аккаунта', backup: 'Бэкап базы', ringtone: 'Мелодия звонка' };
+const ACTIONS = { reset_password: 'Сброс пароля', set_password: 'Новый пароль',ban: 'Бан', unban: 'Разбан', logout: 'Выход везде', delete: 'Удаление аккаунта', backup: 'Бэкап базы', ringtone: 'Мелодия звонка' };
 async function loadAudit() {
   let list;
   try { list = await api('/api/audit'); } catch (e) { return fail(e); }

@@ -1134,6 +1134,17 @@ const adminRoutes = {
     auditLog(req, 'reset_password', u.id, { username: u.username });
     return { password, user: userCard(adminUser(u.id)) };
   },
+  // Свой пароль вместо случайного (те же правила, что при регистрации); старые сессии разлогиниваются
+  'POST /api/user/password': (b, _url, req) => {
+    const u = adminUser(b.id);
+    const password = String(b.password ?? '');
+    if (password.length < 6) throw [400, 'Пароль минимум 6 символов'];
+    if (password.length > 128) throw [400, 'Пароль не длиннее 128 символов'];
+    qa.setPass.run(hashPass(password), u.id);
+    dropSessions(u.id);
+    auditLog(req, 'set_password', u.id, { username: u.username });
+    return userCard(adminUser(u.id));
+  },
   'POST /api/user/ban': (b, _url, req) => {
     const u = adminUser(b.id);
     const reason = String(b.reason || '').replace(/\s+/g, ' ').trim().slice(0, 200);
