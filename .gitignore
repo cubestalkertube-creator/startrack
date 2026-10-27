@@ -8,3 +8,5 @@ client/src-tauri/target/
 client/src-tauri/gen/schemas/
 .claude/
 *.mp3
+!client/src/assets/ringtone.mp3
+!deploy/ringtone.mp3

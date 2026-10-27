@@ -1,4 +1,5 @@
 import './style.css';
+import defaultRingtone from './assets/ringtone.mp3';
 import {
   AudioPresets, DisconnectReason, Room, RoomEvent, Track,
   type LocalTrackPublication, type Participant, type RemoteParticipant, type RemoteTrack, type RemoteTrackPublication, type TrackPublication,
@@ -2156,22 +2157,19 @@ async function ringtone(on: boolean, preview = false) {
   sfxLoop('ring', false);
   if (ringAudio) {
     ringAudio.pause();
-    URL.revokeObjectURL(ringAudio.src);
+    if (ringAudio.src.startsWith('blob:')) URL.revokeObjectURL(ringAudio.src);
     ringAudio = null;
   }
   // «Не беспокоить»: входящий звонок показываем, но без звука
   if (!on || (!preview && S.me?.status === 'dnd')) return;
-  // своя мелодия пользователя, иначе общая мелодия сервера, иначе гудки
+  // своя мелодия пользователя, иначе общая мелодия сервера, иначе мелодия по умолчанию
   const blob = (await idb<Blob>('readonly', (s) => s.get('ringtone')).catch(() => undefined))
     ?? (await idb<Blob>('readonly', (s) => s.get('serverRingtone')).catch(() => undefined));
   if (!preview && !ringing()) return; // звонок уже приняли/сбросили, пока читали файл
-  if (blob) {
-    const a = (ringAudio = new Audio(URL.createObjectURL(blob)));
-    a.loop = true;
-    a.volume = 0.7;
-    return a.play().catch(() => sfxLoop('ring', true));
-  }
-  sfxLoop('ring', true);
+  const a = (ringAudio = new Audio(blob ? URL.createObjectURL(blob) : defaultRingtone));
+  a.loop = true;
+  a.volume = 0.7;
+  return a.play().catch(() => sfxLoop('ring', true));
 }
 
 function setCallState(s: typeof C.state) {
@@ -3025,8 +3023,8 @@ function renderSettingsTab() {
       <h3>Мелодия входящего звонка</h3>
       <div class="ring-card">
         <span class="ring-ic">${ic('bell', 22)}</span>
-        <div><b>${name ? esc(name) : server ? 'Мелодия сервера' : 'Стандартная'}</b>
-          <span>${name ? 'Своя мелодия — хранится на этом компьютере' : server ? 'Общая мелодия, загружена с сервера' : 'Мелодия Startrack'}</span></div>
+        <div><b>${name ? esc(name) : server ? 'Мелодия сервера' : 'Стандартная (Glass Bell)'}</b>
+          <span>${name ? 'Своя мелодия — хранится на этом компьютере' : server ? 'Общая мелодия, загружена с сервера' : 'Мелодия Startrack (Glass Bell Arpeggio)'}</span></div>
         <button class="rbtn" id="rplay" title="Прослушать">${ic(ringPreview ? 'stop' : 'play')}</button>
       </div>
       <div class="row">
