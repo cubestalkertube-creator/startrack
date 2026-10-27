@@ -42,10 +42,12 @@ jobs:
           
           # Android keystore
           if ($env:KEYSTORE_BASE64) {
-            $jksBytes = [Convert]::FromBase64String($env:KEYSTORE_BASE64)
+            $b64 = $env:KEYSTORE_BASE64 -replace '\s+', ''
+            $jksBytes = [Convert]::FromBase64String($b64)
             [System.IO.File]::WriteAllBytes("$HOME\.tauri\startrack-android.jks", $jksBytes)
             $jksPath = "$HOME/.tauri/startrack-android.jks".Replace("\", "/")
-            $props = "storeFile=$jksPath`nkeyAlias=startrack`npassword=$env:KEYSTORE_PASSWORD"
+            $pass = $env:KEYSTORE_PASSWORD.Trim()
+            $props = "storeFile=$jksPath`nkeyAlias=startrack`npassword=$pass"
             [System.IO.File]::WriteAllText("$HOME\.tauri\startrack-android.properties", $props, $utf8NoBom)
           }
       - name: Build NSIS Installer (.exe)
