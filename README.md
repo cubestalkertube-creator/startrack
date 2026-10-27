@@ -70,49 +70,21 @@ server/   API: аккаунты, друзья, группы, сообщения 
 deploy/   setup.sh — установка на Linux-сервер в /opt/startrack без Docker
 ```
 
-## Сборка клиента
+## Сервер (Ubuntu, 185.218.0.111)
 
-Нужны Node.js 20+, Rust (MSVC) и Visual Studio Build Tools (C++).
+Всё ставит скрипт deploy/setup.sh. Без Docker, потому что на этом сервере работает ваш VPN и iptables трогать нельзя.
 
-```bash
-cd client
-npm install
-npx tauri dev      # разработка
-npx tauri build    # установщик в src-tauri/target/release/bundle/nsis/
-```
+В /opt/startrack должны лежать node/ (Node.js 24), bin/livekit-server, bin/caddy (сборка с модулем caddy-l4), папка server/, а также setup.sh и .env.example. Их копируют из deploy/.
+Запуск: sh /opt/startrack/setup.sh.
+Скрипт создаёт .env со случайными APP_SECRET и LK_SECRET, если файла ещё нет. Затем генерирует livekit.yaml и Caddyfile, ставит npm-зависимости сервера и заводит три systemd-службы: startrack-api, startrack-livekit, startrack-caddy. Есть ещё startrack-cert.path, который перезапускает LiveKit после продления TURN-сертификата.
+Caddy на 443 разделяет трафик по SNI: turn.* уходит в TURN/TLS LiveKit, остальное на сайт и API.
+Порты: 80 и 443 (TCP), 7881 (TCP), 50000–50200 (UDP).
 
-APK для Android (нужны Android SDK + NDK, JDK 17; ключ подписи `~/.tauri/startrack-android.jks`):
+Для правок одного только API, по заметкам в памяти, достаточно скопировать server/src/index.js и перезапустить startrack-api. Полный setup.sh перезапускает и Caddy, и LiveKit, поэтому активные звонки обрываются.
 
-```bash
-node scripts/android.mjs   # src-tauri/target/android/Startrack_x.y.z.apk
-```
+## Клиент
 
-Адрес сервера по умолчанию задан в `client/src/main.ts`, его можно поменять на экране входа («Сервер»).
+Windows: cd client, затем npm install и npx tauri build. Установщик появляется в client/src-tauri/target/release/bundle/nsis/. Адрес сервера задан в client/src/main.ts и меняется на экране входа.
+Android: node scripts/android.mjs собирает APK. Подписывается ключом ~/.tauri/startrack-android.jks.
+Выпуск обновления: node scripts/release.mjs <версия> notes.md --publish. Скрипт поднимает версию, собирает и подписывает установщик и APK, пушит и публикует релиз на GitHub. Подпись делается ключом ~/.tauri/startrack-updater.key, его копию стоит хранить отдельно.
 
-## Выпуск обновления
-
-```bash
-cd client
-node scripts/release.mjs 0.1.5 notes.md --publish
-```
-
-Скрипт поднимает версию (`package.json`, `tauri.conf.json`, `Cargo.toml`), собирает и подписывает установщик,
-создаёт `latest.json`, собирает APK, коммитит версию, пушит и выкладывает релиз `v0.1.5` на GitHub:
-`Startrack_0.1.5_x64-setup.exe`, `.exe.sig`, `latest.json`, `Startrack_0.1.5.apk` (`--no-android` — без APK). Клиенты подхватят его при следующем запуске
-(или в течение 3 минут либо при возврате в окно, если приложение открыто, — появится зелёная кнопка в левой панели).
-
-Подпись — ключ `~/.tauri/startrack-updater.key` (открытая часть прописана в `tauri.conf.json`).
-**Храните копию ключа:** без него выпустить обновление, которое примут уже установленные клиенты, невозможно.
-
-## Развёртывание сервера
-
-На сервере (Ubuntu) в `/opt/startrack` должны лежать `node/` (Node.js 24), `bin/livekit-server`,
-`bin/caddy` (сборка с модулем `github.com/mholt/caddy-l4`) и папка `server/`. Затем:
-
-```bash
-cp deploy/setup.sh deploy/.env.example /opt/startrack/
-sh /opt/startrack/setup.sh
-```
-
-Скрипт сам создаст `.env` со случайными секретами, конфиги LiveKit и Caddy и systemd-службы
-`startrack-api`, `startrack-livekit`, `startrack-caddy`. Порты: 80, 443 (TCP), 7881 (TCP), 50000–50200 (UDP).
