@@ -20,12 +20,24 @@ jobs:
       - name: Install frontend dependencies
         working-directory: ./client
         run: npm install
+      - name: Setup Signing Key
+        shell: pwsh
+        env:
+          KEY_CONTENT: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: |
+          New-Item -ItemType Directory -Path "$HOME\.tauri" -Force | Out-Null
+          $cleanKey = $env:KEY_CONTENT.Trim([char]0xFEFF, "`r", "`n", " ")
+          $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+          [System.IO.File]::WriteAllText("$HOME\.tauri\startrack-updater.key", $cleanKey, $utf8NoBom)
       - name: Build NSIS Installer (.exe)
         working-directory: ./client
         env:
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ runner.temp }}\..\.tauri\startrack-updater.key
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-        run: npx tauri build --bundles nsis
+        run: |
+          $keyPath = "$HOME\.tauri\startrack-updater.key"
+          $env:TAURI_SIGNING_PRIVATE_KEY = $keyPath
+          npx tauri build --bundles nsis
       - name: Publish GitHub Release
         shell: pwsh
         working-directory: ./client
