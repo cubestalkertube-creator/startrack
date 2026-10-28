@@ -84,6 +84,7 @@ fn desktop() {
             #[allow(unused_mut)]
             let mut args = format!(
                 "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection \
+                 --hide-screenshare-notification \
                  --autoplay-policy=no-user-gesture-required --host-resolver-rules=\"{rules}\""
             );
             // отладка WebView2 через CDP только в debug-сборке (порт задаёт STARTRACK_DEBUG_PORT)
@@ -103,7 +104,10 @@ fn desktop() {
                 .on_download(download::on_download)
                 .build()?;
             #[cfg(windows)]
-            allow_media(&win);
+            {
+                allow_media(&win);
+                hide_screenshare_bar();
+            }
             Ok(())
         })
         .run(tauri::generate_context!())
@@ -176,5 +180,73 @@ fn allow_media(win: &tauri::WebviewWindow) {
         }));
         let mut token = 0i64;
         let _ = core.add_PermissionRequested(&handler, &mut token);
+    });
+}
+
+// Скрывает системную плашку Chromium/WebView2 «tauri.localhost предоставляет доступ к вашему экрану»
+#[cfg(windows)]
+fn hide_screenshare_bar() {
+    std::thread::spawn(|| {
+        type HWND = isize;
+        type BOOL = i32;
+        type LPARAM = isize;
+
+        #[link(name = "user32")]
+        extern "system" {
+            fn EnumWindows(lpEnumFunc: unsafe extern "system" fn(HWND, LPARAM) -> BOOL, lParam: LPARAM) -> BOOL;
+            fn GetClassNameW(hWnd: HWND, lpClassName: *mut u16, nMaxCount: i32) -> i32;
+            fn GetWindowTextW(hWnd: HWND, lpString: *mut u16, nMaxCount: i32) -> i32;
+            fn ShowWindow(hWnd: HWND, nCmdShow: i32) -> BOOL;
+            fn SetWindowPos(hWnd: HWND, hWndInsertAfter: HWND, X: i32, Y: i32, cx: i32, cy: i32, uFlags: u32) -> BOOL;
+            fn IsWindowVisible(hWnd: HWND) -> BOOL;
+        }
+
+        unsafe extern "system" fn enum_cb(hwnd: HWND, _: LPARAM) -> BOOL {
+            if IsWindowVisible(hwnd) == 0 {
+                return 1;
+            }
+            let mut class_buf = [0u16; 128];
+            let len = GetClassNameW(hwnd, class_buf.as_mut_ptr(), 128);
+            if len <= 0 {
+                return 1;
+            }
+            let class_name = String::from_utf16_lossy(&class_buf[..len as usize]);
+            if !class_name.starts_with("Chrome_WidgetWin") {
+                return 1;
+            }
+
+            let mut text_buf = [0u16; 512];
+            let tlen = GetWindowTextW(hwnd, text_buf.as_mut_ptr(), 512);
+            if tlen <= 0 {
+                return 1;
+            }
+            let text = String::from_utf16_lossy(&text_buf[..tlen as usize]).to_lowercase();
+            // В русской локализации: "http://tauri.localhost предоставляет доступ к вашему экрану."
+            // В английской локализации: "http://tauri.localhost is sharing your screen."
+            let is_screenshare_bar = text.contains("предоставляет доступ к вашему экрану")
+                || text.contains("is sharing your screen")
+                || (text.contains("tauri.localhost") && (text.contains("экран") || text.contains("screen") || text.contains("доступ") || text.contains("sharing")));
+
+            if is_screenshare_bar {
+                ShowWindow(hwnd, 0 /* SW_HIDE */);
+                SetWindowPos(
+                    hwnd,
+                    0,
+                    -32000,
+                    -32000,
+                    0,
+                    0,
+                    0x0001 /* SWP_NOSIZE */ | 0x0002 /* SWP_NOMOVE */ | 0x0004 /* SWP_NOZORDER */ | 0x0010 /* SWP_NOACTIVATE */ | 0x0080 /* SWP_HIDEWINDOW */,
+                );
+            }
+            1
+        }
+
+        loop {
+            unsafe {
+                EnumWindows(enum_cb, 0);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(150));
+        }
     });
 }

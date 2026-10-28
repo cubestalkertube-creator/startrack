@@ -47,6 +47,38 @@ const store = {
   set: (k: string, v: string) => { try { localStorage.setItem(k, v); } catch {} },
 };
 
+// Темы оформления
+interface ThemeDef {
+  id: string;
+  name: string;
+  desc: string;
+  baseBg: string;
+  chatBg: string;
+  accent: string;
+  light?: boolean;
+}
+const THEMES: ThemeDef[] = [
+  { id: 'dark', name: 'Тёмная', desc: 'Классическая тёмная тема Discord / Startrack', baseBg: '#2c2d32', chatBg: '#323339', accent: '#5865f2' },
+  { id: 'oled', name: 'OLED / Чернота', desc: 'Чистый чёрный цвет для максимального контраста и энергосбережения', baseBg: '#000000', chatBg: '#08080a', accent: '#5865f2' },
+  { id: 'cyberpunk', name: 'Киберпанк', desc: 'Неоновый фиолетовый акцент и глубокий индиго', baseBg: '#0e0b1a', chatBg: '#151124', accent: '#a855f7' },
+  { id: 'emerald', name: 'Изумруд', desc: 'Благородный лесной зелёный с ярким изумрудом', baseBg: '#0b1611', chatBg: '#101f18', accent: '#10b981' },
+  { id: 'ocean', name: 'Океан', desc: 'Морской скандинавский синий со светлым лазурным', baseBg: '#121924', chatBg: '#182230', accent: '#38bdf8' },
+  { id: 'light', name: 'Светлая', desc: 'Классическая чистая светлая тема', baseBg: '#e9eaec', chatBg: '#ffffff', accent: '#5865f2', light: true },
+];
+
+const curTheme = () => store.get('theme') || 'dark';
+
+function applyTheme(id: string) {
+  const t = THEMES.find((x) => x.id === id) ? id : 'dark';
+  if (t === 'dark') delete document.documentElement.dataset.theme;
+  else document.documentElement.dataset.theme = t;
+  store.set('theme', t);
+}
+
+// Применяем сохранённую тему при запуске
+const initTheme = curTheme();
+if (initTheme !== 'dark') document.documentElement.dataset.theme = initTheme;
+
 // Телефон (APK для Android): узкая раскладка, без демонстрации экрана и автообновления установщиком
 const ANDROID = /Android/i.test(navigator.userAgent);
 if (ANDROID) document.documentElement.classList.add('android');
@@ -3119,7 +3151,7 @@ function soundDlg(edit?: SbSound) {
 }
 
 // ---------- настройки ----------
-type SetTab = 'account' | 'profile' | 'security' | 'voice' | 'sounds';
+type SetTab = 'account' | 'profile' | 'security' | 'appearance' | 'voice' | 'sounds';
 let setTab: SetTab = 'account';
 let ringPreview = false;
 let micTest: { stream: MediaStream; ctx: AudioContext; audio: HTMLAudioElement; raf: number } | null = null;
@@ -3139,6 +3171,7 @@ function openSettings(tab: SetTab) {
         ${navBtn('profile', 'Профиль')}
         ${navBtn('security', 'Безопасность')}
         <h5>Настройки приложения</h5>
+        ${navBtn('appearance', 'Внешний вид')}
         ${navBtn('voice', 'Голос и видео')}
         ${navBtn('sounds', 'Звуки')}
         <hr>
@@ -3287,6 +3320,36 @@ function renderSettingsTab() {
         submitBtn.textContent = 'Сохранить новый пароль';
       }
     };
+    return;
+  }
+  if (setTab === 'appearance') {
+    const cur = curTheme();
+    box.innerHTML = `
+      <h2>Внешний вид</h2>
+      <h3>Тема оформления</h3>
+      <p class="set-hint">Выберите цветовую схему для интерфейса Startrack.</p>
+      <div class="theme-grid">
+        ${THEMES.map((t) => `
+          <div class="theme-card ${t.id === cur ? 'sel' : ''}" data-tid="${t.id}">
+            <div class="theme-preview">
+              <div class="theme-preview-base" style="background:${t.baseBg}">
+                <div class="theme-preview-accent" style="background:${t.accent}"></div>
+              </div>
+              <div class="theme-preview-chat" style="background:${t.chatBg}"></div>
+            </div>
+            <div class="theme-info">
+              <b>${esc(t.name)}</b>
+              <span>${esc(t.desc)}</span>
+            </div>
+            ${t.id === cur ? `<div class="theme-check">${ic('check', 16)}</div>` : ''}
+          </div>`).join('')}
+      </div>`;
+    box.querySelectorAll<HTMLElement>('[data-tid]').forEach((c) => {
+      c.onclick = () => {
+        applyTheme(c.dataset.tid!);
+        renderSettingsTab();
+      };
+    });
     return;
   }
   if (setTab === 'sounds') {

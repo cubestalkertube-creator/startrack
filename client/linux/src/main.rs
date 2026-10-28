@@ -51,6 +51,7 @@ fn main() {
         ("enable-features", "WebRTCPipeWireCapturer".into()),
         // без вопроса про пароль связки ключей GNOME/KDE при первом запуске
         ("password-store", "basic".into()),
+        ("hide-screenshare-notification", "".into()),
     ]);
     bridge::serve(listener);
 

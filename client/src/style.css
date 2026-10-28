@@ -9,6 +9,48 @@
   --pop: #232428; /* фон всплывающих окон */
   color-scheme: dark;
 }
+/* Темы оформления */
+:root[data-theme="oled"] {
+  --base: #000000; --chat: #070709; --card: #111114; --card-hi: #19191e; --ub: #070709; --deep: #000000; --pop: #0c0c0e;
+  --line: rgba(255, 255, 255, .08); --line2: rgba(255, 255, 255, .16);
+  --text: #e2e4e8; --head: #ffffff; --muted: #888d96;
+}
+:root[data-theme="cyberpunk"] {
+  --base: #0e0b1a; --chat: #151124; --card: #1f1837; --card-hi: #2a214b; --ub: #110d20; --deep: #080610; --pop: #110d20;
+  --accent: #a855f7; --accent-hi: #9333ea;
+  --line: rgba(168, 85, 247, .16); --line2: rgba(168, 85, 247, .26);
+  --text: #ebd5ff; --head: #faf5ff; --muted: #a796bd;
+}
+:root[data-theme="emerald"] {
+  --base: #0b1611; --chat: #101f18; --card: #182a21; --card-hi: #21382c; --ub: #0e1a14; --deep: #070e0b; --pop: #0e1a14;
+  --accent: #10b981; --accent-hi: #059669;
+  --line: rgba(16, 185, 129, .16); --line2: rgba(16, 185, 129, .26);
+  --text: #d1fae5; --head: #ecfdf5; --muted: #7ca894;
+}
+:root[data-theme="ocean"] {
+  --base: #121924; --chat: #182230; --card: #202c3e; --card-hi: #29384e; --ub: #141c28; --deep: #0c1119; --pop: #141c28;
+  --accent: #38bdf8; --accent-hi: #0284c7;
+  --line: rgba(56, 189, 248, .14); --line2: rgba(56, 189, 248, .24);
+  --text: #e2e8f0; --head: #f8fafc; --muted: #8da2bb;
+}
+:root[data-theme="light"] {
+  --base: #e9eaec; --chat: #ffffff; --card: #f2f3f5; --card-hi: #e3e5e8; --ub: #ebedef; --deep: #dcdfe3; --pop: #ffffff;
+  --line: rgba(0, 0, 0, .08); --line2: rgba(0, 0, 0, .14);
+  --text: #2e3338; --head: #060607; --muted: #6a7480; --faint: #80848e;
+  --hover: rgba(0, 0, 0, .06); --sel: rgba(0, 0, 0, .12);
+  --pop: #ffffff;
+  color-scheme: light;
+}
+:root[data-theme="light"] .msg:hover { background: rgba(0, 0, 0, .04); }
+:root[data-theme="light"] .btn.sec { background: #e3e5e8; color: #2e3338; }
+:root[data-theme="light"] .btn.sec:hover { background: #d7d9dc; }
+:root[data-theme="light"] .msg-del { background: #ffffff; border-color: #dcdfe3; color: #4e5058; }
+:root[data-theme="light"] ::-webkit-scrollbar-thumb { background: #c4c7cc; }
+:root[data-theme="light"] .side-list:hover::-webkit-scrollbar-thumb { background: #c4c7cc; }
+:root[data-theme="light"] .rbtn:hover { background: #d7d9dc; }
+:root[data-theme="light"] input, :root[data-theme="light"] select, :root[data-theme="light"] textarea { background: #e3e5e8; color: #060607; }
+:root[data-theme="light"] .composer textarea { background: none; color: #2e3338; }
+:root[data-theme="light"] .composer textarea::placeholder { color: #8a9099; }
 /* Эмодзи — шрифтом Twemoji, как в Discord (графика: Twemoji, CC-BY 4.0).
    Twemoji — для любого текста, но без цифр, # и *: их рисует обычный шрифт;
    TwemojiFull — внутри .emo, где точно эмодзи (там нужны и клавиши вроде 1️⃣) */
@@ -545,6 +587,18 @@ input[type=range] { accent-color: var(--accent); padding: 0; height: 40px; backg
 .sec-msg.err { background: rgba(242, 63, 67, .15); border: 1px solid rgba(242, 63, 67, .4); color: #fa777a; }
 .sec-msg.ok { background: rgba(35, 165, 89, .15); border: 1px solid rgba(35, 165, 89, .4); color: #57f287; }
 .sec-actions { display: flex; gap: 12px; margin-top: 4px; }
+/* Выбор тем оформления */
+.theme-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 14px; margin-top: 14px; }
+.theme-card { position: relative; background: var(--deep); border: 2px solid var(--line2); border-radius: 10px; padding: 14px; cursor: pointer; transition: border-color .15s, transform .15s, background .15s; display: flex; flex-direction: column; gap: 10px; }
+.theme-card:hover { border-color: var(--accent); transform: translateY(-2px); }
+.theme-card.sel { border-color: var(--accent); background: var(--card); }
+.theme-preview { display: flex; height: 50px; border-radius: 6px; overflow: hidden; border: 1px solid var(--line2); }
+.theme-preview-base { flex: 1; display: flex; align-items: center; justify-content: center; }
+.theme-preview-chat { flex: 2; display: flex; align-items: center; justify-content: center; }
+.theme-preview-accent { width: 14px; height: 14px; border-radius: 50%; box-shadow: 0 0 6px rgba(0, 0, 0, .4); }
+.theme-info b { display: block; color: var(--head); font-size: 15px; margin-bottom: 2px; }
+.theme-info span { color: var(--muted); font-size: 12px; line-height: 1.35; }
+.theme-check { position: absolute; top: 10px; right: 10px; width: 22px; height: 22px; border-radius: 50%; background: var(--accent); color: #fff; display: grid; place-items: center; }
 .ring-card { display: flex; align-items: center; gap: 12px; background: var(--chat); border: 1px solid var(--line); border-radius: 8px; padding: 12px 16px; margin-bottom: 16px; }
 .ring-card div { flex: 1; min-width: 0; }
 .ring-card b { display: block; color: var(--head); font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
