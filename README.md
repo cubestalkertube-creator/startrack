@@ -19,6 +19,7 @@
 Сделайте файл исполняемым (`chmod +x Startrack_*.AppImage` или «Свойства → Разрешить запуск») и запустите —
 после первого запуска Startrack появится в меню приложений. Всё как на Windows, включая звонки и демонстрацию
 экрана (в Wayland — через системное окно выбора экрана). Обновляется сам, как и версия для Windows.
+Собрать самому из исходников тоже можно: см. раздел «Клиент» ниже (`sh scripts/linux-local.sh`).
 
 ## Возможности
 
@@ -92,7 +93,8 @@ Caddy на 443 разделяет трафик по SNI: turn.* уходит в 
 
 Windows: cd client, затем npm install и npx tauri build. Установщик появляется в client/src-tauri/target/release/bundle/nsis/. Адрес сервера задан в client/src/main.ts и меняется на экране входа.
 Android: node scripts/android.mjs собирает APK. Подписывается ключом ~/.tauri/startrack-android.jks.
-Linux: node scripts/linux.mjs собирает AppImage в client/src-tauri/target/linux/. Нужен Docker (на Windows — Docker Desktop): сборка идёт в контейнере на Ubuntu 22.04, чтобы файл работал на всех дистрибутивах. Первая сборка скачивает CEF (~300 МБ), дальше всё берётся из кэша в томах Docker.
+Linux, сборка на своём компьютере без Docker: в папке client запустите `sh scripts/linux-local.sh` (или `sh scripts/linux-local.sh --run`, чтобы сразу запустить). Нужны Rust (rustup), Node.js 20+ и компилятор C/C++; если чего-то нет, скрипт подскажет команду для вашего дистрибутива. Готовая программа — client/linux/target/release/startrack, рядом с ней лежат файлы Chromium. Chromium (~300 МБ) скачивается один раз в ~/.cache/startrack-cef. Такая сборка сама не обновляется: после `git pull` запустите скрипт ещё раз.
+Linux, AppImage для релиза: node scripts/linux.mjs собирает его в client/src-tauri/target/linux/. Нужен Docker (на Windows — Docker Desktop): сборка идёт в контейнере на Ubuntu 22.04, чтобы файл работал на всех дистрибутивах. Первая сборка скачивает CEF (~300 МБ), дальше всё берётся из кэша в томах Docker.
 Выпуск обновления: node scripts/release.mjs <версия> notes.md --publish. Скрипт поднимает версию, собирает и подписывает установщик, AppImage и APK, пушит и публикует релиз на GitHub (--no-linux / --no-android — без них). Подпись делается ключом ~/.tauri/startrack-updater.key, его копию стоит хранить отдельно.
 
 ## Админка
