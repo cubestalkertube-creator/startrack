@@ -1,6 +1,6 @@
 # Startrack
 
-Лёгкий мессенджер в духе Discord для Windows и Android: друзья, личные сообщения, голосовые звонки и демонстрация экрана до 1440p 60 fps.
+Лёгкий мессенджер в духе Discord для Windows, Linux и Android: друзья, личные сообщения, голосовые звонки и демонстрация экрана до 1440p 60 fps.
 
 ## Скачать
 
@@ -14,6 +14,11 @@
 установку из этого источника. Аккаунт и сервер те же, что на ПК: можно переписываться и созваниваться
 между телефоном и компьютером. Демонстрации экрана на телефоне нет. Когда выйдет новая версия, в левой
 панели появится зелёная кнопка — она скачает новый APK, который ставится поверх старого.
+
+**Linux:** `Startrack_x.y.z_x86_64.AppImage` из того же релиза (Ubuntu 22.04+, Debian 12+, Fedora, Arch и т.д., x86_64).
+Сделайте файл исполняемым (`chmod +x Startrack_*.AppImage` или «Свойства → Разрешить запуск») и запустите —
+после первого запуска Startrack появится в меню приложений. Всё как на Windows, включая звонки и демонстрацию
+экрана (в Wayland — через системное окно выбора экрана). Обновляется сам, как и версия для Windows.
 
 ## Возможности
 
@@ -60,12 +65,13 @@
 | Часть | Технологии |
 |---|---|
 | Клиент | Tauri 2 (Rust + WebView2), TypeScript, Vite |
+| Клиент для Linux | Rust + CEF (Chromium) с тем же интерфейсом — в WebKitGTK, который Tauri берёт на Linux, нет WebRTC |
 | Звонки | LiveKit (WebRTC SFU), Opus + RED, H.264/VP9/AV1 |
 | Сервер | Node.js 24, `node:sqlite`, WebSocket |
 | Вход | Caddy (TLS, Let's Encrypt) с layer4: SNI-разделение 443 между сайтом и TURN |
 
 ```
-client/   Tauri-приложение (src/ — интерфейс, src-tauri/ — нативная оболочка)
+client/   Tauri-приложение (src/ — интерфейс, src-tauri/ — нативная оболочка, linux/ — оболочка для Linux)
 server/   API: аккаунты, друзья, группы, сообщения и файлы, сигналинг звонков, токены LiveKit
 deploy/   setup.sh — установка на Linux-сервер в /opt/startrack без Docker
 ```
@@ -86,7 +92,8 @@ Caddy на 443 разделяет трафик по SNI: turn.* уходит в 
 
 Windows: cd client, затем npm install и npx tauri build. Установщик появляется в client/src-tauri/target/release/bundle/nsis/. Адрес сервера задан в client/src/main.ts и меняется на экране входа.
 Android: node scripts/android.mjs собирает APK. Подписывается ключом ~/.tauri/startrack-android.jks.
-Выпуск обновления: node scripts/release.mjs <версия> notes.md --publish. Скрипт поднимает версию, собирает и подписывает установщик и APK, пушит и публикует релиз на GitHub. Подпись делается ключом ~/.tauri/startrack-updater.key, его копию стоит хранить отдельно.
+Linux: node scripts/linux.mjs собирает AppImage в client/src-tauri/target/linux/. Нужен Docker (на Windows — Docker Desktop): сборка идёт в контейнере на Ubuntu 22.04, чтобы файл работал на всех дистрибутивах. Первая сборка скачивает CEF (~300 МБ), дальше всё берётся из кэша в томах Docker.
+Выпуск обновления: node scripts/release.mjs <версия> notes.md --publish. Скрипт поднимает версию, собирает и подписывает установщик, AppImage и APK, пушит и публикует релиз на GitHub (--no-linux / --no-android — без них). Подпись делается ключом ~/.tauri/startrack-updater.key, его копию стоит хранить отдельно.
 
 ## Админка
 

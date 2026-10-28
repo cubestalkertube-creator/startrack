@@ -68,7 +68,7 @@ fn desktop() {
             notify,
             open_url,
             download::reveal_file,
-            games::running_procs,
+            running_procs,
             update::update_check,
             update::update_install,
             update::update_progress
@@ -119,6 +119,13 @@ fn notify(app: tauri::AppHandle, title: String, body: String) {
     if let Some(w) = app.get_webview_window("main") {
         let _ = w.request_user_attention(Some(tauri::UserAttentionType::Informational));
     }
+}
+
+// Запущенные программы для «Играет в …» (games.rs общий с Linux-версией)
+#[cfg(desktop)]
+#[tauri::command]
+async fn running_procs() -> Vec<serde_json::Value> {
+    games::running_procs()
 }
 
 #[cfg(desktop)]

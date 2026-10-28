@@ -1,0 +1,26 @@
+[package]
+name = "startrack"
+version = "0.1.15"
+edition = "2021"
+
+# Linux-версия: то же приложение, что client/src-tauri, но вместо WebKitGTK (в дистрибутивах он без
+# WebRTC, звонков не было бы) внутри Chromium через CEF. Интерфейс тот же — client/dist встроен в бинарник.
+
+[dependencies]
+cef = { version = "156.2", default-features = false }
+serde_json = "1"
+tokio = { version = "1", features = ["net", "io-util", "time", "rt-multi-thread"] }
+tiny_http = "0.12"
+include_dir = "0.7"
+ureq = "3"
+minisign-verify = "0.2"
+base64 = "0.22"
+notify-rust = "4"
+netdev = "0.47.0"
+libc = "0.2"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"

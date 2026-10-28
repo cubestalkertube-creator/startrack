@@ -1,4 +1,4 @@
-name: Build Startrack Releases (Windows + Android)
+name: Build Startrack Releases (Windows + Android + Linux)
 
 on:
   workflow_dispatch:
@@ -7,7 +7,38 @@ on:
       - "v*"
 
 jobs:
+  linux:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install frontend dependencies
+        working-directory: ./client
+        run: npm install
+      - name: Build AppImage (Rust + CEF in Docker)
+        working-directory: ./client
+        run: node scripts/linux.mjs
+      - name: Sign AppImage for auto-update
+        working-directory: ./client
+        env:
+          KEY_CONTENT: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          export TAURI_SIGNING_PRIVATE_KEY="$(printf '%s' "$KEY_CONTENT" | sed '1s/^\xEF\xBB\xBF//' | tr -d '\r')"
+          ver=$(node -p "require('./package.json').version")
+          npx tauri signer sign "src-tauri/target/linux/Startrack_${ver}_x86_64.AppImage"
+      - name: Upload AppImage Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Startrack_Linux
+          path: client/src-tauri/target/linux/*
+
   build:
+    needs: linux
+    # без Linux-сборки релиз для Windows и Android всё равно выходит
+    if: ${{ !cancelled() }}
     runs-on: windows-latest
     permissions:
       contents: write
@@ -93,6 +124,12 @@ jobs:
           } else {
             Write-Host "No Android keystore configured, skipping APK build"
           }
+      - name: Download AppImage
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: Startrack_Linux
+          path: client/src-tauri/target/linux
       - name: Publish GitHub Release
         shell: pwsh
         working-directory: ./client
@@ -105,16 +142,28 @@ jobs:
           $sig = (Get-Content "$dir/$exe.sig" -Raw).Trim()
           $notes = if (Test-Path "notes-$ver.md") { Get-Content "notes-$ver.md" -Raw } else { "Startrack $ver" }
           
+          $appimage = "Startrack_${ver}_x86_64.AppImage"
+          $linuxDir = "src-tauri/target/linux"
+          $platforms = @{
+            "windows-x86_64" = @{
+              signature = $sig
+              url = "https://github.com/cubestalkertube-creator/startrack/releases/download/v$ver/$exe"
+            }
+          }
+          if (Test-Path "$linuxDir/$appimage.sig") {
+            $linuxEntry = @{
+              signature = (Get-Content "$linuxDir/$appimage.sig" -Raw).Trim()
+              url = "https://github.com/cubestalkertube-creator/startrack/releases/download/v$ver/$appimage"
+            }
+            $platforms["linux-x86_64-appimage"] = $linuxEntry
+            $platforms["linux-x86_64"] = $linuxEntry
+          }
+
           $latest = @{
             version = $ver
             notes = $notes.Trim()
             pub_date = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ss.fffZ")
-            platforms = @{
-              "windows-x86_64" = @{
-                signature = $sig
-                url = "https://github.com/cubestalkertube-creator/startrack/releases/download/v$ver/$exe"
-              }
-            }
+            platforms = $platforms
           }
           $latest | ConvertTo-Json -Depth 5 | Set-Content "$dir/latest.json" -Encoding utf8
           Set-Content "$dir/release-notes.md" -Value $notes -Encoding utf8
@@ -122,6 +171,7 @@ jobs:
           $apk = "src-tauri/target/android/Startrack_${ver}.apk"
           $files = @("$dir/$exe", "$dir/$exe.sig", "$dir/latest.json")
           if (Test-Path $apk) { $files += $apk }
+          if (Test-Path "$linuxDir/$appimage.sig") { $files += "$linuxDir/$appimage", "$linuxDir/$appimage.sig" }
           
           $rel = gh release view "v$ver" 2>&1
           if ($LASTEXITCODE -eq 0) {
