@@ -1911,9 +1911,9 @@ setInterval(() => {
   if (!afk && C.state === 'idle' && Date.now() - lastInput > AFK_MS) { afk = true; wsSend({ type: 'afk', afk: true }); }
 }, 30e3);
 
-// Уведомление Windows/Linux о сообщении, пока окно свёрнуто или не в фокусе (выключается в настройках)
+// Уведомление в системе о сообщении, пока окно свёрнуто или не в фокусе (выключается в настройках)
 function notifyMsg(m: Msg) {
-  if (!tauri || ANDROID || store.get('notify') === '0') return;
+  if (!tauri || store.get('notify') === '0') return;
   const u = userById(m.sender);
   const who = u ? uname(u) : m.sname || 'Сообщение';
   const g = m.grp ? group(m.grp) : undefined;
@@ -1930,8 +1930,8 @@ function onEvent(ev: any) {
       if (convKey() === key) renderMessages();
       else if (m.sender !== S.me!.id) { S.unread.set(key, (S.unread.get(key) || 0) + 1); renderFriends(); }
       // как в Discord: молчим про открытую беседу, пока окно в фокусе, и в «Не беспокоить»
-      if (m.sender !== S.me!.id && !m.kind && S.me!.status !== 'dnd' && !(convKey() === key && document.hasFocus())) sfx('message');
-      if (m.sender !== S.me!.id && !m.kind && S.me!.status !== 'dnd' && !document.hasFocus()) notifyMsg(m);
+      if (m.sender !== S.me!.id && !m.kind && S.me!.status !== 'dnd' && !(convKey() === key && document.hasFocus() && !document.hidden)) sfx('message');
+      if (m.sender !== S.me!.id && !m.kind && S.me!.status !== 'dnd' && (!document.hasFocus() || document.hidden)) notifyMsg(m);
       break;
     }
     case 'message_deleted': {
@@ -2315,6 +2315,12 @@ function onGroupRing(gid: number, from: User) {
       </div>
     </div>`;
   ringtone(true);
+  if (tauri && store.get('notify') !== '0') {
+    tauri.invoke('notify', {
+      title: gname(g),
+      body: `${uname(userById(from.id) ?? from)} звонит в группе…`
+    }).catch(() => {});
+  }
   C.inTimer = window.setTimeout(() => { if (C.incomingG === gid) closeIncoming(); }, 30000);
   $('#acc').onclick = () => {
     closeIncoming();
@@ -2338,6 +2344,12 @@ function onIncoming(from: User) {
       </div>
     </div>`;
   ringtone(true);
+  if (tauri && store.get('notify') !== '0') {
+    tauri.invoke('notify', {
+      title: 'Входящий звонок',
+      body: `${uname(userById(from.id) ?? from)} звонит вам…`
+    }).catch(() => {});
+  }
   $('#acc').onclick = async () => {
     closeIncoming();
     C.peer = friend(from.id) || from;
@@ -3370,11 +3382,11 @@ function renderSettingsTab() {
       </div>
       <input type="file" id="rfile" accept="audio/*" hidden>
       <hr>
-      ${tauri && !ANDROID ? `<div class="switch-row"><div><b>Уведомления ${OS_NAME}</b><span>Показывать новые сообщения, когда окно Startrack свёрнуто или не в фокусе</span></div>
-        <input type="checkbox" class="switch" id="notifyon" ${store.get('notify') !== '0' ? 'checked' : ''}></div>
-      <div class="switch-row"><div><b>Показывать, во что я играю</b><span>Друзья увидят в профиле запущенную игру и сколько вы в неё играете, как в Discord</span></div>
-        <input type="checkbox" class="switch" id="gameson" ${store.get('games') !== '0' ? 'checked' : ''}></div>
-      <hr>` : ''}
+      ${tauri ? `<div class="switch-row"><div><b>${ANDROID ? 'Системные уведомления' : `Уведомления ${OS_NAME}`}</b><span>${ANDROID ? 'Показывать уведомления о новых сообщениях и звонках' : 'Показывать новые сообщения, когда окно Startrack свёрнуто или не в фокусе'}</span></div>
+        <input type="checkbox" class="switch" id="notifyon" ${store.get('notify') !== '0' ? 'checked' : ''}></div>` : ''}
+      ${tauri && !ANDROID ? `<div class="switch-row"><div><b>Показывать, во что я играю</b><span>Друзья увидят в профиле запущенную игру и сколько вы в неё играете, как в Discord</span></div>
+        <input type="checkbox" class="switch" id="gameson" ${store.get('games') !== '0' ? 'checked' : ''}></div>` : ''}
+      ${tauri ? '<hr>' : ''}
       <h3>Звуки приложения</h3>
       <label class="fld sfx-vol"><span>Громкость звуков</span><input type="range" id="sfxvol" min="0" max="100" value="${Math.round(sfxVol * 100)}"></label>
       ${(Object.keys(SFX_GROUPS) as SfxGroup[]).map((g) => `

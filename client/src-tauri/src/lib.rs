@@ -24,8 +24,9 @@ pub fn run() {
 #[cfg(mobile)]
 fn mobile() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_opener::init())
-        .invoke_handler(tauri::generate_handler![open_url])
+        .invoke_handler(tauri::generate_handler![open_url, notify])
         .setup(|app| {
             WebviewWindowBuilder::new(app, "main", WebviewUrl::default()).build()?;
             Ok(())
@@ -114,12 +115,12 @@ fn desktop() {
         .expect("error while running Startrack");
 }
 
-// Новое сообщение, пока окно не в фокусе: уведомление Windows и мигающая кнопка на панели задач
-#[cfg(desktop)]
+// Новое сообщение или звонок, пока приложение не в фокусе: системное уведомление
 #[tauri::command]
 fn notify(app: tauri::AppHandle, title: String, body: String) {
     use tauri_plugin_notification::NotificationExt;
     let _ = app.notification().builder().title(title).body(body).show();
+    #[cfg(desktop)]
     if let Some(w) = app.get_webview_window("main") {
         let _ = w.request_user_attention(Some(tauri::UserAttentionType::Informational));
     }
