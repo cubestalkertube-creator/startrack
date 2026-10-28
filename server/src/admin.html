@@ -313,6 +313,7 @@ function renderCard(u) {
     <div class="actions">
       <button class="btn" data-a="reset">Сбросить пароль</button>
       <button class="btn" data-a="password">Задать пароль</button>
+      <button class="btn" data-a="keep">Задать пароль без выхода</button>
       <button class="btn sec" data-a="logout">Выйти на всех устройствах</button>
       ${u.banned ? '<button class="btn green" data-a="unban">Разблокировать</button>' : '<button class="btn red" data-a="ban">Заблокировать</button>'}
       <button class="btn red" data-a="delete">Удалить аккаунт</button>
@@ -334,14 +335,18 @@ async function action(a, u, btn) {
   let body = { id: u.id };
   if (a === 'reset' && !(await modal({ title: 'Сбросить пароль?', text: `У ${who} будет новый временный пароль, все сессии завершатся.`, ok: 'Сбросить' }))) return;
   if (a === 'logout' && !(await modal({ title: 'Выйти на всех устройствах?', text: `Все сессии ${who} завершатся, войти можно будет снова с тем же паролем.`, ok: 'Завершить сессии' }))) return;
-  if (a === 'password') {
+  if (a === 'password' || a === 'keep') {
+    const keep = a === 'keep';
     const password = await modal({
       title: 'Задать пароль для ' + u.username, ok: 'Сохранить',
-      text: 'Не меньше 6 символов. Все сессии аккаунта завершатся, войти можно будет уже с новым паролем.',
+      text: keep
+        ? 'Не меньше 6 символов. Текущие сессии останутся — человек не вылетит из приложения, а новый пароль понадобится при следующем входе (например, после переустановки Windows).'
+        : 'Не меньше 6 символов. Все сессии аккаунта завершатся, войти можно будет уже с новым паролем.',
       input: { placeholder: 'Новый пароль', min: 6, max: 128 },
     });
     if (password === null) return;
     body.password = password;
+    if (keep) { body.keep = true; a = 'password'; }
   }
   if (a === 'unban' &&!(await modal({ title: 'Разблокировать?', text: `${who} снова сможет войти.`, ok: 'Разблокировать' }))) return;
   if (a === 'ban') {
