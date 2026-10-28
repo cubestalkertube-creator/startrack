@@ -16,7 +16,10 @@ type Status = 'online' | 'idle' | 'dnd' | 'invisible' | 'offline';
 type User = {
   id: number; username: string; online?: boolean; status?: Status;
   display?: string; bio?: string; pronouns?: string; custom?: string; avatar?: string; banner?: string; bcolor?: string; created?: number;
+  game?: Game | null;
 };
+// «Играет в …»: app — id игры в базе Discord, steam — appid, start — когда запущена, icon — ключ иконки на сервере
+type Game = { name: string; app: string; steam: string; start: number; icon: string };
 // профиль из /api/users/profile: что у нас с этим человеком общего
 type Profile = User & { mutualFriends: number[]; mutualGroups: number[] };
 // вложение: w/h — размер картинки/видео (для превью без «прыжков» ленты)
@@ -72,6 +75,8 @@ const ICON = {
   logo: 'M12 4l2.16 5.61 6 .28-4.69 3.75 1.64 5.81L12 16.13l-5.11 3.32 1.64-5.81L3.84 9.89l6-.28z',
   friends: 'M16 11c1.66 0 2.99-1.34 2.99-3S17.66 5 16 5c-1.66 0-3 1.34-3 3s1.34 3 3 3zm-8 0c1.66 0 2.99-1.34 2.99-3S9.66 5 8 5C6.34 5 5 6.34 5 8s1.34 3 3 3zm0 2c-2.33 0-7 1.17-7 3.5V19h14v-2.5c0-2.33-4.67-3.5-7-3.5zm8 0c-.29 0-.62.02-.97.05 1.16.84 1.97 1.97 1.97 3.45V19h6v-2.5c0-2.33-4.67-3.5-7-3.5z',
   addFriend: 'M15 12c2.21 0 4-1.79 4-4s-1.79-4-4-4-4 1.79-4 4 1.79 4 4 4zm-9-2V7H4v3H1v2h3v3h2v-3h3v-2H6zm9 4c-2.67 0-8 1.34-8 4v2h16v-2c0-2.66-5.33-4-8-4z',
+  gamepad: 'M21 6H3c-1.1 0-2 .9-2 2v8c0 1.1.9 2 2 2h18c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2zm-10 7H8v3H6v-3H3v-2h3V8h2v3h3v2zm4.5 2c-.83 0-1.5-.67-1.5-1.5s.67-1.5 1.5-1.5 1.5.67 1.5 1.5-.67 1.5-1.5 1.5zm4-3c-.83 0-1.5-.67-1.5-1.5S18.67 9 19.5 9s1.5.67 1.5 1.5-.67 1.5-1.5 1.5z',
+  timer: 'M15 1H9v2h6V1zm-4 13h2V8h-2v6zm8.03-6.61l1.42-1.42c-.43-.51-.9-.99-1.41-1.41l-1.42 1.42C16.07 4.74 14.12 4 12 4c-4.97 0-9 4.03-9 9s4.02 9 9 9 9-4.03 9-9c0-2.12-.74-4.07-1.97-5.61zM12 20c-3.87 0-7-3.13-7-7s3.13-7 7-7 7 3.13 7 7-3.13 7-7 7z',
   phone: 'M6.62 10.79c1.44 2.83 3.76 5.14 6.59 6.59l2.2-2.2c.27-.27.67-.36 1.02-.24 1.12.37 2.33.57 3.57.57.55 0 1 .45 1 1V20c0 .55-.45 1-1 1-9.39 0-17-7.61-17-17 0-.55.45-1 1-1h3.5c.55 0 1 .45 1 1 0 1.25.2 2.45.57 3.57.11.35.03.74-.25 1.02l-2.2 2.2z',
   hangup: 'M12 9c-1.6 0-3.15.25-4.6.72v3.1c0 .39-.23.74-.56.9-.98.49-1.87 1.12-2.66 1.85-.18.18-.43.28-.7.28-.28 0-.53-.11-.71-.29L.29 13.08c-.18-.17-.29-.42-.29-.7 0-.28.11-.53.29-.71C3.34 8.78 7.46 7 12 7s8.66 1.78 11.71 4.67c.18.18.29.43.29.71 0 .28-.11.53-.29.71l-2.48 2.48c-.18.18-.43.29-.71.29-.27 0-.52-.11-.7-.28-.79-.74-1.69-1.36-2.67-1.85-.33-.16-.56-.5-.56-.9v-3.1C15.15 9.25 13.6 9 12 9z',
   mic: 'M12 14c1.66 0 2.99-1.34 2.99-3L15 5c0-1.66-1.34-3-3-3S9 3.34 9 5v6c0 1.66 1.34 3 3 3zm5.3-3c0 3-2.54 5.1-5.3 5.1S6.7 14 6.7 11H5c0 3.41 2.72 6.23 6 6.72V21h2v-3.28c3.28-.48 6-3.3 6-6.72h-1.7z',
@@ -561,7 +566,8 @@ function renderDmList() {
     const unread = S.unread.get('u' + u.id) || 0;
     const inCall = C.state !== 'idle' && !C.gid && C.peer?.id === u.id;
     // под именем, как в Discord, — свой статус
-    const sub = inCall ? `<small class="incall">${ic('volume', 12)}В звонке</small>` : u.custom && u.online ? `<small>${emojify(u.custom)}</small>` : '';
+    const sub = inCall ? `<small class="incall">${ic('volume', 12)}В звонке</small>` : playing(u) ? `<small>${gameLine(u)}</small>`
+      : u.custom && u.online ? `<small>${emojify(u.custom)}</small>` : '';
     return `
       <div class="dm ${S.peer?.id === u.id ? 'sel' : ''} ${unread ? 'unread' : ''}" data-act="open" data-id="${u.id}">
         ${avatar(u, 32, true)}
@@ -709,7 +715,7 @@ function renderHome() {
       <div class="fr-n"><b>${esc(uname(u))}<i>${esc(u.username)}</i></b><span>${sub}</span></div>
       <div class="fr-btns">${btns}</div>
     </div>`;
-  const friendSub = (u: User) => u.custom && u.online ? emojify(u.custom) : ST_NAME[stOf(u)];
+  const friendSub = (u: User) => playing(u) ? gameLine(u) : u.custom && u.online ? emojify(u.custom) : ST_NAME[stOf(u)];
   const rb = (a: string, id: number, icon: keyof typeof ICON, title: string, cls = '') =>
     `<button class="rbtn ${cls}" data-act="${a}" data-id="${id}" title="${title}">${ic(icon)}</button>`;
   let rows: string[];
@@ -1294,10 +1300,73 @@ function cardHtml(u: User, mode: 'pop' | 'side' | 'full' | 'preview' | 'self', b
       </div>
     </div>`;
 }
-// «Обо мне» и дата регистрации
+// «Обо мне», дата регистрации и во что играет
 const infoHtml = (u: User) =>
   (u.bio ? `<div class="pc-sec"><h4>Обо мне</h4><p class="pc-bio">${emojify(u.bio)}</p></div>` : '')
-  + (u.created ? `<div class="pc-sec"><h4>В Startrack с</h4><span>${since(u.created)}</span></div>` : '');
+  + (u.created ? `<div class="pc-sec"><h4>В Startrack с</h4><span>${since(u.created)}</span></div>` : '')
+  + gameHtml(u);
+
+// ---------- «Играет в …», как в Discord ----------
+// своя игра видна себе и в «невидимке», чужая — пока человек в сети
+const playing = (u: User) => !!u.game && (u.id === S.me?.id || stOf(u) !== 'offline');
+const gameLine = (u: User) => `Играет в <b>${esc(u.game!.name)}</b>`;
+const gameIconUrl = (g: Game) => g.icon ? `${S.server}/api/games/icon/${g.icon}` : '';
+// сколько уже играет: 20:34:38 (часы могут быть больше 24)
+function elapsed(start: number) {
+  const t = Math.max(0, Math.floor((Date.now() - start) / 1000));
+  const two = (n: number) => String(n).padStart(2, '0');
+  return `${two(Math.floor(t / 3600))}:${two(Math.floor(t / 60) % 60)}:${two(t % 60)}`;
+}
+// «20 ч марафон» — от трёх часов подряд
+const marathon = (start: number) => {
+  const h = Math.floor((Date.now() - start) / 3600e3);
+  return h >= 3 ? `<span class="ga-mar">${ic('timer', 14)}${h} ч марафон</span>` : '';
+};
+function gameHtml(u: User) {
+  if (!playing(u)) return '';
+  const g = u.game!;
+  const url = gameIconUrl(g);
+  return `
+    <div class="pc-sec ga">
+      <h4>Играет</h4>
+      <div class="ga-row">
+        <div class="ga-ic ${g.icon[0] === 's' ? 'wide' : ''}">${url ? `<img src="${esc(url)}" alt="" onerror="this.remove()">` : ''}${ic('gamepad', 30)}</div>
+        <div class="ga-txt"><b title="${esc(g.name)}">${esc(g.name)}</b>
+          <div class="ga-meta"><span class="ga-time" data-start="${g.start}">${ic('gamepad', 14)}<span>${elapsed(g.start)}</span></span><span class="ga-marw" data-start="${g.start}">${marathon(g.start)}</span></div></div>
+      </div>
+      ${g.steam ? `<a class="btn sec ga-steam" data-ext href="https://store.steampowered.com/app/${encodeURIComponent(g.steam)}/">${ic('download', 18)}Открыть в Steam</a>` : ''}
+    </div>`;
+}
+// таймеры в открытых профилях тикают раз в секунду
+setInterval(() => {
+  document.querySelectorAll<HTMLElement>('.ga-time').forEach((el) => {
+    const t = el.querySelector('span');
+    if (t) t.textContent = elapsed(Number(el.dataset.start));
+  });
+  document.querySelectorAll<HTMLElement>('.ga-marw').forEach((el) => {
+    const html = marathon(Number(el.dataset.start));
+    if (el.innerHTML !== html) el.innerHTML = html;
+  });
+}, 1000);
+
+// Запущенные программы раз в 15 секунд (только приложение для Windows): сервер узнаёт среди них
+// игру по базе Discord. Отправляем, только когда список поменялся, и заново после переподключения
+let procsSent = '';
+async function scanGames() {
+  if (!tauri || ANDROID || S.ws?.readyState !== WebSocket.OPEN) return;
+  const off = store.get('games') === '0';
+  let procs: { p: string; t: number; steam: [string, string] | null }[] | null = null;
+  if (!off) {
+    try { procs = await tauri.invoke('running_procs'); } catch { return; }
+    procs!.sort((a, b) => a.p.localeCompare(b.p) || a.t - b.t);
+  }
+  const sig = procs ? JSON.stringify(procs) : 'off';
+  if (sig === procsSent) return;
+  if (S.ws?.readyState !== WebSocket.OPEN) return;
+  wsSend({ type: 'procs', procs });
+  procsSent = sig;
+}
+setInterval(scanGames, 15e3);
 
 // Профиль с сервера: свежие поля и общие друзья/группы
 async function loadProfile(id: number) {
@@ -1372,7 +1441,7 @@ function openSelfPop(anchor: HTMLElement) {
   if (popToggled(anchor) || !S.me) return;
   const me = S.me;
   const st = me.status || 'online';
-  const el = showPop(anchor, cardHtml(me, 'self', `
+  const el = showPop(anchor, cardHtml(me, 'self', `${gameHtml(me)}
     <div class="pop-menu">
       <button data-act="editprofile">${ic('edit', 18)}<span>Редактировать профиль</span></button>
       <div class="pm-sep"></div>
@@ -1537,7 +1606,7 @@ function renderMembers(box: HTMLElement, g: Group) {
       <div class="mem-list">${sorted.map((u) => `
         <div class="mem-row ${stOf(u) === 'offline' ? 'off' : ''}" data-act="user" data-id="${u.id}">
           ${avatar(u, 32, true)}
-          <span class="mem-n"><b>${esc(uname(u))}</b>${u.custom && stOf(u) !== 'offline' ? `<small>${emojify(u.custom)}</small>` : ''}</span>
+          <span class="mem-n"><b>${esc(uname(u))}</b>${playing(u) ? `<small>${gameLine(u)}</small>` : u.custom && stOf(u) !== 'offline' ? `<small>${emojify(u.custom)}</small>` : ''}</span>
           ${g.owner === u.id ? `<span class="mem-own" title="Владелец группы">${ic('crown', 14)}</span>` : ''}
           ${inCall.has(u.id) ? `<span class="mem-call" title="В звонке">${ic('volume', 14)}</span>` : ''}
           ${g.owner === me.id && u.id !== me.id ? `<button class="ibtn sm mem-kick" data-act="gkick" data-gid="${g.id}" data-id="${u.id}" title="Исключить из группы">${ic('close', 14)}</button>` : ''}
@@ -1673,6 +1742,8 @@ function connectWs() {
     // сервер узнаёт, кто в групповом звонке, по соединению — после обрыва напоминаем
     if (C.gid && C.state !== 'idle') wsSend({ type: 'gcall_join', group: C.gid, ring: false });
     if (afk) wsSend({ type: 'afk', afk: true });
+    procsSent = '';
+    scanGames();
   };
   ws.onmessage = (e) => onEvent(JSON.parse(e.data));
   ws.onclose = () => {
@@ -1734,6 +1805,15 @@ function onEvent(ev: any) {
     case 'presence': {
       mergeUser({ id: ev.userId, online: ev.online, status: ev.status } as User);
       renderFriends();
+      break;
+    }
+    // кто-то запустил или закрыл игру (в том числе мы сами)
+    case 'game': {
+      if (ev.userId === S.me!.id) S.me!.game = ev.game;
+      mergeUser({ id: ev.userId, game: ev.game } as User);
+      renderFriends();
+      if (C.state !== 'idle') renderPeople();
+      if (ev.userId === S.me!.id) renderUserbar();
       break;
     }
     // кто-то из друзей или участников групп поменял профиль
@@ -3035,6 +3115,8 @@ function renderSettingsTab() {
       <hr>
       ${tauri && !ANDROID ? `<div class="switch-row"><div><b>Уведомления Windows</b><span>Показывать новые сообщения, когда окно Startrack свёрнуто или не в фокусе</span></div>
         <input type="checkbox" class="switch" id="notifyon" ${store.get('notify') !== '0' ? 'checked' : ''}></div>
+      <div class="switch-row"><div><b>Показывать, во что я играю</b><span>Друзья увидят в профиле запущенную игру и сколько вы в неё играете, как в Discord</span></div>
+        <input type="checkbox" class="switch" id="gameson" ${store.get('games') !== '0' ? 'checked' : ''}></div>
       <hr>` : ''}
       <h3>Звуки приложения</h3>
       <label class="fld sfx-vol"><span>Громкость звуков</span><input type="range" id="sfxvol" min="0" max="100" value="${Math.round(sfxVol * 100)}"></label>
@@ -3050,6 +3132,8 @@ function renderSettingsTab() {
     box.querySelectorAll<HTMLInputElement>('[data-sfxon]').forEach((c) => (c.onchange = () => setSfxOn(c.dataset.sfxon as SfxGroup, c.checked)));
     const nt = document.getElementById('notifyon') as HTMLInputElement | null;
     if (nt) nt.onchange = () => store.set('notify', nt.checked ? '1' : '0');
+    const gm = document.getElementById('gameson') as HTMLInputElement | null;
+    if (gm) gm.onchange = () => { store.set('games', gm.checked ? '1' : '0'); scanGames(); };
     $('#rplay').onclick = () => {
       if (ringing()) return;
       ringPreview = !ringPreview;
@@ -3518,6 +3602,13 @@ let updLast = 0;
 if (ANDROID && tauri) document.addEventListener('click', (e) => {
   const a = (e.target as HTMLElement).closest<HTMLAnchorElement>('a[href]');
   if (!a || !/^https?:/.test(a.href) || new URL(a.href).origin === location.origin) return;
+  e.preventDefault();
+  tauri.invoke('open_url', { url: a.href }).catch(() => toast('Не удалось открыть ссылку'));
+}, true);
+
+if (!ANDROID && tauri) document.addEventListener('click', (e) => {
+  const a = (e.target as HTMLElement).closest<HTMLAnchorElement>('a[data-ext]');
+  if (!a || !/^https:/.test(a.href)) return;
   e.preventDefault();
   tauri.invoke('open_url', { url: a.href }).catch(() => toast('Не удалось открыть ссылку'));
 }, true);

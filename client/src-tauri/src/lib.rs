@@ -3,6 +3,8 @@ mod bypass;
 #[cfg(desktop)]
 mod download;
 #[cfg(desktop)]
+mod games;
+#[cfg(desktop)]
 mod update;
 
 #[cfg(desktop)]
@@ -32,8 +34,8 @@ fn mobile() {
         .expect("error while running Startrack");
 }
 
-// Открывает ссылку во внешнем браузере (на телефоне так скачиваются вложения и APK обновления)
-#[cfg(mobile)]
+// Открывает ссылку во внешнем браузере (на телефоне так скачиваются вложения и APK обновления,
+// на компьютере — «Открыть в Steam» в профиле)
 #[tauri::command]
 fn open_url(app: tauri::AppHandle, url: String) -> Result<(), String> {
     use tauri_plugin_opener::OpenerExt;
@@ -59,11 +61,14 @@ fn desktop() {
     builder
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_opener::init())
         .manage(update::Pending::default())
         .invoke_handler(tauri::generate_handler![
             route_adapter,
             notify,
+            open_url,
             download::reveal_file,
+            games::running_procs,
             update::update_check,
             update::update_install,
             update::update_progress

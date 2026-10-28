@@ -242,10 +242,11 @@ function pub(u) {
     id: u.id, username: u.username, display: u.display || '', bio: u.bio || '', pronouns: u.pronouns || '',
     custom: u.custom || '', avatar: u.avatar || '', banner: u.banner || '', bcolor: u.bcolor || '',
     created: u.created, status, online: status !== 'offline',
+    game: status === 'offline' ? null : gameOf(u.id),
   };
 }
 // себе показываем выбранный статус (в том числе «невидимку»)
-const selfView = (u) => ({ ...pub(u), status: STATUSES.includes(u.status) ? u.status : 'online', online: true });
+const selfView = (u) => ({ ...pub(u), status: STATUSES.includes(u.status) ? u.status : 'online', online: true, game: gameOf(u.id) });
 
 const shown = new Map(); // id -> статус, который последним разослали контактам
 function announce(id) {
@@ -263,6 +264,126 @@ function pushProfile(id) {
   for (const f of contactIds(id)) push(f, { type: 'user', user: view });
   push(id, { type: 'me', user: selfView(u) });
 }
+// --- «Играет в …», как в Discord ---
+// Приложение раз в 15 секунд присылает хвосты путей запущенных программ (последние 4 части, без
+// имени пользователя) и время их запуска, для Steam-игр — appid и название из appmanifest. Сверяем
+// с базой игр Discord (applications/detectable, обновляем раз в сутки). Кто во что играет, держим
+// только в памяти, список процессов нигде не сохраняем
+const GAMES_DB = path.join(DATA_DIR, 'detectable.json');
+const GAME_ICONS_DIR = path.join(DATA_DIR, 'game-icons');
+fs.mkdirSync(GAME_ICONS_DIR, { recursive: true });
+const G = { byExe: new Map(), apps: new Map(), bySteam: new Map() };
+function indexGames(list) {
+  const byExe = new Map(), apps = new Map(), bySteam = new Map();
+  for (const a of list) {
+    if (!a?.id || !a.name) continue;
+    const steam = String(a.third_party_skus?.find((x) => x.distributor === 'steam')?.id || '');
+    apps.set(a.id, { name: String(a.name).slice(0, 100), icon: a.icon_hash || '', steam });
+    if (/^\d+$/.test(steam)) bySteam.set(steam, a.id);
+    for (const e of a.executables || []) {
+      if (e.os !== 'win32' || e.is_launcher || !e.name) continue;
+      // «>hl2.exe» — только точное имя файла, без папки
+      const exact = e.name.startsWith('>');
+      const name = e.name.replace(/^>/, '').toLowerCase().replace(/\\/g, '/');
+      const base = name.split('/').pop();
+      if (!byExe.has(base)) byExe.set(base, []);
+      byExe.get(base).push({ id: a.id, name, exact });
+    }
+  }
+  Object.assign(G, { byExe, apps, bySteam });
+}
+async function loadGames() {
+  let fresh = false;
+  try { fresh = Date.now() - fs.statSync(GAMES_DB).mtimeMs < 864e5; } catch {}
+  if (!fresh) {
+    try {
+      const r = await fetch('https://discord.com/api/v10/applications/detectable', { signal: AbortSignal.timeout(60e3) });
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      const text = await r.text();
+      if (!Array.isArray(JSON.parse(text))) throw new Error('не список');
+      fs.writeFileSync(GAMES_DB + '.tmp', text);
+      fs.renameSync(GAMES_DB + '.tmp', GAMES_DB);
+    } catch (e) { console.error('База игр не обновилась:', e.message); }
+  }
+  try { indexGames(JSON.parse(fs.readFileSync(GAMES_DB, 'utf8'))); } catch {}
+}
+loadGames();
+setInterval(loadGames, 864e5);
+
+// Одна программа: p — хвост пути (a/b/game.exe), steam — [appid, название] из appmanifest
+function matchProc(proc) {
+  const p = String(proc?.p || '').toLowerCase().replace(/\\/g, '/').slice(-300);
+  const steamId = /^\d{1,10}$/.test(String(proc?.steam?.[0] || '')) ? String(proc.steam[0]) : '';
+  const app = (id) => ({ ...G.apps.get(id), app: id });
+  if (steamId && G.bySteam.has(steamId)) return app(G.bySteam.get(steamId));
+  const base = p.split('/').pop();
+  let best = null, bestLen = 0, tie = false;
+  for (const c of G.byExe.get(base) || []) {
+    if (!(c.exact ? base === c.name : p === c.name || p.endsWith('/' + c.name))) continue;
+    if (c.name.length > bestLen) { best = c.id; bestLen = c.name.length; tie = false; }
+    else if (c.name.length === bestLen && c.id !== best) tie = true;
+  }
+  // одно имя у нескольких игр (hl2.exe у всех на движке Source) — не угадываем
+  if (best && !tie) return app(best);
+  const steamName = String(proc?.steam?.[1] || '').trim().slice(0, 100);
+  if (steamId && steamName && !/redistributable|steamworks|soundtrack|dedicated server|\bsdk\b/i.test(steamName))
+    return { name: steamName, icon: '', steam: steamId, app: '' };
+  return null;
+}
+// Из всех запущенных игр показываем ту, что запустили последней
+function pickGame(procs) {
+  if (!Array.isArray(procs)) return null;
+  let game = null;
+  for (const proc of procs.slice(0, 400)) {
+    const m = matchProc(proc);
+    if (!m) continue;
+    const start = Math.min(Number(proc.t) || Date.now(), Date.now());
+    if (!game || start > game.start)
+      game = { name: m.name, app: m.app, steam: m.steam, start, icon: m.icon ? 'd' + m.app : m.steam ? 's' + m.steam : '' };
+  }
+  return game;
+}
+// несколько устройств — игра с того, где она запущена позже
+function gameOf(id) {
+  let game = null;
+  for (const ws of sockets.get(id) || []) if (ws.game && (!game || ws.game.start > game.start)) game = ws.game;
+  return game;
+}
+const shownGame = new Map(); // id -> что последним разослали контактам
+function announceGame(id) {
+  const u = q.userById.get(id);
+  if (!u) return;
+  const game = statusOf(u) === 'offline' ? null : gameOf(id);
+  const key = game ? `${game.app}|${game.steam}|${game.name}|${game.start}` : '';
+  if ((shownGame.get(id) || '') === key) return;
+  shownGame.set(id, key);
+  for (const f of contactIds(id)) push(f, { type: 'game', userId: id, game });
+  push(id, { type: 'game', userId: id, game: gameOf(id) });
+}
+// Иконка игры из CDN Discord (d<id>) или шапка из Steam (s<appid>): скачиваем один раз и отдаём сами —
+// CDN Discord в России без VPN не открывается
+const iconLoads = new Map();
+async function gameIcon(key) {
+  const file = path.join(GAME_ICONS_DIR, key + '.img');
+  if (fs.existsSync(file)) return file;
+  const id = key.slice(1);
+  const a = key[0] === 'd' ? G.apps.get(id) : null;
+  const src = key[0] === 's' ? `https://cdn.cloudflare.steamstatic.com/steam/apps/${id}/header.jpg`
+    : a?.icon ? `https://cdn.discordapp.com/app-icons/${id}/${a.icon}.png?size=128` : '';
+  if (!src) return null;
+  if (!iconLoads.has(key)) iconLoads.set(key, (async () => {
+    try {
+      const r = await fetch(src, { signal: AbortSignal.timeout(15e3) });
+      if (!r.ok || !/^image\/(png|jpeg)$/.test(r.headers.get('content-type') || '')) return null;
+      const buf = Buffer.from(await r.arrayBuffer());
+      if (buf.length > 2 * 1024 * 1024) return null;
+      fs.writeFileSync(file, buf);
+      return file;
+    } catch { return null; } finally { setTimeout(() => iconLoads.delete(key), 60e3); }
+  })());
+  return iconLoads.get(key);
+}
+
 function setImage(id, kind, name) {
   const old = q.userById.get(id)?.[kind];
   q.setImage[kind].run(name, id);
@@ -422,6 +543,7 @@ const routes = {
     if (!STATUSES.includes(b.status)) throw [400, 'Неизвестный статус'];
     q.setStatus.run(b.status, me.id);
     announce(me.id);
+    announceGame(me.id);
     const view = selfView(q.userById.get(me.id));
     push(me.id, { type: 'me', user: view });
     return view;
@@ -857,6 +979,17 @@ const server = http.createServer(async (req, res) => {
   if (url.pathname === '/api/me/image' && req.method === 'POST') return uploadImage(req, res, url, send);
   if (url.pathname === '/api/gifs/upload' && req.method === 'POST') return uploadGif(req, res, url, send);
   if (url.pathname === '/api/sounds/upload' && req.method === 'POST') return uploadSound(req, res, url, send);
+  const gicon = /^\/api\/games\/icon\/([ds]\d{1,20})$/.exec(url.pathname)?.[1];
+  if (gicon && req.method === 'GET') {
+    const file = await gameIcon(gicon);
+    if (!file) return send(404, { error: 'Нет иконки' });
+    const buf = fs.readFileSync(file);
+    res.writeHead(200, {
+      'Content-Type': buf[0] === 0x89 ? 'image/png' : 'image/jpeg', 'Content-Length': buf.length,
+      'X-Content-Type-Options': 'nosniff', 'Cache-Control': 'public, max-age=604800',
+    });
+    return res.end(buf);
+  }
   const image = /^\/api\/avatars\/([0-9a-f]{32}\.(png|jpg|webp|gif))$/.exec(url.pathname)?.[1];
   if (image && req.method === 'GET') return sendImage(res, AVATARS_DIR, image, send);
   const gif = /^\/api\/gifs\/([0-9a-f]{64}\.gif)$/.exec(url.pathname)?.[1];
@@ -912,6 +1045,11 @@ wss.on('connection', (ws, req) => {
       ws.afk = !!m.afk;
       return announce(me.id);
     }
+    // запущенные программы (null — показ игр выключен в настройках)
+    if (m.type === 'procs') {
+      ws.game = pickGame(m.procs);
+      return announceGame(me.id);
+    }
     // Групповой звонок: вошёл / вышел. ring — первый вошедший звонит остальным
     if (m.type === 'gcall_join' || m.type === 'gcall_leave') {
       const gid = Number(m.group);
@@ -939,6 +1077,7 @@ wss.on('connection', (ws, req) => {
     if (set && set.size === 0) sockets.delete(me.id);
     q.seen.run(Date.now(), me.id);
     announce(me.id); // закрылось «активное» окно — остальные могут быть неактивны
+    announceGame(me.id);
   });
 });
 setInterval(() => {
@@ -1141,8 +1280,8 @@ const adminRoutes = {
     if (password.length < 6) throw [400, 'Пароль минимум 6 символов'];
     if (password.length > 128) throw [400, 'Пароль не длиннее 128 символов'];
     qa.setPass.run(hashPass(password), u.id);
-    dropSessions(u.id);
-    auditLog(req, 'set_password', u.id, { username: u.username });
+    if (!b.keep) dropSessions(u.id);
+    auditLog(req, 'set_password', u.id, { username: u.username, keep_sessions: !!b.keep });
     return userCard(adminUser(u.id));
   },
   'POST /api/user/ban': (b, _url, req) => {
