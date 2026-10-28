@@ -120,6 +120,8 @@ const cols = (t) => PUB.map((c) => `${t}.${c}`).join(', ');
 const q = {
   userByName: db.prepare('SELECT * FROM users WHERE username = ?'),
   userById: db.prepare(`SELECT ${cols('users')} FROM users WHERE id = ?`),
+  userPassById: db.prepare('SELECT pass, tokver FROM users WHERE id = ?'),
+  setPass: db.prepare('UPDATE users SET pass = ?, tokver = tokver + 1 WHERE id = ?'),
   authUser: db.prepare(`SELECT ${cols('users')}, banned, tokver FROM users WHERE id = ?`),
   seen: db.prepare('UPDATE users SET seen = ? WHERE id = ?'),
   addUser: db.prepare('INSERT INTO users (username, pass, created) VALUES (?, ?, ?)'),
@@ -538,6 +540,18 @@ const routes = {
     for (const kind of ['avatar', 'banner']) if (b[kind] === null) setImage(me.id, kind, null);
     pushProfile(me.id);
     return selfView(q.userById.get(me.id));
+  },
+  // Смена пароля: проверяем старый пароль, хэшируем новый и повышаем tokver (завершает старые сессии на других устройствах)
+  'POST /api/me/password': async (me, b) => {
+    const oldPass = String(b.oldPassword || '');
+    const newPass = String(b.newPassword || '');
+    if (newPass.length < 6) throw [400, 'Новый пароль минимум 6 символов'];
+    const row = q.userPassById.get(me.id);
+    if (!row || !checkPass(oldPass, row.pass)) throw [403, 'Неверный текущий пароль'];
+    if (oldPass === newPass) throw [400, 'Новый пароль должен отличаться от старого'];
+    q.setPass.run(hashPass(newPass), me.id);
+    const newTokver = (row.tokver || 0) + 1;
+    return { ok: true, token: sign(me.id, newTokver) };
   },
   'POST /api/me/status': async (me, b) => {
     if (!STATUSES.includes(b.status)) throw [400, 'Неизвестный статус'];

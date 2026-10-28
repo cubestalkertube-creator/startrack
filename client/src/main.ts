@@ -125,6 +125,8 @@ const ICON = {
   skip: 'M6 18l8.5-6L6 6v12zM16 6v12h2V6h-2z',
   queue: 'M15 6H3v2h12V6zm0 4H3v2h12v-2zM3 16h8v-2H3v2zM17 6v8.18c-.31-.11-.65-.18-1-.18-1.66 0-3 1.34-3 3s1.34 3 3 3 3-1.34 3-3V8h3V6h-5z',
   image: 'M21 19V5c0-1.1-.9-2-2-2H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2zM8.5 13.5l2.5 3.01L14.5 12l4.5 6H5l3.5-4.5z',
+  shield: 'M12 1L3 5v6c0 5.55 3.84 10.74 9 12 5.16-1.26 9-6.45 9-12V5l-9-4z',
+  lock: 'M18 8h-1V6c0-2.76-2.24-5-5-5S7 3.24 7 6v2H6c-1.1 0-2 .9-2 2v10c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V10c0-1.1-.9-2-2-2zm-6 9c-1.1 0-2-.9-2-2s.9-2 2-2 2 .9 2 2-.9 2-2 2zm3.1-9H8.9V6c0-1.71 1.39-3.1 3.1-3.1 1.71 0 3.1 1.39 3.1 3.1v2z',
 };
 const ic = (n: keyof typeof ICON, s = 20) =>
   `<svg class="ic" width="${s}" height="${s}" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="${ICON[n]}"/></svg>`;
@@ -361,7 +363,7 @@ function start(me: User) {
     e.preventDefault();
     chat.classList.remove('drop');
     const c = conv();
-    if (c && e.dataTransfer?.files.length) sendFiles(c, e.dataTransfer.files);
+    if (c && e.dataTransfer?.files.length) stageFiles(e.dataTransfer.files);
   };
   renderFriends();
   renderChat();
@@ -758,6 +760,7 @@ function openGroup(id: number) {
 async function openConv() {
   const c = conv();
   if (!c) return goHome();
+  clearStaged();
   mpane(true);
   S.unread.delete(c.key);
   renderFriends();
@@ -795,6 +798,90 @@ function renderTop() {
     </div>`;
 }
 
+const MAX_FILE = 500 * 1024 * 1024; // как на сервере
+type Conv = NonNullable<ReturnType<typeof conv>>;
+const fsize = (n: number) =>
+  n < 1024 ? `${n} Б` : n < 1048576 ? `${(n / 1024).toFixed(1)} КБ` : n < 1073741824 ? `${(n / 1048576).toFixed(1)} МБ` : `${(n / 1073741824).toFixed(2)} ГБ`;
+const IMG_RE = /^image\/(png|jpeg|gif|webp|avif|bmp)$/;
+const VID_RE = /^video\/(mp4|webm|ogg)$/;
+
+// ---------- полочка предпросмотра прикрепляемых файлов ----------
+interface StagedFile {
+  id: number;
+  file: File;
+  url: string;
+  isImg: boolean;
+  isVid: boolean;
+}
+let stagedFiles: StagedFile[] = [];
+let stagedSeq = 0;
+
+function clearStaged() {
+  for (const s of stagedFiles) {
+    try { URL.revokeObjectURL(s.url); } catch {}
+  }
+  stagedFiles = [];
+  renderAttShelf();
+}
+
+function stageFiles(files: FileList | File[]) {
+  for (const f of [...files]) {
+    if (!f.size) { toast(`«${f.name}» — пустой файл (папки отправить нельзя)`); continue; }
+    if (f.size > MAX_FILE) { toast(`«${f.name}» больше ${MAX_FILE / 1048576} МБ`); continue; }
+    const isImg = IMG_RE.test(f.type);
+    const isVid = VID_RE.test(f.type);
+    stagedFiles.push({
+      id: ++stagedSeq,
+      file: f,
+      url: URL.createObjectURL(f),
+      isImg,
+      isVid,
+    });
+  }
+  renderAttShelf();
+}
+
+function renderAttShelf() {
+  const shelf = document.getElementById('attShelf');
+  if (!shelf) return;
+  if (!stagedFiles.length) {
+    shelf.hidden = true;
+    shelf.innerHTML = '';
+    return;
+  }
+  shelf.hidden = false;
+  shelf.innerHTML = stagedFiles.map((s) => {
+    let previewHtml = '';
+    if (s.isImg) {
+      previewHtml = `<img src="${s.url}" alt="${esc(s.file.name)}">`;
+    } else if (s.isVid) {
+      previewHtml = `<video src="${s.url}#t=0.1" preload="metadata" muted playsinline></video><span class="att-card-badge">${ic('play', 12)}</span>`;
+    } else {
+      previewHtml = `<div class="att-card-file-ic">${ic('file', 28)}</div>`;
+    }
+    return `
+      <div class="att-card" data-sid="${s.id}">
+        <div class="att-card-media">${previewHtml}</div>
+        <button type="button" class="att-card-del" data-del-staged="${s.id}" title="Удалить">${ic('close', 14)}</button>
+        <span class="att-card-name" title="${esc(s.file.name)}">${esc(s.file.name)}</span>
+        <span class="att-card-size">${fsize(s.file.size)}</span>
+      </div>`;
+  }).join('');
+
+  shelf.querySelectorAll<HTMLElement>('[data-del-staged]').forEach((btn) => {
+    btn.onclick = (e) => {
+      e.stopPropagation();
+      const id = Number(btn.dataset.delStaged);
+      const idx = stagedFiles.findIndex((x) => x.id === id);
+      if (idx >= 0) {
+        try { URL.revokeObjectURL(stagedFiles[idx].url); } catch {}
+        stagedFiles.splice(idx, 1);
+        renderAttShelf();
+      }
+    };
+  });
+}
+
 const composerHint = (c: Conv) => `Написать ${c.to.group ? `в «${c.name}»` : c.name}`;
 
 function renderChat() {
@@ -804,23 +891,25 @@ function renderChat() {
   renderTop();
   $('#chat').innerHTML = `
     <div id="msgs"></div>
-    <form id="send"><div class="ac" hidden></div><div class="composer">
-      <button type="button" class="att-btn" id="attach" title="Отправить файл">${ic('attach', 24)}</button>
-      <input type="file" id="attfile" multiple hidden>
-      <textarea rows="1" maxlength="4000" placeholder="${esc(composerHint(c))}"></textarea>
-      <button type="button" class="gif-btn" id="gifbtn" title="Гифки"><span>GIF</span></button>
-      <button type="button" class="emo-btn" id="emobtn" title="Выбрать эмодзи"><span class="emo">${EMO_BTN[0]}</span></button>
-    </div></form>`;
+    <form id="send"><div class="ac" hidden></div>
+      <div id="attShelf" class="att-shelf" hidden></div>
+      <div class="composer">
+        <button type="button" class="att-btn" id="attach" title="Отправить файл">${ic('attach', 24)}</button>
+        <input type="file" id="attfile" multiple hidden>
+        <textarea rows="1" maxlength="4000" placeholder="${esc(composerHint(c))}"></textarea>
+        <button type="button" class="gif-btn" id="gifbtn" title="Гифки"><span>GIF</span></button>
+        <button type="button" class="emo-btn" id="emobtn" title="Выбрать эмодзи"><span class="emo">${EMO_BTN[0]}</span></button>
+      </div></form>`;
   const ta = $<HTMLTextAreaElement>('#send textarea');
   const pick = $<HTMLInputElement>('#attfile');
   $('#attach').onclick = () => pick.click();
   bindEmoji(ta, $('#emobtn'), $('#send .ac'));
   $('#gifbtn').onclick = () => openGifPicker($('#gifbtn'), c);
-  pick.onchange = () => { if (pick.files?.length) sendFiles(c, pick.files); pick.value = ''; ta.focus(); };
+  pick.onchange = () => { if (pick.files?.length) stageFiles(pick.files); pick.value = ''; ta.focus(); };
   // вставка из буфера обмена: скриншоты и скопированные в проводнике файлы
   ta.onpaste = (e) => {
     const files = e.clipboardData?.files;
-    if (files?.length) { e.preventDefault(); sendFiles(c, files); }
+    if (files?.length) { e.preventDefault(); stageFiles(files); }
   };
   const box = $('#msgs');
   box.onscroll = () => { msgStick = box.scrollHeight - box.scrollTop - box.clientHeight < 80; };
@@ -829,17 +918,27 @@ function renderChat() {
   const grow = () => { ta.style.height = 'auto'; ta.style.height = Math.min(ta.scrollHeight, 300) + 'px'; };
   const send = async () => {
     const text = replaceCodes(ta.value.trim());
-    if (!text) return;
-    ta.value = '';
-    grow();
-    noteUsed(text);
-    try { await api(c.to.group ? '/api/group/messages' : '/api/dm/messages', { ...c.to, text }); } catch (err) { toast((err as Error).message); }
+    if (!text && !stagedFiles.length) return;
+    const filesToSend = [...stagedFiles];
+    stagedFiles = [];
+    renderAttShelf();
+    if (text) {
+      ta.value = '';
+      grow();
+      noteUsed(text);
+      try { await api(c.to.group ? '/api/group/messages' : '/api/dm/messages', { ...c.to, text }); } catch (err) { toast((err as Error).message); }
+    }
+    for (const s of filesToSend) {
+      uploadFile(c, s.file);
+      try { URL.revokeObjectURL(s.url); } catch {}
+    }
   };
   ta.addEventListener('input', grow);
   ta.addEventListener('keydown', (e) => {
     if (e.defaultPrevented) return; // Enter выбрал подсказку эмодзи
     if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); send(); }
   });
+  renderAttShelf();
   ta.focus();
   renderMessages();
   renderProfile();
@@ -924,13 +1023,8 @@ function stamp(t: number) {
   return new Date(t).toLocaleDateString('ru') + ' ' + hm;
 }
 
-const fsize = (n: number) =>
-  n < 1024 ? `${n} Б` : n < 1048576 ? `${(n / 1024).toFixed(1)} КБ` : n < 1073741824 ? `${(n / 1048576).toFixed(1)} МБ` : `${(n / 1073741824).toFixed(2)} ГБ`;
 // токен в ссылке: <img> и <video> не умеют слать заголовок Authorization
 const fileUrl = (f: Att, dl = false) => `${S.server}/api/files/${f.id}?${dl ? 'dl=1&' : ''}token=${encodeURIComponent(S.token)}`;
-// что показываем прямо в чате (то же, что сервер отдаёт inline)
-const IMG_RE = /^image\/(png|jpeg|gif|webp|avif|bmp)$/;
-const VID_RE = /^video\/(mp4|webm|ogg)$/;
 
 // Превью не больше 520×350, с заранее известным размером (лента не дёргается при загрузке)
 function mediaBox(f: Att) {
@@ -1072,6 +1166,23 @@ function imageLink(text: string) {
   return /^https?:\/\/[^\s<>"']+\.(gif|png|jpe?g|webp)(\?[^\s<>"']*)?$/i.test(t) ? t : '';
 }
 
+// Ссылки http:// и https:// превращаем в кликабельные <a> с открытием в браузере
+function linkify(html: string): string {
+  return html.replace(/\bhttps?:\/\/[^\s<>'"]+/gi, (raw) => {
+    let url = raw;
+    let trail = '';
+    while (/[.,:;!?)]$/.test(url)) {
+      if (url.endsWith(')') && (url.match(/\(/g) || []).length >= (url.match(/\)/g) || []).length) {
+        break;
+      }
+      trail = url.slice(-1) + trail;
+      url = url.slice(0, -1);
+    }
+    const href = url.replace(/&amp;/g, '&');
+    return `<a href="${href}" target="_blank" rel="noopener noreferrer" class="chat-link">${url}</a>${trail}`;
+  });
+}
+
 function renderUpload(u: Upload) {
   const pct = u.size ? Math.min(100, (u.sent / u.size) * 100) : 0;
   return `
@@ -1129,7 +1240,7 @@ function renderMessages() {
     const del = m.sender === me.id ? `<button class="msg-del" data-act="delmsg" data-id="${m.id}" title="Удалить у всех">${ic('trash', 18)}</button>` : '';
     const link = m.text ? imageLink(m.text) : '';
     const text = link ? `<div class="att-media link"><img src="${esc(link)}" alt="${esc(m.text)}" title="${esc(m.text)}" referrerpolicy="no-referrer" draggable="false"></div>`
-      : (m.text ? `<p${isJumbo(m.text) ? ' class="jumbo"' : ''}>${emojify(m.text)}</p>` : '') + (m.file ? renderAtt(m.file) : '');
+      : (m.text ? `<p${isJumbo(m.text) ? ' class="jumbo"' : ''}>${linkify(emojify(m.text))}</p>` : '') + (m.file ? renderAtt(m.file) : '');
     // подряд идущие сообщения одного автора в пределах 7 минут — одной группой, как в Discord
     if (prev && prev.sender === m.sender && m.created - prev.created < 7 * 60e3 && sameDay(prev.created, m.created)) {
       html += `<div class="msg cont" data-mid="${m.id}">${del}<time>${new Date(m.created).toLocaleTimeString('ru', { hour: '2-digit', minute: '2-digit' })}</time>${text}</div>`;
@@ -1154,13 +1265,10 @@ function renderMessages() {
 }
 
 // ---------- файлы ----------
-const MAX_FILE = 500 * 1024 * 1024; // как на сервере
 let upSeq = 0;
 
-type Conv = NonNullable<ReturnType<typeof conv>>;
-
-function sendFiles(c: Conv, files: FileList) {
-  for (const f of [...files]) uploadFile(c, f);
+function sendFiles(c: Conv, files: FileList | File[]) {
+  stageFiles(files);
 }
 
 // Размер картинки/видео для превью (читаем локальный файл, на сервер это не уходит)
@@ -1444,6 +1552,7 @@ function openSelfPop(anchor: HTMLElement) {
   const el = showPop(anchor, cardHtml(me, 'self', `${gameHtml(me)}
     <div class="pop-menu">
       <button data-act="editprofile">${ic('edit', 18)}<span>Редактировать профиль</span></button>
+      <button data-act="settings" data-tab="security">${ic('shield', 18)}<span>Настройки безопасности</span></button>
       <div class="pm-sep"></div>
       <button class="pm-st" data-act="statusmenu">${statusDot(st)}<span>${ST_NAME[st]}</span>${ic('chevron', 18)}</button>
     </div>
@@ -3005,7 +3114,7 @@ function soundDlg(edit?: SbSound) {
 }
 
 // ---------- настройки ----------
-type SetTab = 'account' | 'profile' | 'voice' | 'sounds';
+type SetTab = 'account' | 'profile' | 'security' | 'voice' | 'sounds';
 let setTab: SetTab = 'account';
 let ringPreview = false;
 let micTest: { stream: MediaStream; ctx: AudioContext; audio: HTMLAudioElement; raf: number } | null = null;
@@ -3023,6 +3132,7 @@ function openSettings(tab: SetTab) {
         <h5>Настройки пользователя</h5>
         ${navBtn('account', 'Моя учётная запись')}
         ${navBtn('profile', 'Профиль')}
+        ${navBtn('security', 'Безопасность')}
         <h5>Настройки приложения</h5>
         ${navBtn('voice', 'Голос и видео')}
         ${navBtn('sounds', 'Звуки')}
@@ -3081,7 +3191,7 @@ function renderSettingsTab() {
       <h2>Моя учётная запись</h2>
       <div class="acct">
         <div class="acct-banner" style="${bannerStyle(me)}"></div>
-        <div class="acct-head">${avatar(me, 80, true)}<b>${esc(uname(me))}</b><button class="btn" data-set="profile">Редактировать профиль</button></div>
+        <div class="acct-head">${avatar(me, 80, true)}<b>${esc(uname(me))}</b><div class="acct-head-btns"><button class="btn" data-set="profile">Редактировать профиль</button><button class="btn sec" data-set="security">Безопасность</button></div></div>
         <div class="acct-box">
           <div class="acct-f"><h4>Отображаемое имя</h4><span>${esc(me.display || 'Не задано')}</span></div>
           <div class="acct-f"><h4>Имя пользователя</h4><span>${esc(me.username)}</span></div>
@@ -3093,6 +3203,85 @@ function renderSettingsTab() {
       <h3>Выход</h3>
       <p class="set-hint">Выйти из учётной записи на этом компьютере.</p>
       <button class="btn red" data-set="logout">Выйти</button>`;
+    return;
+  }
+  if (setTab === 'security') {
+    box.innerHTML = `
+      <h2>Настройки безопасности</h2>
+      <div class="sec-card">
+        <h3>Смена пароля</h3>
+        <p class="set-hint">После смены пароля на других устройствах потребуется войти заново.</p>
+        <form class="sec-form" id="secForm" novalidate autocomplete="off">
+          <label class="fld">
+            <span>Текущий пароль <i>*</i></span>
+            <input type="password" id="oldPass" autocomplete="current-password" placeholder="Введите ваш текущий пароль">
+          </label>
+          <label class="fld">
+            <span>Новый пароль <i>*</i></span>
+            <input type="password" id="newPass" autocomplete="new-password" placeholder="Не менее 6 символов">
+          </label>
+          <label class="fld">
+            <span>Повторите новый пароль <i>*</i></span>
+            <input type="password" id="repPass" autocomplete="new-password" placeholder="Повторите новый пароль">
+          </label>
+          <div class="sec-msg err" id="secErr" hidden></div>
+          <div class="sec-msg ok" id="secOk" hidden></div>
+          <div class="sec-actions">
+            <button type="submit" class="btn" id="secSubmit">Сохранить новый пароль</button>
+          </div>
+        </form>
+      </div>`;
+    const form = $<HTMLFormElement>('#secForm', box);
+    const errBox = $('#secErr', box);
+    const okBox = $('#secOk', box);
+    const submitBtn = $<HTMLButtonElement>('#secSubmit', box);
+    form.onsubmit = async (e) => {
+      e.preventDefault();
+      errBox.hidden = true;
+      okBox.hidden = true;
+      const oldPass = ($<HTMLInputElement>('#oldPass', box).value || '').trim();
+      const newPass = ($<HTMLInputElement>('#newPass', box).value || '').trim();
+      const repPass = ($<HTMLInputElement>('#repPass', box).value || '').trim();
+      if (!oldPass) {
+        errBox.textContent = 'Введите текущий пароль';
+        errBox.hidden = false;
+        return;
+      }
+      if (newPass.length < 6) {
+        errBox.textContent = 'Новый пароль должен содержать минимум 6 символов';
+        errBox.hidden = false;
+        return;
+      }
+      if (newPass === oldPass) {
+        errBox.textContent = 'Новый пароль должен отличаться от текущего';
+        errBox.hidden = false;
+        return;
+      }
+      if (newPass !== repPass) {
+        errBox.textContent = 'Новые пароли не совпадают';
+        errBox.hidden = false;
+        return;
+      }
+      submitBtn.disabled = true;
+      submitBtn.textContent = 'Сохранение…';
+      try {
+        const res = await api('/api/me/password', { oldPassword: oldPass, newPassword: newPass });
+        if (res.token) {
+          S.token = res.token;
+          store.set('token', res.token);
+        }
+        okBox.textContent = 'Пароль успешно изменён!';
+        okBox.hidden = false;
+        form.reset();
+        toast('Пароль успешно обновлён');
+      } catch (err) {
+        errBox.textContent = (err as Error).message || 'Не удалось сменить пароль';
+        errBox.hidden = false;
+      } finally {
+        submitBtn.disabled = false;
+        submitBtn.textContent = 'Сохранить новый пароль';
+      }
+    };
     return;
   }
   if (setTab === 'sounds') {
@@ -3598,8 +3787,8 @@ let updLast = 0;
     () => tauri.invoke('reveal_file', { path }).catch(() => {}));
 };
 
-// На телефоне WebView не скачивает файлы сам: ссылки на вложения и внешние сайты открываем в браузере
-if (ANDROID && tauri) document.addEventListener('click', (e) => {
+// Все внешние ссылки (на вложения и сайты) открываем в системном браузере
+if (tauri) document.addEventListener('click', (e) => {
   const a = (e.target as HTMLElement).closest<HTMLAnchorElement>('a[href]');
   if (!a || !/^https?:/.test(a.href) || new URL(a.href).origin === location.origin) return;
   e.preventDefault();
@@ -3681,7 +3870,10 @@ async function installUpdate(box: HTMLElement, onSkip = () => { box.innerHTML = 
         <span class="err">${esc(String(err))}</span>
         <div class="upd-btns"><button class="btn" id="updRetry">Повторить</button><button class="btn sec" id="updSkip">Пропустить</button></div>
       </div>`);
-    $('#updRetry', box).onclick = () => installUpdate(box, onSkip);
+    $('#updRetry', box).onclick = () => {
+      U.version = '';
+      checkUpdate().then(() => installUpdate(box, onSkip));
+    };
     $('#updSkip', box).onclick = onSkip;
   }
 }
