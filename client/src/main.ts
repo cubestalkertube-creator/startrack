@@ -47,37 +47,107 @@ const store = {
   set: (k: string, v: string) => { try { localStorage.setItem(k, v); } catch {} },
 };
 
-// Темы оформления
+// Темы оформления (в стиле Discord Nitro Color Themes)
 interface ThemeDef {
   id: string;
   name: string;
-  desc: string;
-  baseBg: string;
-  chatBg: string;
+  desc?: string;
+  gradient?: string;
+  baseBg?: string;
+  chatBg?: string;
   accent: string;
+  mode?: 'dark' | 'light';
   light?: boolean;
 }
+
 const THEMES: ThemeDef[] = [
-  { id: 'dark', name: 'Тёмная', desc: 'Классическая тёмная тема Discord / Startrack', baseBg: '#2c2d32', chatBg: '#323339', accent: '#5865f2' },
-  { id: 'oled', name: 'OLED / Чернота', desc: 'Чистый чёрный цвет для максимального контраста и энергосбережения', baseBg: '#000000', chatBg: '#08080a', accent: '#5865f2' },
-  { id: 'cyberpunk', name: 'Киберпанк', desc: 'Неоновый фиолетовый акцент и глубокий индиго', baseBg: '#0e0b1a', chatBg: '#151124', accent: '#a855f7' },
-  { id: 'emerald', name: 'Изумруд', desc: 'Благородный лесной зелёный с ярким изумрудом', baseBg: '#0b1611', chatBg: '#101f18', accent: '#10b981' },
-  { id: 'ocean', name: 'Океан', desc: 'Морской скандинавский синий со светлым лазурным', baseBg: '#121924', chatBg: '#182230', accent: '#38bdf8' },
-  { id: 'light', name: 'Светлая', desc: 'Классическая чистая светлая тема', baseBg: '#e9eaec', chatBg: '#ffffff', accent: '#5865f2', light: true },
+  // 1-й ряд (Своя тема + Светлые пастели)
+  { id: 'custom', name: 'Своя тема', desc: 'Создайте свой собственный градиент и настройте цвета', accent: '#5865f2', mode: 'dark' },
+  { id: 'mint_apple', name: 'Мятное яблоко', desc: 'Свежий салатово-мятный градиент', gradient: 'linear-gradient(135deg, #a8e6cf 0%, #b2d8d8 50%, #88d8b0 100%)', accent: '#10b981', mode: 'light' },
+  { id: 'citrus', name: 'Цитрусовый шербет', desc: 'Тёплый персиково-жёлтый градиент', gradient: 'linear-gradient(135deg, #ffeaa7 0%, #fab1a0 100%)', accent: '#e17055', mode: 'light' },
+
+  // 2-й ряд (Светлые пастели)
+  { id: 'retro_rain', name: 'Ретро-дождь', desc: 'Лавандово-голубой пастельный градиент', gradient: 'linear-gradient(135deg, #c7d2fe 0%, #93c5fd 50%, #818cf8 100%)', accent: '#6366f1', mode: 'light' },
+  { id: 'vanilla', name: 'Ваниль', desc: 'Нежный кремово-лаймовый градиент', gradient: 'linear-gradient(135deg, #fef9c3 0%, #dcfce7 50%, #bbf7d0 100%)', accent: '#84cc16', mode: 'light' },
+  { id: 'dusk', name: 'Рассвет', desc: 'Мягкий розовато-песочный градиент', gradient: 'linear-gradient(135deg, #fbcfe8 0%, #fed7aa 50%, #e9d5ff 100%)', accent: '#ec4899', mode: 'light' },
+
+  // 3-й ряд (Светлые пастели)
+  { id: 'cotton_candy', name: 'Сладкая вата', desc: 'Воздушный пастельно-розовый градиент', gradient: 'linear-gradient(135deg, #fed7e2 0%, #e9d5ff 50%, #c7d2fe 100%)', accent: '#d946ef', mode: 'light' },
+  { id: 'chroma_glow_light', name: 'Хромовое сияние', desc: 'Кристальный небесно-мятный градиент', gradient: 'linear-gradient(135deg, #e0f2fe 0%, #ccfbf1 50%, #dcfce7 100%)', accent: '#06b6d4', mode: 'light' },
+  { id: 'dune', name: 'Песчаная дюна', desc: 'Тёплый песочный пастельный градиент', gradient: 'linear-gradient(135deg, #fef3c7 0%, #fde68a 50%, #e5e7eb 100%)', accent: '#d97706', mode: 'light' },
+
+  // 4-й ряд (Тёмные насыщенные)
+  { id: 'sunset', name: 'Закат', desc: 'Переход от чернильно-фиолетового к медно-янтарному', gradient: 'linear-gradient(135deg, #2e1e3b 0%, #432439 40%, #7a3a2a 100%)', accent: '#f97316', mode: 'dark' },
+  { id: 'retro_storm', name: 'Интенсивное сияние', desc: 'Яркий неоновый синтвейв-градиент', gradient: 'linear-gradient(135deg, #1b264f 0%, #5b1875 50%, #005691 100%)', accent: '#a855f7', mode: 'dark' },
+  { id: 'forest', name: 'Лес', desc: 'Хвойный изумруд с золотисто-мшистым отблеском', gradient: 'linear-gradient(135deg, #13241b 0%, #203a27 50%, #534b26 100%)', accent: '#22c55e', mode: 'dark' },
+
+  // 5-й ряд
+  { id: 'crimson_moon', name: 'Багровая Луна', desc: 'Угольно-чёрный фон с рубиновым свечением', gradient: 'linear-gradient(135deg, #0d0608 0%, #2b080e 60%, #6e0d18 100%)', accent: '#ef4444', mode: 'dark' },
+  { id: 'midnight_blurple', name: 'Полуночный синелетовый', desc: 'Фирменный сапфирово-фиолетовый индиго Discord', gradient: 'linear-gradient(135deg, #10132b 0%, #1e1d4d 50%, #2b1f4a 100%)', accent: '#5865f2', mode: 'dark' },
+  { id: 'mocha', name: 'Кофе / Мокко', desc: 'Глубокий шоколадно-кофейный градиент', gradient: 'linear-gradient(135deg, #1f1412 0%, #36201b 50%, #4e2f27 100%)', accent: '#a16207', mode: 'dark' },
+
+  // 6-й ряд
+  { id: 'ashen', name: 'Пепел', desc: 'Грифельно-серый стальной градиент', gradient: 'linear-gradient(135deg, #23272e 0%, #313744 50%, #485264 100%)', accent: '#94a3b8', mode: 'dark' },
+  { id: 'moss', name: 'Тайга', desc: 'Приглушённый хвойный тёмно-зелёный градиент', gradient: 'linear-gradient(135deg, #1a2723 0%, #293d37 50%, #3a544c 100%)', accent: '#10b981', mode: 'dark' },
+  { id: 'deep_space', name: 'Глубокий космос', desc: 'Океанический сине-серый градиент', gradient: 'linear-gradient(135deg, #161c28 0%, #242c3d 50%, #2e4158 100%)', accent: '#38bdf8', mode: 'dark' },
+
+  // 7-й ряд
+  { id: 'neon_nights', name: 'Неоновые ночи', desc: 'Бирюзово-фиолетовый киберпанк градиент', gradient: 'linear-gradient(135deg, #10303b 0%, #332049 50%, #5c1e54 100%)', accent: '#06b6d4', mode: 'dark' },
+  { id: 'strawberry_lemonade', name: 'Земляничный лимонад', desc: 'Малиново-янтарный закатный градиент', gradient: 'linear-gradient(135deg, #441323 0%, #691d2c 50%, #9e4b17 100%)', accent: '#f43f5e', mode: 'dark' },
+  { id: 'aurora', name: 'Аврора', desc: 'Глубокий тёмно-синий с изумрудным лучом', gradient: 'linear-gradient(135deg, #0a1f33 0%, #0d383b 50%, #1a2a4f 100%)', accent: '#2dd4bf', mode: 'dark' },
+
+  // 8-й ряд
+  { id: 'dark_olive', name: 'Тёмная олива', desc: 'Землистый оливковый градиент', gradient: 'linear-gradient(135deg, #1c1a14 0%, #2e2b20 50%, #423d2b 100%)', accent: '#eab308', mode: 'dark' },
+  { id: 'deep_blue', name: 'Глубокий синий', desc: 'Глубокий сапфировый градиент', gradient: 'linear-gradient(135deg, #0c1527 0%, #112042 50%, #182e66 100%)', accent: '#3b82f6', mode: 'dark' },
+  { id: 'dark', name: 'Классическая тёмная', desc: 'Классическая тёмная тема Discord / Startrack', baseBg: '#2c2d32', chatBg: '#323339', accent: '#5865f2', mode: 'dark' },
+  { id: 'oled', name: 'OLED / Чернота', desc: 'Чистый чёрный цвет для максимального контраста и энергосбережения', baseBg: '#000000', chatBg: '#08080a', accent: '#5865f2', mode: 'dark' },
 ];
 
 const curTheme = () => store.get('theme') || 'dark';
 
 function applyTheme(id: string) {
-  const t = THEMES.find((x) => x.id === id) ? id : 'dark';
-  if (t === 'dark') delete document.documentElement.dataset.theme;
-  else document.documentElement.dataset.theme = t;
-  store.set('theme', t);
+  const t = THEMES.find((x) => x.id === id) || THEMES.find((x) => x.id === 'dark') || THEMES[0];
+  const root = document.documentElement;
+  store.set('theme', t.id);
+
+  if (t.id === 'custom') {
+    let cust = { c1: '#4a00e0', c2: '#8e2de2', mode: 'dark' };
+    try {
+      const saved = store.get('customTheme');
+      if (saved) cust = { ...cust, ...JSON.parse(saved) };
+    } catch {}
+    root.style.setProperty('--theme-bg', `linear-gradient(135deg, ${cust.c1} 0%, ${cust.c2} 100%)`);
+    root.dataset.theme = 'gradient';
+    root.dataset.themeMode = cust.mode || 'dark';
+    root.style.setProperty('--accent', cust.c2 || '#5865f2');
+    root.style.setProperty('--accent-hi', cust.c1 || '#4752c4');
+    return;
+  }
+
+  if (t.gradient) {
+    root.style.setProperty('--theme-bg', t.gradient);
+    root.dataset.theme = 'gradient';
+    root.dataset.themeMode = t.mode || (t.light ? 'light' : 'dark');
+    root.style.setProperty('--accent', t.accent);
+    root.style.setProperty('--accent-hi', t.accent);
+  } else {
+    root.style.removeProperty('--theme-bg');
+    if (t.id === 'dark') {
+      delete root.dataset.theme;
+      delete root.dataset.themeMode;
+      root.style.removeProperty('--accent');
+      root.style.removeProperty('--accent-hi');
+    } else {
+      root.dataset.theme = t.id;
+      delete root.dataset.themeMode;
+      root.style.setProperty('--accent', t.accent);
+      root.style.setProperty('--accent-hi', t.accent);
+    }
+  }
 }
 
 // Применяем сохранённую тему при запуске
-const initTheme = curTheme();
-if (initTheme !== 'dark') document.documentElement.dataset.theme = initTheme;
+applyTheme(curTheme());
 
 // Телефон (APK для Android): узкая раскладка, без демонстрации экрана и автообновления установщиком
 const ANDROID = /Android/i.test(navigator.userAgent);
@@ -162,6 +232,7 @@ const ICON = {
   image: 'M21 19V5c0-1.1-.9-2-2-2H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2zM8.5 13.5l2.5 3.01L14.5 12l4.5 6H5l3.5-4.5z',
   shield: 'M12 1L3 5v6c0 5.55 3.84 10.74 9 12 5.16-1.26 9-6.45 9-12V5l-9-4z',
   lock: 'M18 8h-1V6c0-2.76-2.24-5-5-5S7 3.24 7 6v2H6c-1.1 0-2 .9-2 2v10c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V10c0-1.1-.9-2-2-2zm-6 9c-1.1 0-2-.9-2-2s.9-2 2-2 2 .9 2 2-.9 2-2 2zm3.1-9H8.9V6c0-1.71 1.39-3.1 3.1-3.1 1.71 0 3.1 1.39 3.1 3.1v2z',
+  palette: 'M12 2C6.49 2 2 6.49 2 12c0 4.41 3.59 8 8 8 .55 0 1-.45 1-1 0-.24-.09-.46-.24-.63-.16-.17-.26-.41-.26-.67 0-.55.45-1 1-1h1.5c4.14 0 7.5-3.36 7.5-7.5C20.5 5.51 16.69 2 12 2zm-5.5 9c-.83 0-1.5-.67-1.5-1.5S5.67 8 6.5 8 8 8.67 8 9.5 7.33 11 6.5 11zm3-4C8.67 7 8 6.33 8 5.5S8.67 4 9.5 4s1.5.67 1.5 1.5S10.33 7 9.5 7zm5 0c-.83 0-1.5-.67-1.5-1.5S13.67 4 14.5 4s1.5.67 1.5 1.5S15.33 7 14.5 7zm3 4c-.83 0-1.5-.67-1.5-1.5S16.67 8 17.5 8s1.5.67 1.5 1.5-.67 1.5-1.5 1.5z',
 };
 const ic = (n: keyof typeof ICON, s = 20) =>
   `<svg class="ic" width="${s}" height="${s}" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="${ICON[n]}"/></svg>`;
@@ -3336,32 +3407,102 @@ function renderSettingsTab() {
   }
   if (setTab === 'appearance') {
     const cur = curTheme();
+    const curObj = THEMES.find((x) => x.id === cur) || THEMES[0];
+    const isCustom = cur === 'custom';
+    let cust = { c1: '#4a00e0', c2: '#8e2de2', mode: 'dark' };
+    try {
+      const saved = store.get('customTheme');
+      if (saved) cust = { ...cust, ...JSON.parse(saved) };
+    } catch {}
+
     box.innerHTML = `
       <h2>Внешний вид</h2>
-      <h3>Тема оформления</h3>
+      <h3>Цветовые темы</h3>
       <p class="set-hint">Выберите цветовую схему для интерфейса Startrack.</p>
-      <div class="theme-grid">
-        ${THEMES.map((t) => `
-          <div class="theme-card ${t.id === cur ? 'sel' : ''}" data-tid="${t.id}">
-            <div class="theme-preview">
-              <div class="theme-preview-base" style="background:${t.baseBg}">
-                <div class="theme-preview-accent" style="background:${t.accent}"></div>
-              </div>
-              <div class="theme-preview-chat" style="background:${t.chatBg}"></div>
+      
+      <div class="swatch-grid">
+        ${THEMES.map((t) => {
+          const sel = t.id === cur;
+          const bg = t.id === 'custom' 
+            ? `linear-gradient(135deg, ${cust.c1}, ${cust.c2})` 
+            : (t.gradient || t.baseBg || '#2c2d32');
+          return `
+            <div class="swatch-item ${sel ? 'sel' : ''} ${t.id === 'custom' ? 'swatch-custom' : ''}" 
+                 data-tid="${t.id}" 
+                 style="background:${bg};">
+              ${t.id === 'custom' ? `
+                <span class="swatch-badge">НОВОЕ</span>
+                <span class="swatch-icon">${ic('palette', 26)}</span>
+              ` : ''}
+              ${sel ? `<span class="swatch-check">${ic('check', 14)}</span>` : ''}
+              <span class="swatch-tooltip">${esc(t.name)}</span>
             </div>
-            <div class="theme-info">
-              <b>${esc(t.name)}</b>
-              <span>${esc(t.desc)}</span>
-            </div>
-            ${t.id === cur ? `<div class="theme-check">${ic('check', 16)}</div>` : ''}
-          </div>`).join('')}
-      </div>`;
+          `;
+        }).join('')}
+      </div>
+
+      <div class="theme-status-card">
+        <div>
+          <b>${esc(curObj.name)}</b>
+          <span>${curObj.desc || (curObj.light || curObj.mode === 'light' ? 'Светлая тема оформления' : 'Тёмная тема оформления')}</span>
+        </div>
+        ${cur !== 'dark' ? `<button class="btn sec" id="themeReset">По умолчанию</button>` : ''}
+      </div>
+
+      ${isCustom ? `
+        <div class="custom-theme-box">
+          <h4>Настройка своей темы</h4>
+          <div class="custom-theme-row">
+            <label class="custom-color-pick">
+              <span>Цвет 1:</span>
+              <input type="color" id="custC1" value="${cust.c1}">
+            </label>
+            <label class="custom-color-pick">
+              <span>Цвет 2:</span>
+              <input type="color" id="custC2" value="${cust.c2}">
+            </label>
+            <label class="custom-color-pick">
+              <span>Режим:</span>
+              <select id="custMode">
+                <option value="dark" ${cust.mode === 'dark' ? 'selected' : ''}>Тёмный интерфейс</option>
+                <option value="light" ${cust.mode === 'light' ? 'selected' : ''}>Светлый интерфейс</option>
+              </select>
+            </label>
+          </div>
+        </div>
+      ` : ''}
+    `;
+
     box.querySelectorAll<HTMLElement>('[data-tid]').forEach((c) => {
       c.onclick = () => {
         applyTheme(c.dataset.tid!);
         renderSettingsTab();
       };
     });
+
+    const rst = document.getElementById('themeReset');
+    if (rst) rst.onclick = () => {
+      applyTheme('dark');
+      renderSettingsTab();
+    };
+
+    if (isCustom) {
+      const updateCust = () => {
+        const c1 = (document.getElementById('custC1') as HTMLInputElement).value;
+        const c2 = (document.getElementById('custC2') as HTMLInputElement).value;
+        const mode = (document.getElementById('custMode') as HTMLSelectElement).value;
+        store.set('customTheme', JSON.stringify({ c1, c2, mode }));
+        applyTheme('custom');
+        const custSwatch = box.querySelector<HTMLElement>('[data-tid="custom"]');
+        if (custSwatch) custSwatch.style.background = `linear-gradient(135deg, ${c1}, ${c2})`;
+      };
+      const c1El = document.getElementById('custC1') as HTMLInputElement;
+      const c2El = document.getElementById('custC2') as HTMLInputElement;
+      const mEl = document.getElementById('custMode') as HTMLSelectElement;
+      if (c1El) c1El.oninput = updateCust;
+      if (c2El) c2El.oninput = updateCust;
+      if (mEl) mEl.onchange = updateCust;
+    }
     return;
   }
   if (setTab === 'sounds') {
