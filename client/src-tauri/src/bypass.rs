@@ -47,8 +47,13 @@ pub async fn start() -> String {
 
 async fn connect() -> std::io::Result<TcpStream> {
     // Сначала напрямую через физический адаптер; не вышло за 3 с — обычным путём (в т.ч. через VPN)
-    if let Some(ip) = physical_ipv4() {
+    if let Some((_name, ip)) = physical() {
         let socket = TcpSocket::new_v4()?;
+        // Linux: одного адреса мало — VPN (sing-box, Clash, wg-quick) уводит в туннель по правилам
+        // маршрутизации всё подряд. Сокет, привязанный к самой сетевой карте, маршруты через туннель
+        // пропускают. Без прав (ядро старше 5.7) не выйдет — тогда как в Windows, по адресу.
+        #[cfg(target_os = "linux")]
+        let _ = socket.bind_device(Some(_name.as_bytes()));
         if socket.bind(SocketAddr::new(ip.into(), 0)).is_ok() {
             if let Ok(Ok(stream)) = timeout(Duration::from_secs(3), socket.connect(SERVER)).await {
                 return Ok(stream);
@@ -60,8 +65,8 @@ async fn connect() -> std::io::Result<TcpStream> {
         .map_err(|_| std::io::Error::from(std::io::ErrorKind::TimedOut))?
 }
 
-/// IPv4 первого поднятого не-VPN адаптера со шлюзом (Ethernet / Wi-Fi).
-fn physical_ipv4() -> Option<Ipv4Addr> {
+/// Имя и IPv4 первого поднятого не-VPN адаптера со шлюзом (Ethernet / Wi-Fi).
+fn physical() -> Option<(String, Ipv4Addr)> {
     let vpn = |s: &str| {
         let s = s.to_lowercase();
         ["tun", "tap", "vpn", "wireguard", "xray", "v2ray", "happ", "clash", "mihomo", "sing", "hiddify", "nekobox", "outline", "amnezia", "zerotier", "hyper-v", "virtual", "loopback"]
@@ -74,7 +79,7 @@ fn physical_ipv4() -> Option<Ipv4Addr> {
         if !i.is_up() || i.is_loopback() || !has_gateway || vpn(&label) || tunnel(&i.name) {
             return None;
         }
-        i.ipv4.first().map(|n| n.addr())
+        i.ipv4.first().map(|n| (i.name.clone(), n.addr()))
     })
 }
 
