@@ -1,10 +1,10 @@
 // Запущенные программы для «Играет в …»: хвост пути (последние 4 части — без имени пользователя),
 // время запуска и для Steam-игр appid с названием из appmanifest. Игру по ним узнаёт сервер.
+// Без Tauri: этот же файл подключает и Linux-версия (client/linux).
 use serde_json::{json, Value};
 use std::collections::HashMap;
 
-#[tauri::command]
-pub async fn running_procs() -> Vec<Value> {
+pub fn running_procs() -> Vec<Value> {
     let mut seen: HashMap<String, u64> = HashMap::new();
     for (path, start) in list() {
         let lower = path.to_lowercase().replace('\\', "/");
@@ -109,7 +109,51 @@ fn list() -> Vec<(String, u64)> {
     out
 }
 
-#[cfg(not(windows))]
+// Linux: /proc/<pid>/exe и время запуска из /proc/<pid>/stat. Игры под Wine/Proton видны как
+// wine-preloader, поэтому у них берём argv[0] — путь к .exe (диск Z: — это корень Linux).
+#[cfg(target_os = "linux")]
+fn list() -> Vec<(String, u64)> {
+    let tick = unsafe { libc::sysconf(libc::_SC_CLK_TCK) }.max(1) as u64;
+    let boot = std::fs::read_to_string("/proc/stat")
+        .ok()
+        .and_then(|s| s.lines().find_map(|l| l.strip_prefix("btime ")?.trim().parse::<u64>().ok()))
+        .unwrap_or(0);
+    let system = ["/usr/", "/bin/", "/sbin/", "/lib", "/opt/google/", "/snap/", "/app/", "/tmp/.mount_"];
+    // сам Startrack из AppImage (его распакованный бинарник отсеивает current_exe)
+    let appimage = std::env::var("APPIMAGE").unwrap_or_default();
+    let mut out = Vec::new();
+    let Ok(rd) = std::fs::read_dir("/proc") else { return out };
+    for e in rd.flatten() {
+        let dir = e.path();
+        if !e.file_name().to_string_lossy().bytes().all(|b| b.is_ascii_digit()) {
+            continue;
+        }
+        let Ok(exe) = std::fs::read_link(dir.join("exe")) else { continue };
+        let mut path = exe.to_string_lossy().trim_end_matches(" (deleted)").to_string();
+        let file = path.rsplit('/').next().unwrap_or("");
+        if file.starts_with("wine") || file.contains("preloader") {
+            let cmd = std::fs::read(dir.join("cmdline")).unwrap_or_default();
+            let argv0 = String::from_utf8_lossy(cmd.split(|&b| b == 0).next().unwrap_or(&[])).to_string();
+            let b = argv0.as_bytes();
+            if b.len() < 3 || b[1] != b':' || !argv0.to_lowercase().ends_with(".exe") {
+                continue;
+            }
+            path = if b[0].eq_ignore_ascii_case(&b'z') { argv0[2..].replace('\\', "/") } else { argv0 };
+        } else if system.iter().any(|p| path.starts_with(p)) || path == appimage {
+            continue;
+        }
+        // поля после «(имя)»: starttime — 22-е поле, то есть 20-е после скобки
+        let start = std::fs::read_to_string(dir.join("stat"))
+            .ok()
+            .and_then(|s| s.rsplit_once(')')?.1.split_whitespace().nth(19)?.parse::<u64>().ok())
+            .map(|t| (boot + t / tick) * 1000)
+            .unwrap_or(0);
+        out.push((path, start));
+    }
+    out
+}
+
+#[cfg(not(any(windows, target_os = "linux")))]
 fn list() -> Vec<(String, u64)> {
     Vec::new()
 }

@@ -50,6 +50,9 @@ const store = {
 // Телефон (APK для Android): узкая раскладка, без демонстрации экрана и автообновления установщиком
 const ANDROID = /Android/i.test(navigator.userAgent);
 if (ANDROID) document.documentElement.classList.add('android');
+// Версия для Linux (Chromium из CEF) не умеет H.264 — ни показать, ни отправить
+const H264 = RTCRtpReceiver.getCapabilities?.('video')?.codecs.some((c) => /h264/i.test(c.mimeType)) ?? true;
+const OS_NAME = /Windows/.test(navigator.userAgent) ? 'Windows' : 'системы';
 
 const S = {
   server: store.get('server') || 'https://185-218-0-111.sslip.io',
@@ -1349,7 +1352,7 @@ setInterval(() => {
   });
 }, 1000);
 
-// Запущенные программы раз в 15 секунд (только приложение для Windows): сервер узнаёт среди них
+// Запущенные программы раз в 15 секунд (только приложение для Windows и Linux): сервер узнаёт среди них
 // игру по базе Discord. Отправляем, только когда список поменялся, и заново после переподключения
 let procsSent = '';
 async function scanGames() {
@@ -1767,7 +1770,7 @@ setInterval(() => {
   if (!afk && C.state === 'idle' && Date.now() - lastInput > AFK_MS) { afk = true; wsSend({ type: 'afk', afk: true }); }
 }, 30e3);
 
-// Уведомление Windows о сообщении, пока окно свёрнуто или не в фокусе (выключается в настройках)
+// Уведомление Windows/Linux о сообщении, пока окно свёрнуто или не в фокусе (выключается в настройках)
 function notifyMsg(m: Msg) {
   if (!tauri || ANDROID || store.get('notify') === '0') return;
   const u = userById(m.sender);
@@ -1877,7 +1880,7 @@ const C = {
   ringTimer: 0,
   quality: (store.get('quality') as QKey) || '1080p60',
   hint: (store.get('hint') as 'motion' | 'detail') || 'motion',
-  codec: (store.get('codec') as 'h264' | 'vp9' | 'av1') || 'h264',
+  codec: ((c) => (c === 'h264' && !H264 ? 'vp9' : c))((store.get('codec') as 'h264' | 'vp9' | 'av1') || (H264 ? 'h264' : 'vp9')),
   ns: store.get('ns') !== '0',
   micId: store.get('micId') || '',
   outId: store.get('outId') || '',
@@ -1974,6 +1977,8 @@ const screenPublishOpts = () => {
   const cap = screenCaps();
   return {
     videoCodec: C.codec,
+    // Кто не может показать H.264 (версия для Linux), тому сервер попросит VP8
+    backupCodec: C.codec === 'h264' ? { codec: 'vp8' as const } : true,
     simulcast: false,
     screenShareEncoding: { maxBitrate: cap.br, maxFramerate: cap.fps, priority: 'medium' as const },
     degradationPreference: (C.hint === 'motion' ? 'maintain-framerate' : 'maintain-resolution') as RTCDegradationPreference,
@@ -3113,7 +3118,7 @@ function renderSettingsTab() {
       </div>
       <input type="file" id="rfile" accept="audio/*" hidden>
       <hr>
-      ${tauri && !ANDROID ? `<div class="switch-row"><div><b>Уведомления Windows</b><span>Показывать новые сообщения, когда окно Startrack свёрнуто или не в фокусе</span></div>
+      ${tauri && !ANDROID ? `<div class="switch-row"><div><b>Уведомления ${OS_NAME}</b><span>Показывать новые сообщения, когда окно Startrack свёрнуто или не в фокусе</span></div>
         <input type="checkbox" class="switch" id="notifyon" ${store.get('notify') !== '0' ? 'checked' : ''}></div>
       <div class="switch-row"><div><b>Показывать, во что я играю</b><span>Друзья увидят в профиле запущенную игру и сколько вы в неё играете, как в Discord</span></div>
         <input type="checkbox" class="switch" id="gameson" ${store.get('games') !== '0' ? 'checked' : ''}></div>
@@ -3187,7 +3192,7 @@ function renderSettingsTab() {
     <div class="grid3">
       <label class="fld"><span>Качество</span><select id="sq">${opt({ '720p30': '720p 30 FPS', '1080p30': '1080p 30 FPS', '1080p60': '1080p 60 FPS', '1440p60': '1440p 60 FPS' }, C.quality)}</select></label>
       <label class="fld"><span>Режим</span><select id="sh">${opt({ motion: 'Плавность (игры, видео)', detail: 'Чёткость (текст, код)' }, C.hint)}</select></label>
-      <label class="fld"><span>Кодек</span><select id="sc">${opt({ h264: 'H.264 (аппаратный)', vp9: 'VP9', av1: 'AV1' }, C.codec)}</select></label>
+      <label class="fld"><span>Кодек</span><select id="sc">${opt({ ...(H264 ? { h264: 'H.264 (аппаратный)' } : {}), vp9: 'VP9', av1: 'AV1' }, C.codec)}</select></label>
     </div>
     <hr>
     <h3>Соединение</h3>

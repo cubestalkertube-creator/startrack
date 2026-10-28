@@ -3,6 +3,7 @@
 // выбирать сетевую карту, поэтому домены сервера отображаются на локальный адрес, а здесь каждое
 // TCP-соединение пересылается на сервер с сокета, привязанного к физическому адаптеру — мимо туннеля.
 // TLS сквозной: мы только перекладываем байты, SNI и сертификат остаются как есть.
+// Без Tauri: этот же файл подключает и Linux-версия (client/linux).
 use std::net::{Ipv4Addr, SocketAddr};
 use std::time::Duration;
 use tokio::net::{TcpListener, TcpSocket, TcpStream};
@@ -12,11 +13,14 @@ pub const DOMAINS: [&str; 2] = ["185-218-0-111.sslip.io", "turn.185-218-0-111.ss
 const SERVER: SocketAddr = SocketAddr::new(std::net::IpAddr::V4(Ipv4Addr::new(185, 218, 0, 111)), 443);
 
 /// Запускает пересылку и возвращает адрес, на который отображать домены сервера.
+/// Вызывать внутри рантайма tokio.
 pub async fn start() -> String {
+    // На Linux порт 443 без root не занять — берём любой свободный и указываем его в правиле
+    let port = if cfg!(windows) { 443 } else { 0 };
     // Каждому запущенному экземпляру — свой loopback-адрес; всё занято — хотя бы без DNS
     let mut bound = None;
     for n in 1..=20u8 {
-        let local = SocketAddr::new(Ipv4Addr::new(127, 83, 0, n).into(), 443);
+        let local = SocketAddr::new(Ipv4Addr::new(127, 83, 0, n).into(), port);
         if let Ok(l) = TcpListener::bind(local).await {
             bound = Some((l, local));
             break;
@@ -25,9 +29,10 @@ pub async fn start() -> String {
     let Some((listener, local)) = bound else {
         return SERVER.ip().to_string();
     };
-    tauri::async_runtime::spawn(async move {
+    let local = listener.local_addr().unwrap_or(local);
+    tokio::spawn(async move {
         while let Ok((client, _)) = listener.accept().await {
-            tauri::async_runtime::spawn(async move {
+            tokio::spawn(async move {
                 if let Ok(mut upstream) = connect().await {
                     let mut client = client;
                     let _ = client.set_nodelay(true);
@@ -37,7 +42,7 @@ pub async fn start() -> String {
             });
         }
     });
-    local.ip().to_string()
+    if local.port() == 443 { local.ip().to_string() } else { local.to_string() }
 }
 
 async fn connect() -> std::io::Result<TcpStream> {
@@ -66,9 +71,20 @@ fn physical_ipv4() -> Option<Ipv4Addr> {
     netdev::get_interfaces().into_iter().find_map(|i| {
         let label = format!("{} {} {}", i.name, i.friendly_name.clone().unwrap_or_default(), i.description.clone().unwrap_or_default());
         let has_gateway = i.gateway.as_ref().is_some_and(|g| g.ipv4.iter().any(|a| !a.is_unspecified()));
-        if !i.is_up() || i.is_loopback() || !has_gateway || vpn(&label) {
+        if !i.is_up() || i.is_loopback() || !has_gateway || vpn(&label) || tunnel(&i.name) {
             return None;
         }
         i.ipv4.first().map(|n| n.addr())
     })
+}
+
+// Linux: у tun- и WireGuard-интерфейсов нет MAC-адреса (тип ARPHRD_NONE = 65534), как их ни назови
+#[cfg(target_os = "linux")]
+pub fn tunnel(name: &str) -> bool {
+    std::fs::read_to_string(format!("/sys/class/net/{name}/type")).is_ok_and(|t| t.trim() == "65534")
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn tunnel(_name: &str) -> bool {
+    false
 }
