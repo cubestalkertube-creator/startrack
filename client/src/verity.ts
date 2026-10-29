@@ -20,6 +20,8 @@ type Opts = {
   os(): string;
   back: string; // кнопка «Назад» для телефона
   isEnabled?: () => boolean; // чат-бот включён в настройках
+  hasPersonality?: () => boolean; // включена ли личность
+  setPersonality?: (on: boolean) => void;
 };
 
 let O: Opts;
@@ -35,6 +37,7 @@ const V = {
 };
 const started = Date.now();
 const enabled = () => !O?.isEnabled || O.isEnabled();
+const hasPersonality = () => !O?.hasPersonality || O.hasPersonality();
 
 export function initVerity(o: Opts) { O = o; }
 export const verityOpen = () => V.open;
@@ -103,10 +106,12 @@ export function verityFace(f: Face, size: number, cls = '') {
 export function verityRow(filter: string) {
   if (!enabled()) return '';
   if (filter && !'верити verity помощник ии'.includes(filter)) return '';
+  const pers = hasPersonality();
+  const f = pers ? V.face : 'smile';
   return `
     <div class="dm v-dm ${V.open ? 'sel' : ''}" data-act="verity">
-      <span class="v-av">${verityFace(V.face, 32)}</span>
-      <div class="dm-n"><span>Верити™<i class="v-tag">ИИ</i></span><small>Помощник Startrack</small></div>
+      <span class="v-av">${verityFace(f, 32)}</span>
+      <div class="dm-n"><span>Верити™<i class="v-tag">ИИ</i></span><small>${pers ? 'Помощник Startrack' : 'Спокойный помощник'}</small></div>
     </div>`;
 }
 
@@ -195,9 +200,15 @@ export function renderVerity() {
 function drawTop() {
   const top = document.getElementById('topbar');
   if (!top || !V.open) return;
+  const pers = hasPersonality();
+  const f = pers ? V.face : 'smile';
   top.innerHTML = `
-    ${O.back}<div class="tb-title v-title"><span class="v-av">${verityFace(V.face, 24)}</span><b>Верити™</b><i class="v-tag">ИИ</i></div>
+    ${O.back}<div class="tb-title v-title"><span class="v-av">${verityFace(f, 24)}</span><b>Верити™</b><i class="v-tag">ИИ</i>
+      <span class="v-sub" style="font-size:12px;color:var(--muted);margin-left:8px;">${pers ? 'Характер активен' : 'Спокойный режим'}</span></div>
     <div class="tb-actions">
+      <button class="tb-btn ${pers ? 'on' : ''}" data-act="vpersonality" title="${pers ? 'Личность Верити: включена (нажмите, чтобы выключить)' : 'Личность Верити: выключена (нажмите, чтобы включить)'}">
+        ${pers ? '🎭 Личность' : '🤖 Спокойный'}
+      </button>
       <button class="tb-btn ${V.showSide ? 'on' : ''}" data-act="vside" title="${V.showSide ? 'Скрыть' : 'Показать'} Верити">${O.ic('account', 22)}</button>
     </div>`;
 }
@@ -208,18 +219,35 @@ export function toggleVeritySide() {
   drawSide();
 }
 
-// Справа — просто большой «портрет» Верити (его текущее лицо) и кнопка очистки. Без шкал и подписей.
+// Справа — «портрет» Верити, переключатель личности и кнопка очистки.
 function drawSide() {
   const box = document.getElementById('profile');
   if (!box || !V.open) return;
   box.hidden = !V.showSide;
   if (box.hidden) return;
+  const pers = hasPersonality();
+  const face = pers ? V.face : 'smile';
   box.innerHTML = `
-    <div class="pf v-pf" data-face="${V.face}">
-      <div class="v-stage">${verityFace(V.face, 148, 'v-big')}</div>
+    <div class="pf v-pf" data-face="${face}">
+      <div class="v-stage">${verityFace(face, 148, 'v-big')}</div>
       <div class="pc-body">
-        <div class="pc-names"><h2>Верити™</h2><div class="pc-u">Помощник Startrack</div></div>
-        <div class="pc-sec"><p class="pc-bio">Я знаю этот мессенджер и могу помочь почти с чем угодно: учёба, код, игры, Minecraft. Можешь прислать мне картинку — я посмотрю.</p></div>
+        <div class="pc-names"><h2>Верити™</h2><div class="pc-u">${pers ? 'Помощник Startrack' : 'Спокойный помощник Startrack'}</div></div>
+        
+        <div class="pc-sec">
+          <label class="switch-row" style="margin: 0; cursor: pointer;">
+            <div>
+              <b>Личность и характер</b>
+              <span style="font-size:12px;">${pers ? 'Эмоции, характер и розыгрыши включены' : 'Спокойный режим: без обид и пакостей'}</span>
+            </div>
+            <input type="checkbox" class="switch" data-act="vtogglepers" ${pers ? 'checked' : ''}>
+          </label>
+        </div>
+
+        <div class="pc-sec">
+          <p class="pc-bio">${pers 
+            ? 'Я знаю этот мессенджер и могу помочь почти с чем угодно: учёба, код, игры, Minecraft. Можешь прислать мне картинку — я посмотрю. Как ко мне — так и я к тебе.' 
+            : 'Я — Верити в спокойном режиме. Отвечаю на любые вопросы по учёбе, коду, играм и Startrack, без сарказма, смены настроения и розыгрышей.'}</p>
+        </div>
       </div>
       <button class="pf-btn" data-act="vclear">Очистить переписку</button>
     </div>`;
@@ -317,12 +345,13 @@ async function send(ta: HTMLTextAreaElement, grow: () => void) {
     online: mins < 1 ? 'меньше минуты' : mins < 60 ? `${mins} мин` : `${Math.floor(mins / 60)} ч ${mins % 60} мин`,
   };
   try {
-    const r = await O.api('/api/verity', { text, image: img?.data, ctx }, 95000);
+    const pers = hasPersonality();
+    const r = await O.api('/api/verity', { text, image: img?.data, ctx, personality: pers }, 95000);
     V.msgs.push(r.message);
     V.busy = false;
     setFace(r.face);
     drawMsgs();
-    if (r.prank) setTimeout(() => prank(r.prank), 900);
+    if (r.prank && pers) setTimeout(() => prank(r.prank), 900);
   } catch (err) {
     V.busy = false;
     V.msgs = V.msgs.filter((m) => m !== mine);
@@ -414,6 +443,7 @@ if (import.meta.env.DEV) (window as any).vprank = (k: string) => prank(k); // п
 
 export function prank(kind: string) {
   if (!enabled()) return;
+  if (!hasPersonality()) return;
   const root = document.documentElement;
   switch (kind) {
     case 'glitch':

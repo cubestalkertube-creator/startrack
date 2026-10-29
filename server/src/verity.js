@@ -83,6 +83,16 @@ ${facts}
 Отвечай строго JSON-объектом без лишнего текста: {"reply": "твой ответ", "delta": целое число, "prank": "none" | "glitch" | "theme" | "scare" | "whisper" | "flip" | "watch"}`;
 }
 
+function calmSystemPrompt() {
+  return `Ты — Верити™ (Verity), умный, вежливый и полезный ИИ-помощник внутри мессенджера Startrack.
+Режим: спокойный ассистент (личность и хоррор-роль отключены пользователем).
+Ты отлично отвечаешь на любые вопросы: учёба, программирование, игры, Minecraft, наука, технологии и повседневные темы.
+${SUPPORT}
+Пиши по-русски (или на языке собеседника), точно, доброжелательно, понятно и структурированно. Код оформляй в тройных кавычках \`\`\`.
+Всегда будь дружелюбен и готов помочь, без обид, без злости и без розыгрышей.
+Отвечай строго JSON-объектом: {"reply": "твой ответ", "delta": 0, "prank": "none"}`;
+}
+
 export function initVerity(db, { addColumn, push, userFacts }) {
   db.exec(`
     -- переписка с Верити; role: user | verity
@@ -147,7 +157,7 @@ export function initVerity(db, { addColumn, push, userFacts }) {
       vq.setState.run(0, Date.now(), null, me.id); // и злость заодно сбрасываем
       return view(moodOf(me.id));
     },
-    // b.text — сообщение; b.image — data-URL картинки для зрения; b.ctx — что знает клиент (время, система)
+    // b.text — сообщение; b.image — data-URL картинки для зрения; b.ctx — что знает клиент; b.personality — включена ли личность
     'POST /api/verity': async (me, b) => {
       if (!API_KEY) throw [503, 'Верити спит: на сервере не настроен ключ нейросети'];
       const text = String(b.text || '').trim().slice(0, MAX_TEXT);
@@ -156,8 +166,9 @@ export function initVerity(db, { addColumn, push, userFacts }) {
       if (busy.has(me.id)) throw [429, 'Верити ещё отвечает на прошлое сообщение'];
       const now = Date.now();
       if (vq.today.get(me.id, now - 864e5).n >= PER_DAY) throw [429, 'Верити устал: на сегодня лимит сообщений исчерпан. Приходи завтра!'];
+      const personality = b.personality !== false;
       let mood = moodOf(me.id, now);
-      const face = faceOf(mood.anger);
+      const face = personality ? faceOf(mood.anger) : 'smile';
       const ctx = b.ctx && typeof b.ctx === 'object' ? b.ctx : {};
       const facts = [
         ...userFacts(me.id),
@@ -175,7 +186,8 @@ export function initVerity(db, { addColumn, push, userFacts }) {
       busy.add(me.id);
       let out;
       try {
-        out = await ask([{ role: 'system', content: systemPrompt(face, facts, mood.anger >= 50) }, ...past, { role: 'user', content }]);
+        const sys = personality ? systemPrompt(face, facts, mood.anger >= 50) : calmSystemPrompt();
+        out = await ask([{ role: 'system', content: sys }, ...past, { role: 'user', content }]);
       } catch (e) {
         console.error('verity', e.message);
         vq.del.run(asked); // без ответа вопрос не сохраняем — можно просто отправить снова
@@ -183,14 +195,25 @@ export function initVerity(db, { addColumn, push, userFacts }) {
       } finally {
         busy.delete(me.id);
       }
-      const delta = Math.max(-100, Math.min(40, Math.round(out.delta)));
-      const anger = Math.max(MIN_ANGER, Math.min(MAX_ANGER, mood.anger + delta));
-      // наказание: только когда уже зол, собеседник его разозлил ещё сильнее и не слишком часто
-      let prank = PRANKS.includes(out.prank) ? out.prank : null;
-      if (anger < 50 || delta <= 0 || now - mood.prankAt < PRANK_GAP) prank = null;
-      else if (!prank && anger >= 85 && Math.random() < 0.75) prank = PRANKS[Math.floor(Math.random() * PRANKS.length)];
-      vq.setState.run(anger, now, prank ? now : mood.prankAt || null, me.id);
-      const newFace = faceOf(anger);
+      let delta = 0;
+      let anger = mood.anger;
+      let prank = null;
+      let newFace = 'smile';
+      if (personality) {
+        delta = Math.max(-100, Math.min(40, Math.round(out.delta)));
+        anger = Math.max(MIN_ANGER, Math.min(MAX_ANGER, mood.anger + delta));
+        // наказание: только когда уже зол, собеседник его разозлил ещё сильнее и не слишком часто
+        prank = PRANKS.includes(out.prank) ? out.prank : null;
+        if (anger < 50 || delta <= 0 || now - mood.prankAt < PRANK_GAP) prank = null;
+        else if (!prank && anger >= 85 && Math.random() < 0.75) prank = PRANKS[Math.floor(Math.random() * PRANKS.length)];
+        vq.setState.run(anger, now, prank ? now : mood.prankAt || null, me.id);
+        newFace = faceOf(anger);
+      } else {
+        // при выключенной личности сбрасываем злость и не наказываем
+        vq.setState.run(0, now, null, me.id);
+        anger = 0;
+        newFace = 'smile';
+      }
       const reply = out.reply || '…';
       const id = Number(vq.add.run(me.id, 'verity', reply, newFace, prank, Date.now()).lastInsertRowid);
       const res = { message: { id, role: 'verity', text: reply, face: newFace, prank, created: Date.now() }, ...view({ anger }), prank };
