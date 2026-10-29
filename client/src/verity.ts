@@ -18,6 +18,7 @@ type Opts = {
   setTheme(id: string | null): void; // null — вернуть тему пользователя
   os(): string;
   back: string; // кнопка «Назад» для телефона
+  isEnabled?: () => boolean;
 };
 
 let O: Opts;
@@ -95,7 +96,7 @@ export function verityFace(f: Face, size: number, cls = '') {
   </svg>`;
 }
 
-const MOOD: Record<Face, [string, string]> = {
+export const MOOD: Record<Face, [string, string]> = {
   grin: ['В восторге', 'Ты его лучший друг. Навсегда.'],
   smile: ['Дружелюбный', 'Готов помочь с чем угодно.'],
   neutral: ['Насторожен', 'Что-то ему не понравилось.'],
@@ -107,6 +108,7 @@ const MOOD: Record<Face, [string, string]> = {
 
 // ---------- список бесед ----------
 export function verityRow(filter: string) {
+  if (O?.isEnabled && !O.isEnabled()) return '';
   if (filter && !'верити verity помощник ии'.includes(filter)) return '';
   const f = V.mood.face;
   return `
@@ -118,6 +120,7 @@ export function verityRow(filter: string) {
 
 // ---------- беседа ----------
 export async function openVerity() {
+  if (O?.isEnabled && !O.isEnabled()) return;
   V.open = true;
   if (matchMedia('(max-width: 760px)').matches) V.showSide = false; // на телефоне панель закрыла бы весь чат
   if (!V.loaded && !V.loading) {
@@ -150,6 +153,7 @@ function setMood(m: { anger: number; face: Face; sulk?: number }) {
 
 // событие с сервера: настроение поменялось на другом устройстве
 export function verityEvent(ev: Mood) {
+  if (O?.isEnabled && !O.isEnabled()) return;
   if (!V.open) V.loaded = false; // переписку перечитаем при следующем открытии
   setMood(ev);
 }
@@ -402,6 +406,7 @@ function sting() {
 if (import.meta.env.DEV) (window as any).vprank = (k: string) => prank(k); // проверка пакостей из консоли
 
 export function prank(kind: string) {
+  if (O?.isEnabled && !O.isEnabled()) return;
   const root = document.documentElement;
   switch (kind) {
     case 'glitch':

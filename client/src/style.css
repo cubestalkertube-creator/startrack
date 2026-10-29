@@ -1259,3 +1259,26 @@ small b, .fr-n span b { font-weight: 600; color: var(--text); }
   .v-mood { display: none; }
   .v-watch { bottom: 90px; }
 }
+
+/* Настройки Верити и разделители */
+.setting-group-title { margin: 20px 0 6px; font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: .5px; color: var(--muted); }
+.v-settings-card { padding: 16px; background: var(--chat); border-radius: 12px; border: 1px solid var(--line2); margin: 16px 0; }
+.v-settings-top { display: flex; gap: 16px; align-items: center; }
+.v-settings-avatar { flex: none; display: grid; place-items: center; }
+.v-settings-desc b { font-size: 16px; color: var(--head); display: block; }
+.v-settings-desc p { margin: 4px 0 8px; font-size: 13px; color: var(--text); line-height: 1.4; }
+.v-settings-badge { display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px; border-radius: 12px; font-size: 12px; font-weight: 500; }
+.v-settings-badge.on { color: #57f287; background: rgba(87, 242, 135, .14); }
+.v-settings-badge.off { color: var(--muted); background: var(--hover); }
+.v-settings-switch { margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--line2); }
+.v-settings-faces { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+.v-face-pill { display: flex; flex-direction: column; align-items: center; gap: 4px; padding: 8px 12px; border-radius: 8px; background: var(--chat); border: 1px solid var(--line2); font-size: 12px; color: var(--text); min-width: 65px; }
+.status-dot { width: 8px; height: 8px; border-radius: 50%; background: currentColor; }
+
+/* Маскот Нова в пустых состояниях */
+.mascot-empty { display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; padding: 36px 20px; flex: 1; }
+.nova-mascot-img { max-height: 250px; width: auto; object-fit: contain; filter: drop-shadow(0 8px 24px rgba(0, 0, 0, .3)); animation: floatMascot 4s ease-in-out infinite; pointer-events: none; user-select: none; margin-bottom: 12px; }
+.intro-empty-nova { display: flex; flex-direction: column; align-items: center; padding: 28px 20px 20px; text-align: center; gap: 8px; }
+.nova-chat-img { max-height: 200px; width: auto; object-fit: contain; filter: drop-shadow(0 6px 18px rgba(0, 0, 0, .25)); animation: floatMascot 4.5s ease-in-out infinite; pointer-events: none; user-select: none; margin-bottom: 8px; }
+@keyframes floatMascot { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-8px); } }
+

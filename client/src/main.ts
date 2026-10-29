@@ -1,5 +1,9 @@
 import './style.css';
 import defaultRingtone from './assets/ringtone.mp3';
+import novaWave from './assets/nova_wave.png';
+import novaHelper from './assets/nova_helper.png';
+import novaCall from './assets/nova_call.png';
+import novaSleep from './assets/nova_sleep.png';
 import {
   AudioPresets, DisconnectReason, Room, RoomEvent, Track,
   type LocalTrackPublication, type Participant, type RemoteParticipant, type RemoteTrack, type RemoteTrackPublication, type TrackPublication,
@@ -8,7 +12,7 @@ import { closePicker, emojify, isJumbo, loadEmoji, noteUsed, openPicker as openE
 import { decodeGif, encodeGif } from './gif';
 import { BUILTIN, SB_MAX_SEC, cutWav, decodeFile, playSound, preload, preview, sbVol, setSbVol, stopSounds, type SbSound } from './soundboard';
 import { SFX_GROUPS, setSfxOn, setSfxOutput, setSfxVol, sfx, sfxLoop, sfxOn, sfxVol, type SfxGroup } from './sounds';
-import { clearVerity, closeVerity, initVerity, openVerity, renderVerity, resetVerity, toggleVeritySide, verityEvent, verityOpen, verityRow } from './verity';
+import { clearVerity, closeVerity, initVerity, openVerity, renderVerity, resetVerity, stopPranks, toggleVeritySide, verityEvent, verityFace, verityOpen, verityRow, MOOD, type Face } from './verity';
 import { initWatch, watchDeaf, watchJoined, watchMount, watchOn, watchOnData, watchReset, watchStart } from './watch';
 
 // offline — так другие видят «невидимку»
@@ -47,6 +51,9 @@ const store = {
   get: (k: string) => { try { return localStorage.getItem(k); } catch { return null; } },
   set: (k: string, v: string) => { try { localStorage.setItem(k, v); } catch {} },
 };
+
+const verityOn = () => store.get('verity') === '1';
+const mascotOn = () => store.get('mascot') !== '0';
 
 // Темы оформления (в стиле Discord Nitro Color Themes)
 interface ThemeDef {
@@ -480,6 +487,7 @@ function start(me: User) {
     me: () => ({ name: uname(S.me!), avatar: (size) => avatar(S.me!, size) }),
     setTheme: (id) => applyTheme(id ?? curTheme(), false),
     os: () => ANDROID ? 'Android' : OS_NAME === 'Windows' ? 'Windows' : 'Linux',
+    isEnabled: () => verityOn(),
   });
   renderFriends();
   renderChat();
@@ -516,6 +524,7 @@ async function act(b: HTMLElement) {
     }
     case 'home': goHome(); return mpane(true);
     case 'verity':
+      if (!verityOn()) return;
       S.peer = null;
       S.gid = 0;
       clearStaged();
@@ -667,7 +676,7 @@ function renderFriends() {
   const pill = $('#reqn');
   pill.hidden = !n;
   pill.textContent = String(n);
-  $('#navfr').classList.toggle('sel', !conv() && !verityOpen());
+  $('#navfr').classList.toggle('sel', !conv() && !(verityOn() && verityOpen()));
   renderDmList();
   renderRail();
   if (!conv()) return renderHome();
@@ -681,7 +690,8 @@ function renderDmList() {
   const has = (s: string) => !S.filter || s.toLowerCase().includes(S.filter);
   const groups = S.groups.filter((g) => has(gname(g)));
   const list = S.friends.friends.filter((u) => has(u.username) || has(uname(u)));
-  $('#flist').innerHTML = verityRow(S.filter) + (groups.map((g) => {
+  const vRow = verityOn() ? verityRow(S.filter) : '';
+  $('#flist').innerHTML = vRow + (groups.map((g) => {
     const unread = S.unread.get('g' + g.id) || 0;
     const sub = C.state !== 'idle' && C.gid === g.id ? `<small class="incall">${ic('volume', 12)}В звонке</small>`
       : g.call.length ? `<small class="incall">${ic('volume', 12)}Звонок: ${g.call.length}</small>`
@@ -796,7 +806,7 @@ function hScroll(el: HTMLElement | null, prevLeft = 0) {
 
 // ---------- страница «Друзья» ----------
 function renderHome() {
-  if (verityOpen()) return renderVerity();
+  if (verityOn() && verityOpen()) return renderVerity();
   const { friends, incoming, outgoing } = S.friends;
   const prevScroll = document.querySelector<HTMLElement>('.tb-tabs')?.scrollLeft ?? 0;
   const tab = (t: Tab, title: string, n = 0) =>
@@ -818,7 +828,9 @@ function renderHome() {
           <form id="addf"><input placeholder="Введите ник друга" maxlength="32" spellcheck="false"><button class="btn">Отправить запрос дружбы</button></form>
           <div id="addmsg"></div>
         </div>
-        <div class="home-empty">${ic('addFriend', 96)}<p>Добавьте друзей — и можно переписываться и созваниваться.</p></div>
+        ${mascotOn()
+          ? `<div class="mascot-empty"><img src="${novaHelper}" class="nova-mascot-img" alt="Нова" draggable="false"><p class="set-hint">Добавьте друзей по нику — и можно переписываться и созваниваться.</p></div>`
+          : `<div class="home-empty">${ic('addFriend', 96)}<p>Добавьте друзей — и можно переписываться и созваниваться.</p></div>`}
       </div>`;
     const f = $<HTMLFormElement>('#addf');
     const inp = $<HTMLInputElement>('input', f);
@@ -866,10 +878,20 @@ function renderHome() {
     title = S.tab === 'online' ? 'В сети' : 'Все друзья';
     empty = S.tab === 'online' ? 'Сейчас никого нет в сети.' : 'Друзей пока нет — добавьте кого-нибудь по нику.';
   }
+  let emptyBlock = `<div class="home-empty">${ic('friends', 96)}<p>${empty}</p></div>`;
+  if (mascotOn()) {
+    if (S.tab === 'online') {
+      emptyBlock = `<div class="mascot-empty"><img src="${novaSleep}" class="nova-mascot-img" alt="Нова" draggable="false"><h3>Никого нет в сети</h3><p class="set-hint">Все друзья сейчас отдыхают или не в сети.</p></div>`;
+    } else if (S.tab === 'pending') {
+      emptyBlock = `<div class="mascot-empty"><img src="${novaHelper}" class="nova-mascot-img" alt="Нова" draggable="false"><h3>Нет входящих запросов</h3><p class="set-hint">Когда кто-то отправит вам заявку в друзья, она появится здесь.</p></div>`;
+    } else {
+      emptyBlock = `<div class="mascot-empty"><img src="${novaWave}" class="nova-mascot-img" alt="Нова" draggable="false"><h3>Список друзей пуст</h3><p class="set-hint">Найдите друзей по нику и добавьте в контакты!</p></div>`;
+    }
+  }
   chat.innerHTML = `
     <div class="fpage">
       ${rows.length ? `<h5 class="home-h">${title} — ${rows.length}</h5>${rows.join('')}`
-        : `<div class="home-empty">${ic('friends', 96)}<p>${empty}</p></div>`}
+        : emptyBlock}
     </div>`;
 }
 
@@ -1349,11 +1371,22 @@ function renderMessages() {
   const me = S.me!;
   const p = S.peer;
   const g = S.gid ? group(S.gid) : undefined;
-  let html = p
-    ? `<div class="intro">${avatar(p, 80)}<h1>${esc(uname(p))}</h1><div class="intro-u">${esc(p.username)}</div>
-        <p>Это начало истории ваших личных сообщений с <b>${esc(uname(p))}</b>.</p></div>`
-    : `<div class="intro">${gavatar(g!, 80)}<h1>${esc(c.name)}</h1>
-        <p>Добро пожаловать в начало группы <b>${esc(c.name)}</b>.</p></div>`;
+  const msgsList = S.msgs.get(c.key) || [];
+  let html = '';
+  if (msgsList.length === 0 && mascotOn()) {
+    html = `<div class="intro intro-empty-nova">
+      <img src="${novaWave}" class="nova-chat-img" alt="Нова" draggable="false">
+      <h1>${p ? esc(uname(p)) : esc(c.name)}</h1>
+      <div class="intro-u">${p ? esc(p.username) : 'Групповой чат'}</div>
+      <p>Здесь пока тихо... Напишите первое сообщение или отправьте приветствие!</p>
+    </div>`;
+  } else {
+    html = p
+      ? `<div class="intro">${avatar(p, 80)}<h1>${esc(uname(p))}</h1><div class="intro-u">${esc(p.username)}</div>
+          <p>Это начало истории ваших личных сообщений с <b>${esc(uname(p))}</b>.</p></div>`
+      : `<div class="intro">${gavatar(g!, 80)}<h1>${esc(c.name)}</h1>
+          <p>Добро пожаловать в начало группы <b>${esc(c.name)}</b>.</p></div>`;
+  }
   // автор: в группе — участник (или ник из сообщения, если он уже вышел)
   const author = (m: Msg): User => m.sender === me.id ? me : p ?? userById(m.sender) ?? { id: m.sender, username: m.sname || '???' };
   let prev: Msg | null = null;
@@ -1490,7 +1523,7 @@ document.addEventListener('drop', (e) => e.preventDefault());
 
 // Профиль собеседника справа (во время звонка с ним прячется, как в Discord), в группе — участники
 function renderProfile() {
-  if (verityOpen()) return; // справа — настроение Верити, его рисует verity.ts
+  if (verityOn() && verityOpen()) return; // справа — настроение Верити, его рисует verity.ts
   const box = document.getElementById('profile');
   const p = S.peer;
   if (!box) return;
@@ -2019,7 +2052,9 @@ function notifyMsg(m: Msg) {
 
 function onEvent(ev: any) {
   switch (ev.type) {
-    case 'verity': return verityEvent(ev);
+    case 'verity':
+      if (!verityOn()) return;
+      return verityEvent(ev);
     case 'message': {
       const m: Msg = ev.msg;
       const key = msgKey(m);
@@ -3260,7 +3295,7 @@ function soundDlg(edit?: SbSound) {
 }
 
 // ---------- настройки ----------
-type SetTab = 'account' | 'profile' | 'security' | 'appearance' | 'voice' | 'sounds';
+type SetTab = 'account' | 'profile' | 'security' | 'appearance' | 'voice' | 'sounds' | 'assistant';
 let setTab: SetTab = 'account';
 let ringPreview = false;
 let micTest: { stream: MediaStream; ctx: AudioContext; audio: HTMLAudioElement; raf: number } | null = null;
@@ -3283,6 +3318,7 @@ function openSettings(tab: SetTab) {
         ${navBtn('appearance', 'Внешний вид')}
         ${navBtn('voice', 'Голос и видео')}
         ${navBtn('sounds', 'Звуки')}
+        ${navBtn('assistant', 'Чат-бот Верити')}
         <hr>
         <button class="sn danger" data-set="logout">Выйти ${ic('hangup', 16)}</button>
       </div></nav>
@@ -3497,6 +3533,25 @@ function renderSettingsTab() {
           </div>
         </div>
       ` : ''}
+
+      <div class="setting-group-title">Персонализация и маскот</div>
+      <label class="switch-row" style="margin-top: 10px;">
+        <div>
+          <b>Маскот Нова</b>
+          <span>Отображать космическую помощницу Нову на пустых экранах и в начале новых бесед</span>
+        </div>
+        <input type="checkbox" class="switch" id="mascot_toggle" ${mascotOn() ? 'checked' : ''}>
+      </label>
+
+      <div class="setting-group-title" style="margin-top: 24px;">Чат-бот и ИИ-помощник</div>
+      <label class="switch-row" style="margin-top: 10px;">
+        <span class="v-av" style="display:flex;align-items:center;flex:none;">${verityFace('smile', 32)}</span>
+        <div>
+          <b>Чат-бот Верити™</b>
+          <span>Отображать ИИ-помощника в списке личных сообщений (по умолчанию выключен)</span>
+        </div>
+        <input type="checkbox" class="switch" id="verity_app_toggle" ${verityOn() ? 'checked' : ''}>
+      </label>
     `;
 
     box.querySelectorAll<HTMLElement>('[data-tid]').forEach((c) => {
@@ -3505,6 +3560,34 @@ function renderSettingsTab() {
         renderSettingsTab();
       };
     });
+
+    const mToggle = document.getElementById('mascot_toggle') as HTMLInputElement | null;
+    if (mToggle) {
+      mToggle.onchange = () => {
+        store.set('mascot', mToggle.checked ? '1' : '0');
+        renderChat();
+      };
+    }
+
+    const vAppToggle = document.getElementById('verity_app_toggle') as HTMLInputElement | null;
+    if (vAppToggle) {
+      vAppToggle.onchange = () => {
+        const on = vAppToggle.checked;
+        store.set('verity', on ? '1' : '0');
+        if (!on) {
+          if (verityOpen()) {
+            closeVerity();
+            goHome();
+          }
+          stopPranks();
+          toast('Чат-бот Верити выключен');
+        } else {
+          toast('Чат-бот Верити включён в личных сообщениях');
+        }
+        renderFriends();
+        renderChat();
+      };
+    }
 
     const rst = document.getElementById('themeReset');
     if (rst) rst.onclick = () => {
@@ -3528,6 +3611,89 @@ function renderSettingsTab() {
       if (c1El) c1El.oninput = updateCust;
       if (c2El) c2El.oninput = updateCust;
       if (mEl) mEl.onchange = updateCust;
+    }
+    return;
+  }
+  if (setTab === 'assistant') {
+    const on = verityOn();
+    box.innerHTML = `
+      <h2>Чат-бот Верити™</h2>
+      <p class="set-hint">Интеллектуальный помощник на базе нейросети прямо в Startrack.</p>
+
+      <div class="v-settings-card">
+        <div class="v-settings-top">
+          <div class="v-settings-avatar">${verityFace(on ? 'smile' : 'neutral', 64)}</div>
+          <div class="v-settings-desc">
+            <b>Верити™ — персонаж-помощник</b>
+            <p>Умеет отвечать на любые вопросы: помощь по учёбе, программирование, игры (Minecraft и др.), советы или просто беседа.</p>
+            <div class="v-settings-badge ${on ? 'on' : 'off'}">
+              <span class="status-dot"></span> ${on ? 'Включён — доступен в личных сообщениях' : 'Выключен (по умолчанию)'}
+            </div>
+          </div>
+        </div>
+
+        <label class="switch-row v-settings-switch">
+          <div>
+            <b>Включить чат-бота Верити™</b>
+            <span>Отображать отдельным диалогом в списке «Личные сообщения»</span>
+          </div>
+          <input type="checkbox" class="switch" id="verity_main_toggle" ${on ? 'checked' : ''}>
+        </label>
+      </div>
+
+      ${on ? `
+        <div class="v-settings-details">
+          <h3>Эмоции и характер</h3>
+          <p class="set-hint">Верити реагирует на тон ваших сообщений и меняет своё лицо в зависимости от того, как вы с ним общаетесь:</p>
+          <div class="v-settings-faces">
+            ${(['grin', 'smile', 'neutral', 'annoyed', 'angry', 'furious'] as Face[]).map((f) => `
+              <div class="v-face-pill">
+                ${verityFace(f, 36)}
+                <span>${MOOD[f][0]}</span>
+              </div>
+            `).join('')}
+          </div>
+
+          <h3 style="margin-top:24px;">Управление беседой</h3>
+          <p class="set-hint">Если вы хотите начать диалог с чистого листа, можно сбросить историю сообщений.</p>
+          <button class="btn sec" id="vSettingsClear">${ic('trash', 16)} Очистить историю с Верити</button>
+        </div>
+      ` : `
+        <div class="v-settings-empty">
+          <p class="set-hint">Чат-бот полностью отключён: он не отображается в боковой панели, не занимает место в списке бесед и не отправляет уведомлений.</p>
+        </div>
+      `}
+    `;
+
+    const toggle = document.getElementById('verity_main_toggle') as HTMLInputElement | null;
+    if (toggle) {
+      toggle.onchange = () => {
+        const checked = toggle.checked;
+        store.set('verity', checked ? '1' : '0');
+        if (!checked) {
+          if (verityOpen()) {
+            closeVerity();
+            goHome();
+          }
+          stopPranks();
+          toast('Чат-бот Верити выключен');
+        } else {
+          toast('Чат-бот Верити включён. Откройте «Личные сообщения» для общения');
+        }
+        renderFriends();
+        renderChat();
+        renderSettingsTab();
+      };
+    }
+
+    const clr = document.getElementById('vSettingsClear');
+    if (clr) {
+      clr.onclick = async () => {
+        if (await confirmDlg('Очистить переписку с Верити', 'Верити забудет всю историю разговора.', 'Очистить')) {
+          clearVerity();
+          toast('История переписки очищена');
+        }
+      };
     }
     return;
   }
