@@ -22,6 +22,22 @@ body {
   --text: #e2e4e8; --head: #ffffff; --muted: #888d96;
 }
 
+/* Verity — жёлтый смайлик на траве */
+:root[data-theme="verity"] {
+  --base: #14230f; --chat: #1a2e13; --card: #223a18; --card-hi: #2b4a1f; --ub: #172912; --deep: #0d1809; --pop: #172912;
+  --line: rgba(245, 200, 0, .14); --line2: rgba(245, 200, 0, .24);
+  --text: #e4f2d4; --head: #fffbe0; --muted: #98b585; --faint: #7f9a6e;
+  --hover: rgba(245, 200, 0, .08); --sel: rgba(245, 200, 0, .16);
+}
+:root[data-theme="verity"] .main {
+  background:
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 200 200'%3E%3Cdefs%3E%3CradialGradient id='g' cx='.38' cy='.32' r='.8'%3E%3Cstop offset='0' stop-color='%23ffe44d'/%3E%3Cstop offset='1' stop-color='%23e8b800'/%3E%3C/radialGradient%3E%3C/defs%3E%3Cellipse cx='100' cy='188' rx='70' ry='9' fill='%23000' opacity='.35'/%3E%3Ccircle cx='100' cy='100' r='88' fill='url(%23g)'/%3E%3Cellipse cx='72' cy='80' rx='8' ry='13' fill='%23111'/%3E%3Cellipse cx='128' cy='80' rx='8' ry='13' fill='%23111'/%3E%3Cpath d='M48 112 Q100 168 152 112' fill='none' stroke='%23111' stroke-width='7' stroke-linecap='round'/%3E%3C/svg%3E")
+      no-repeat right 32px bottom 96px / 150px,
+    repeating-linear-gradient(0deg, rgba(0, 0, 0, .05) 0 8px, transparent 8px 16px),
+    var(--chat);
+}
+:root[data-theme="verity"] .btn:not(.sec), :root[data-theme="verity"] .theme-check { color: #2a2000; }
+
 /* Градиентные темы Discord Nitro (Тёмные) */
 :root[data-theme="gradient"] {
   --base: rgba(0, 0, 0, 0.42);

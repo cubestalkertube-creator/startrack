@@ -101,6 +101,7 @@ const THEMES: ThemeDef[] = [
   { id: 'deep_blue', name: 'Глубокий синий', desc: 'Глубокий сапфировый градиент', gradient: 'linear-gradient(135deg, #0c1527 0%, #112042 50%, #182e66 100%)', accent: '#3b82f6', mode: 'dark' },
   { id: 'dark', name: 'Классическая тёмная', desc: 'Классическая тёмная тема Discord / Startrack', baseBg: '#2c2d32', chatBg: '#323339', accent: '#5865f2', mode: 'dark' },
   { id: 'oled', name: 'OLED / Чернота', desc: 'Чистый чёрный цвет для максимального контраста и энергосбережения', baseBg: '#000000', chatBg: '#08080a', accent: '#5865f2', mode: 'dark' },
+  { id: 'verity', name: 'Verity', desc: 'Тот самый жёлтый смайлик на сочной траве', baseBg: '#14230f', chatBg: '#1a2e13', accent: '#f5c800', mode: 'dark' },
 ];
 
 const curTheme = () => store.get('theme') || 'dark';
