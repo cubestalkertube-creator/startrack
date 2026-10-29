@@ -1,10 +1,11 @@
 // Верити™ — ИИ-помощник (жёлтый смайлик из сериала по Minecraft). Отвечает нейросеть на сервере,
-// здесь — его лица, отдельная беседа в списке «Личные сообщения» и пакости, когда его разозлили.
-// Лицо зависит от злости, которую считает сервер: grin (восторг) → smile → neutral → annoyed → angry → furious.
+// здесь — его лица, отдельная беседа в списке «Личные сообщения» и наказания, когда его разозлили.
+// Лицо молча меняется по злости, которую считает сервер (grin → smile → neutral → annoyed → angry → furious).
+// Никаких подписей настроения и шкал пользователю не показываем — он сам замечает, что Верити закипает.
+// Включается/выключается в Настройках (O.isEnabled); по умолчанию выключен.
 
 export type Face = 'grin' | 'smile' | 'neutral' | 'annoyed' | 'angry' | 'furious' | 'think';
-type VMsg = { id: number; role: 'user' | 'verity'; text: string; face: Face | null; prank: string | null; created: number };
-type Mood = { anger: number; face: Face; sulk: number };
+type VMsg = { id: number; role: 'user' | 'verity'; text: string; face: Face | null; prank: string | null; created: number; img?: string };
 
 type Opts = {
   api(path: string, body?: unknown, timeoutMs?: number): Promise<any>;
@@ -18,7 +19,7 @@ type Opts = {
   setTheme(id: string | null): void; // null — вернуть тему пользователя
   os(): string;
   back: string; // кнопка «Назад» для телефона
-  isEnabled?: () => boolean;
+  isEnabled?: () => boolean; // чат-бот включён в настройках
 };
 
 let O: Opts;
@@ -28,23 +29,25 @@ const V = {
   loading: false,
   busy: false,
   msgs: [] as VMsg[],
-  mood: { anger: 0, face: 'smile', sulk: 0 } as Mood,
+  face: 'grin' as Face,
+  img: null as { url: string; data: string } | null, // прикреплённая картинка (ждёт отправки)
   showSide: true,
 };
 const started = Date.now();
+const enabled = () => !O?.isEnabled || O.isEnabled();
 
 export function initVerity(o: Opts) { O = o; }
 export const verityOpen = () => V.open;
 export function closeVerity() { V.open = false; }
 export function resetVerity() {
-  Object.assign(V, { open: false, loaded: false, busy: false, msgs: [], mood: { anger: 0, face: 'smile', sulk: 0 } });
+  Object.assign(V, { open: false, loaded: false, busy: false, msgs: [], face: 'grin', img: null });
   stopPranks();
 }
 
 // ---------- лица ----------
 const INK = '#1a1a1a';
 let gradSeq = 0;
-// глаза в отдельной группе — пакость «watch» поворачивает их за курсором
+// глаза в отдельной группе — наказание «watch» поворачивает их за курсором
 const eyes = (body: string) => `<g class="v-eyes">${body}</g>`;
 const oval = (x: number, y: number, rx: number, ry: number, fill = INK) => `<ellipse cx="${x}" cy="${y}" rx="${rx}" ry="${ry}" fill="${fill}"/>`;
 const line = (d: string, w = 3.2) => `<path d="${d}" fill="none" stroke="${INK}" stroke-width="${w}" stroke-linecap="round" stroke-linejoin="round"/>`;
@@ -96,31 +99,20 @@ export function verityFace(f: Face, size: number, cls = '') {
   </svg>`;
 }
 
-export const MOOD: Record<Face, [string, string]> = {
-  grin: ['В восторге', 'Ты его лучший друг. Навсегда.'],
-  smile: ['Дружелюбный', 'Готов помочь с чем угодно.'],
-  neutral: ['Насторожен', 'Что-то ему не понравилось.'],
-  annoyed: ['Раздражён', 'Отвечает неохотно. Лучше не груби.'],
-  angry: ['Злится', 'Скоро случится что-то плохое…'],
-  furious: ['В ЯРОСТИ', 'Ты не уйдёшь. Попробуй извиниться.'],
-  think: ['Думает', ''],
-};
-
 // ---------- список бесед ----------
 export function verityRow(filter: string) {
-  if (O?.isEnabled && !O.isEnabled()) return '';
+  if (!enabled()) return '';
   if (filter && !'верити verity помощник ии'.includes(filter)) return '';
-  const f = V.mood.face;
   return `
-    <div class="dm v-dm ${V.open ? 'sel' : ''} ${f === 'furious' ? 'v-hot' : ''}" data-act="verity">
-      <span class="v-av">${verityFace(f, 32)}</span>
-      <div class="dm-n"><span>Верити™<i class="v-tag">ИИ</i></span><small>${f === 'smile' ? 'Твой друг-помощник' : MOOD[f][0]}</small></div>
+    <div class="dm v-dm ${V.open ? 'sel' : ''}" data-act="verity">
+      <span class="v-av">${verityFace(V.face, 32)}</span>
+      <div class="dm-n"><span>Верити™<i class="v-tag">ИИ</i></span><small>Помощник Startrack</small></div>
     </div>`;
 }
 
 // ---------- беседа ----------
 export async function openVerity() {
-  if (O?.isEnabled && !O.isEnabled()) return;
+  if (!enabled()) return;
   V.open = true;
   if (matchMedia('(max-width: 760px)').matches) V.showSide = false; // на телефоне панель закрыла бы весь чат
   if (!V.loaded && !V.loading) {
@@ -128,7 +120,7 @@ export async function openVerity() {
     try {
       const r = await O.api('/api/verity');
       V.msgs = r.messages;
-      setMood(r);
+      setFace(r.face);
       V.loaded = true;
     } catch (err) { O.toast((err as Error).message); }
     V.loading = false;
@@ -136,44 +128,42 @@ export async function openVerity() {
   }
 }
 
-function setMood(m: { anger: number; face: Face; sulk?: number }) {
-  const was = V.mood.face;
-  V.mood = { anger: m.anger, face: m.face, sulk: m.sulk || 0 };
-  document.querySelectorAll('.v-dm').forEach((el) => {
-    el.classList.toggle('v-hot', m.face === 'furious');
-    el.querySelector('.v-av')!.innerHTML = verityFace(m.face, 32);
-    el.querySelector('small')!.textContent = m.face === 'smile' ? 'Твой друг-помощник' : MOOD[m.face][0];
-  });
+// лицо молча обновляем везде, где оно есть; ни подписей, ни шкал
+function setFace(face: Face) {
+  const was = V.face;
+  V.face = face;
+  document.querySelectorAll('.v-dm .v-av').forEach((el) => { el.innerHTML = verityFace(face, 32); });
   if (!V.open) return;
-  if (was !== m.face) document.getElementById('vchat')?.setAttribute('data-face', m.face);
+  if (was !== face) document.getElementById('vchat')?.setAttribute('data-face', face);
   drawTop();
   drawSide();
-  drawSulk();
 }
 
-// событие с сервера: настроение поменялось на другом устройстве
-export function verityEvent(ev: Mood) {
-  if (O?.isEnabled && !O.isEnabled()) return;
+// событие с сервера: лицо поменялось на другом устройстве
+export function verityEvent(ev: { face: Face }) {
+  if (!enabled()) return;
   if (!V.open) V.loaded = false; // переписку перечитаем при следующем открытии
-  setMood(ev);
+  setFace(ev.face);
 }
 
-const SUGGEST = ['Что ты умеешь?', 'Расскажи страшилку', 'Как построить портал в Энд?', 'Помоги с домашкой'];
+const SUGGEST = ['Что ты умеешь?', 'Как сменить пароль?', 'Как построить портал в Энд?', 'Помоги с домашкой'];
 
 // вызывается при каждой перерисовке «главной» области; разметку строим один раз, чтобы не терять набранный текст
 export function renderVerity() {
   const chat = document.getElementById('chat')!;
   if (!document.getElementById('vchat')) {
     chat.innerHTML = `
-      <div id="vchat" data-face="${V.mood.face}">
+      <div id="vchat" data-face="${V.face}">
         <div id="msgs" class="v-msgs"></div>
         <form id="send" class="v-send">
-          <div class="v-sulk" hidden></div>
+          <div class="v-stage-img" hidden></div>
           <div class="composer">
+            <button type="button" class="att-btn" id="vattach" title="Прикрепить картинку">${O.ic('image', 24)}</button>
+            <input type="file" id="vfile" accept="image/png,image/jpeg,image/webp,image/gif" hidden>
             <textarea rows="1" maxlength="2000" placeholder="Спросить Верити о чём угодно"></textarea>
             <button type="submit" class="v-go" title="Отправить">${O.ic('arrowIn', 22)}</button>
           </div>
-          <div class="v-hint">Верити — нейросеть и может ошибаться. Не груби ему.</div>
+          <div class="v-hint">Верити — нейросеть и может ошибаться.</div>
         </form>
       </div>`;
     const ta = chat.querySelector('textarea')!;
@@ -187,8 +177,15 @@ export function renderVerity() {
       const s = (e.target as HTMLElement).closest<HTMLElement>('[data-ask]');
       if (s) { ta.value = s.dataset.ask!; send(ta, grow); }
     });
+    const file = chat.querySelector<HTMLInputElement>('#vfile')!;
+    chat.querySelector('#vattach')!.addEventListener('click', () => file.click());
+    file.onchange = () => { if (file.files?.[0]) attachImage(file.files[0]); file.value = ''; ta.focus(); };
+    ta.addEventListener('paste', (e) => {
+      const img = [...(e.clipboardData?.files || [])].find((f) => f.type.startsWith('image/'));
+      if (img) { e.preventDefault(); attachImage(img); }
+    });
     drawMsgs();
-    drawSulk();
+    drawStaged();
     ta.focus();
   }
   drawTop();
@@ -199,10 +196,9 @@ function drawTop() {
   const top = document.getElementById('topbar');
   if (!top || !V.open) return;
   top.innerHTML = `
-    ${O.back}<div class="tb-title v-title"><span class="v-av">${verityFace(V.mood.face, 24)}</span><b>Верити™</b><i class="v-tag">ИИ</i>
-      <span class="v-mood m-${V.mood.face}">${MOOD[V.mood.face][0]}</span></div>
+    ${O.back}<div class="tb-title v-title"><span class="v-av">${verityFace(V.face, 24)}</span><b>Верити™</b><i class="v-tag">ИИ</i></div>
     <div class="tb-actions">
-      <button class="tb-btn ${V.showSide ? 'on' : ''}" data-act="vside" title="${V.showSide ? 'Скрыть' : 'Показать'} настроение Верити">${O.ic('account', 22)}</button>
+      <button class="tb-btn ${V.showSide ? 'on' : ''}" data-act="vside" title="${V.showSide ? 'Скрыть' : 'Показать'} Верити">${O.ic('account', 22)}</button>
     </div>`;
 }
 
@@ -212,29 +208,18 @@ export function toggleVeritySide() {
   drawSide();
 }
 
+// Справа — просто большой «портрет» Верити (его текущее лицо) и кнопка очистки. Без шкал и подписей.
 function drawSide() {
   const box = document.getElementById('profile');
   if (!box || !V.open) return;
   box.hidden = !V.showSide;
   if (box.hidden) return;
-  const { anger, face } = V.mood;
-  const [label, sub] = MOOD[face];
-  // шкала: 0% — восторг (−30), 100% — ярость
-  const pct = Math.round(((anger + 30) / 130) * 100);
-  const cool = anger > 0 ? Math.ceil(anger / 2) : 0; // сервер: −1 каждые 30 секунд
   box.innerHTML = `
-    <div class="pf v-pf" data-face="${face}">
-      <div class="v-stage">${verityFace(face, 132, 'v-big')}</div>
+    <div class="pf v-pf" data-face="${V.face}">
+      <div class="v-stage">${verityFace(V.face, 148, 'v-big')}</div>
       <div class="pc-body">
-        <div class="pc-names"><h2>Верити™</h2><div class="pc-u">Друг-помощник • DeepSeek</div></div>
-        <div class="pc-sec"><h4>Настроение</h4>
-          <div class="v-meter"><i style="left:${pct}%"></i></div>
-          <p class="v-ml m-${face}"><b>${label}</b> — ${sub}</p>
-          ${cool ? `<p class="v-cool">Остынет примерно через ${cool} мин, если не злить.</p>` : ''}
-        </div>
-        <div class="pc-sec"><h4>Обо мне</h4><p class="pc-bio">Привеет! Я Верити, твой друг-помощник! Я знаю всё — спрашивай. Только не обижай меня… я этого не люблю.</p></div>
-        <div class="pc-sec"><h4>Лица Верити</h4><div class="v-faces">${(['grin', 'smile', 'neutral', 'annoyed', 'angry', 'furious'] as Face[])
-          .map((f) => `<span class="${f === face ? 'cur' : ''}" title="${MOOD[f][0]}">${verityFace(f, 34)}</span>`).join('')}</div></div>
+        <div class="pc-names"><h2>Верити™</h2><div class="pc-u">Помощник Startrack</div></div>
+        <div class="pc-sec"><p class="pc-bio">Я знаю этот мессенджер и могу помочь почти с чем угодно: учёба, код, игры, Minecraft. Можешь прислать мне картинку — я посмотрю.</p></div>
       </div>
       <button class="pf-btn" data-act="vclear">Очистить переписку</button>
     </div>`;
@@ -253,9 +238,10 @@ function msgHtml(m: VMsg, prevRole?: string) {
   const mine = m.role === 'user';
   const me = O.me();
   const time = new Date(m.created).toLocaleTimeString('ru', { hour: '2-digit', minute: '2-digit' });
-  const body = mine ? `<p>${O.linkify(O.emojify(m.text))}</p>` : fmt(m.text);
+  const pic = m.img ? `<div class="v-sent-img"><img src="${m.img}" alt=""></div>` : '';
+  const body = pic + (mine ? (m.text ? `<p>${O.linkify(O.emojify(m.text))}</p>` : '') : fmt(m.text));
   if (prevRole === m.role) return `<div class="msg cont"><time>${time}</time>${body}</div>`;
-  const av = mine ? me.avatar(40) : verityFace(m.face || 'smile', 40);
+  const av = mine ? me.avatar(40) : verityFace(m.face || 'grin', 40);
   const name = mine ? O.esc(me.name) : 'Верити™<i class="v-tag">ИИ</i>';
   return `<div class="msg head ${mine ? '' : 'v-m'}"><span class="mav">${av}</span><div class="mh"><b>${name}</b><time>${O.stamp(m.created)}</time></div>${body}</div>`;
 }
@@ -263,9 +249,9 @@ function msgHtml(m: VMsg, prevRole?: string) {
 function drawMsgs() {
   const box = document.getElementById('msgs');
   if (!box || !V.open) return;
-  let html = `<div class="intro v-intro">${verityFace(V.mood.face, 96, 'v-big')}<h1>Верити™</h1><div class="intro-u">твой друг-помощник</div>
-    <p>Привеет! Я Верити, твой друг-помощник! Я знаю всё на свете: учёба, код, Minecraft, игры — спрашивай что угодно.
-    Только не злите меня… у меня много лиц.</p>
+  let html = `<div class="intro v-intro">${verityFace(V.face, 96, 'v-big')}<h1>Верити™</h1><div class="intro-u">помощник Startrack</div>
+    <p>Я — Верити. Я помогу тебе с учёбой, кодом, играми и самим мессенджером, а картинку, что пришлёшь, — посмотрю.
+    Отвечаю по делу и честно. Как ко мне — так и я к тебе.</p>
     ${V.msgs.length ? '' : `<div class="v-chips">${SUGGEST.map((s) => `<button type="button" data-ask="${O.esc(s)}">${O.esc(s)}</button>`).join('')}</div>`}</div>`;
   let prev: VMsg | undefined;
   for (const m of V.msgs) {
@@ -278,30 +264,49 @@ function drawMsgs() {
   box.scrollTop = box.scrollHeight;
 }
 
-let sulkTimer = 0;
-function drawSulk() {
-  clearInterval(sulkTimer);
-  const el = document.querySelector<HTMLElement>('.v-sulk');
-  const ta = document.querySelector<HTMLTextAreaElement>('#vchat textarea');
-  if (!el || !ta) return;
-  const tick = () => {
-    const left = Math.ceil((V.mood.sulk - Date.now()) / 1000);
-    el.hidden = left <= 0;
-    ta.disabled = left > 0;
-    ta.placeholder = left > 0 ? 'Верити не хочет с тобой разговаривать' : V.mood.face === 'furious' ? 'Попробуй извиниться…' : 'Спросить Верити о чём угодно';
-    if (left > 0) el.innerHTML = `${verityFace('furious', 20)} Верити обиделся и молчит… ${left} с`;
-    else clearInterval(sulkTimer);
-  };
-  tick();
-  if (V.mood.sulk > Date.now()) sulkTimer = window.setInterval(tick, 1000);
+// ---------- картинка для зрения ----------
+async function attachImage(file: File) {
+  try {
+    V.img = { url: '', data: await shrink(file) };
+    drawStaged();
+  } catch { O.toast('Не удалось прочитать картинку'); }
+}
+
+// уменьшаем до 1024px и жмём в JPEG — чтобы быстро дошло до нейросети
+function shrink(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => {
+      const scale = Math.min(1, 1024 / Math.max(img.width, img.height));
+      const c = document.createElement('canvas');
+      c.width = Math.max(1, Math.round(img.width * scale));
+      c.height = Math.max(1, Math.round(img.height * scale));
+      c.getContext('2d')!.drawImage(img, 0, 0, c.width, c.height);
+      URL.revokeObjectURL(img.src);
+      resolve(c.toDataURL('image/jpeg', 0.82));
+    };
+    img.onerror = () => { URL.revokeObjectURL(img.src); reject(new Error('bad image')); };
+    img.src = URL.createObjectURL(file);
+  });
+}
+
+function drawStaged() {
+  const box = document.querySelector<HTMLElement>('.v-stage-img');
+  if (!box) return;
+  box.hidden = !V.img;
+  box.innerHTML = V.img ? `<img src="${V.img.data}" alt=""><button type="button" class="v-unstage" title="Убрать">${O.ic('close', 14)}</button>` : '';
+  box.querySelector('.v-unstage')?.addEventListener('click', () => { V.img = null; drawStaged(); });
 }
 
 async function send(ta: HTMLTextAreaElement, grow: () => void) {
   const text = ta.value.trim();
-  if (!text || V.busy) return;
+  const img = V.img;
+  if ((!text && !img) || V.busy) return;
   ta.value = '';
   grow();
-  const mine: VMsg = { id: -Date.now(), role: 'user', text, face: null, prank: null, created: Date.now() };
+  V.img = null;
+  drawStaged();
+  const mine: VMsg = { id: -Date.now(), role: 'user', text, face: null, prank: null, created: Date.now(), img: img?.data };
   V.msgs.push(mine);
   V.busy = true;
   drawMsgs();
@@ -312,16 +317,16 @@ async function send(ta: HTMLTextAreaElement, grow: () => void) {
     online: mins < 1 ? 'меньше минуты' : mins < 60 ? `${mins} мин` : `${Math.floor(mins / 60)} ч ${mins % 60} мин`,
   };
   try {
-    const r = await O.api('/api/verity', { text, ctx }, 70000);
+    const r = await O.api('/api/verity', { text, image: img?.data, ctx }, 95000);
     V.msgs.push(r.message);
     V.busy = false;
-    setMood(r);
+    setFace(r.face);
     drawMsgs();
     if (r.prank) setTimeout(() => prank(r.prank), 900);
   } catch (err) {
     V.busy = false;
     V.msgs = V.msgs.filter((m) => m !== mine);
-    if (V.open && !ta.value) { ta.value = text; grow(); }
+    if (V.open && !ta.value) { ta.value = text; grow(); if (img) { V.img = img; drawStaged(); } }
     drawMsgs();
     O.toast((err as Error).message);
   }
@@ -329,14 +334,16 @@ async function send(ta: HTMLTextAreaElement, grow: () => void) {
 
 export async function clearVerity() {
   try {
-    setMood(await O.api('/api/verity/clear', {}));
+    const r = await O.api('/api/verity/clear', {});
     V.msgs = [];
+    setFace(r.face);
     drawMsgs();
   } catch (err) { O.toast((err as Error).message); }
 }
 
-// ---------- пакости ----------
-// Все безвредные и сами проходят: ничего не удаляют, не отправляют и не меняют настройки насовсем.
+// ---------- наказания ----------
+// Все безвредные и сами проходят: ничего не удаляют, не отправляют, не выходят за пределы приложения
+// и не меняют настройки насовсем.
 const timers: number[] = [];
 let themeTimer = 0;
 const later = (ms: number, fn: () => void) => timers.push(window.setTimeout(fn, ms));
@@ -357,13 +364,13 @@ function whisperLines() {
   const hm = new Date().toLocaleTimeString('ru', { hour: '2-digit', minute: '2-digit' });
   const mins = Math.max(1, Math.round((Date.now() - started) / 60e3));
   return [
-    `Уже ${hm}, ${name}. Почему ты ещё здесь?`,
-    `Ты сидишь в Startrack ${mins} мин. Я считал.`,
-    'Я всё ещё здесь.',
-    'Не закрывай меня.',
+    `Уже ${hm}, ${name}. Я никуда не делся.`,
+    `Ты здесь ${mins} мин. Я считаю каждую.`,
+    'Я всё вижу.',
+    'Зря ты так со мной.',
     'Что-то произойдёт через три дня.',
-    `${name}… обернись.`,
-    'Друзья так не поступают.',
+    `${name}. Я запомнил.`,
+    'Беги. Я подожду.',
     'Я знаю, где ты.',
   ].sort(() => Math.random() - 0.5);
 }
@@ -403,10 +410,10 @@ function sting() {
   } catch {}
 }
 
-if (import.meta.env.DEV) (window as any).vprank = (k: string) => prank(k); // проверка пакостей из консоли
+if (import.meta.env.DEV) (window as any).vprank = (k: string) => prank(k); // проверка наказаний из консоли
 
 export function prank(kind: string) {
-  if (O?.isEnabled && !O.isEnabled()) return;
+  if (!enabled()) return;
   const root = document.documentElement;
   switch (kind) {
     case 'glitch':

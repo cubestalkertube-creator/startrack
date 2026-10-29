@@ -6,6 +6,9 @@ on:
     tags:
       - "v*"
 
+# Linux и Windows/Android собираются ПАРАЛЛЕЛЬНО (раньше шли друг за другом),
+# отдельный job release дожидается обоих и публикует релиз. Кэш Rust и npm —
+# чтобы повторные сборки не компилировали зависимости заново.
 jobs:
   linux:
     runs-on: ubuntu-22.04
@@ -14,6 +17,8 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
+          cache: npm
+          cache-dependency-path: client/package-lock.json
       - name: Install frontend dependencies
         working-directory: ./client
         run: npm install
@@ -35,18 +40,15 @@ jobs:
           name: Startrack_Linux
           path: client/src-tauri/target/linux/*
 
-  build:
-    needs: linux
-    # без Linux-сборки релиз для Windows и Android всё равно выходит
-    if: ${{ !cancelled() }}
+  windows:
     runs-on: windows-latest
-    permissions:
-      contents: write
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 22
+          cache: npm
+          cache-dependency-path: client/package-lock.json
       - uses: actions/setup-java@v4
         with:
           distribution: 'temurin'
@@ -54,6 +56,11 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-linux-android,armv7-linux-androideabi
+      # кэш скомпилированных Rust-зависимостей и реестра cargo — главное ускорение повторных сборок
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: client/src-tauri
+          key: windows-android
       - name: Install frontend dependencies
         working-directory: ./client
         run: npm install
@@ -65,12 +72,12 @@ jobs:
           KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
         run: |
           New-Item -ItemType Directory -Path "$HOME\.tauri" -Force | Out-Null
-          
+
           # Windows updater private key
           $cleanKey = $env:KEY_CONTENT.Trim([char]0xFEFF, "`r", "`n", " ")
           $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
           [System.IO.File]::WriteAllText("$HOME\.tauri\startrack-updater.key", $cleanKey, $utf8NoBom)
-          
+
           # Android keystore
           if ($env:KEYSTORE_BASE64) {
             $b64 = $env:KEYSTORE_BASE64 -replace '[^A-Za-z0-9+/=]', ''
@@ -124,6 +131,39 @@ jobs:
           } else {
             Write-Host "No Android keystore configured, skipping APK build"
           }
+      # nsis-папку (exe + .sig) целиком — её заберёт job release, чтобы собрать latest.json
+      - name: Upload Installer Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Startrack_Windows
+          path: client/src-tauri/target/release/bundle/nsis/*
+      - name: Upload APK Artifact
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: Startrack_Android
+          path: client/src-tauri/target/android/*.apk
+
+  release:
+    needs: [linux, windows]
+    # релиз выходит, даже если Linux-сборка упала (AppImage просто не попадёт в latest.json)
+    if: ${{ !cancelled() && needs.windows.result == 'success' }}
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download Windows installer
+        uses: actions/download-artifact@v4
+        with:
+          name: Startrack_Windows
+          path: client/src-tauri/target/release/bundle/nsis
+      - name: Download APK
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: Startrack_Android
+          path: client/src-tauri/target/android
       - name: Download AppImage
         uses: actions/download-artifact@v4
         continue-on-error: true
@@ -141,7 +181,7 @@ jobs:
           $exe = "Startrack_${ver}_x64-setup.exe"
           $sig = (Get-Content "$dir/$exe.sig" -Raw).Trim()
           $notes = if (Test-Path "notes-$ver.md") { Get-Content "notes-$ver.md" -Raw } else { "Startrack $ver" }
-          
+
           $appimage = "Startrack_${ver}_x86_64.AppImage"
           $linuxDir = "src-tauri/target/linux"
           $platforms = @{
@@ -167,12 +207,12 @@ jobs:
           }
           $latest | ConvertTo-Json -Depth 5 | Set-Content "$dir/latest.json" -Encoding utf8
           Set-Content "$dir/release-notes.md" -Value $notes -Encoding utf8
-          
+
           $apk = "src-tauri/target/android/Startrack_${ver}.apk"
           $files = @("$dir/$exe", "$dir/$exe.sig", "$dir/latest.json")
           if (Test-Path $apk) { $files += $apk }
           if (Test-Path "$linuxDir/$appimage.sig") { $files += "$linuxDir/$appimage", "$linuxDir/$appimage.sig" }
-          
+
           $rel = gh release view "v$ver" 2>&1
           if ($LASTEXITCODE -eq 0) {
             gh release upload "v$ver" $files --clobber
@@ -180,14 +220,3 @@ jobs:
           } else {
             gh release create "v$ver" $files --title "Startrack $ver" --notes-file "$dir/release-notes.md"
           }
-      - name: Upload Installer Artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: Startrack_Windows
-          path: client/src-tauri/target/release/bundle/nsis/*.exe
-      - name: Upload APK Artifact
-        uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: Startrack_Android
-          path: client/src-tauri/target/android/*.apk

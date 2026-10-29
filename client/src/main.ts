@@ -12,7 +12,7 @@ import { closePicker, emojify, isJumbo, loadEmoji, noteUsed, openPicker as openE
 import { decodeGif, encodeGif } from './gif';
 import { BUILTIN, SB_MAX_SEC, cutWav, decodeFile, playSound, preload, preview, sbVol, setSbVol, stopSounds, type SbSound } from './soundboard';
 import { SFX_GROUPS, setSfxOn, setSfxOutput, setSfxVol, sfx, sfxLoop, sfxOn, sfxVol, type SfxGroup } from './sounds';
-import { clearVerity, closeVerity, initVerity, openVerity, renderVerity, resetVerity, stopPranks, toggleVeritySide, verityEvent, verityFace, verityOpen, verityRow, MOOD, type Face } from './verity';
+import { clearVerity, closeVerity, initVerity, openVerity, renderVerity, resetVerity, stopPranks, toggleVeritySide, verityEvent, verityFace, verityOpen, verityRow } from './verity';
 import { initWatch, watchDeaf, watchJoined, watchMount, watchOn, watchOnData, watchReset, watchStart } from './watch';
 
 // offline — так другие видят «невидимку»
@@ -3643,16 +3643,8 @@ function renderSettingsTab() {
 
       ${on ? `
         <div class="v-settings-details">
-          <h3>Эмоции и характер</h3>
-          <p class="set-hint">Верити реагирует на тон ваших сообщений и меняет своё лицо в зависимости от того, как вы с ним общаетесь:</p>
-          <div class="v-settings-faces">
-            ${(['grin', 'smile', 'neutral', 'annoyed', 'angry', 'furious'] as Face[]).map((f) => `
-              <div class="v-face-pill">
-                ${verityFace(f, 36)}
-                <span>${MOOD[f][0]}</span>
-              </div>
-            `).join('')}
-          </div>
+          <h3>О Верити</h3>
+          <p class="set-hint">Знает мессенджер и помогает по делу: учёба, код, игры, Minecraft, вопросы про Startrack. Можно прислать ему картинку — он посмотрит. А какой у него характер… узнаете сами.</p>
 
           <h3 style="margin-top:24px;">Управление беседой</h3>
           <p class="set-hint">Если вы хотите начать диалог с чистого листа, можно сбросить историю сообщений.</p>
