@@ -171,7 +171,13 @@ export function verityEvent(ev: { face: Face }) {
 export type PcMode = 'off' | 'ask' | 'auto';
 export async function pcInfo(): Promise<{ mode: PcMode; workspace: string } | null> {
   if (!O.pc) return null;
-  if (!V.pc) V.pc = await O.pc.invoke('verity_pc').catch(() => null);
+  if (!V.pc) {
+    // Linux-версия (CEF) и старые сборки этих команд не знают — тогда рук у Верити нет
+    const r = await O.pc.invoke('verity_pc').catch(() => null);
+    if (typeof r?.workspace !== 'string' || !r.workspace) return null;
+    V.pc = r;
+    if (V.open) { drawMsgs(); drawSide(); }
+  }
   return V.pc;
 }
 export async function setPcMode(mode: PcMode): Promise<PcMode> {
@@ -179,7 +185,7 @@ export async function setPcMode(mode: PcMode): Promise<PcMode> {
   if (V.pc) V.pc.mode = m;
   return m;
 }
-const pcOn = () => !!O.pc && V.pc?.mode !== 'off';
+const pcOn = () => !!V.pc && V.pc.mode !== 'off';
 
 const SUGGEST = ['Что ты умеешь?', 'Как сменить пароль?', 'Что нового в мире сегодня?', 'Помоги с домашкой'];
 const SUGGEST_PC = ['Что ты умеешь?', 'Напиши игру «Змейка» на Python и запусти', 'Открой калькулятор', 'Что лежит у меня на рабочем столе?'];
@@ -288,7 +294,7 @@ function drawSide() {
         <div class="pc-sec">
           <p class="pc-bio">${pers 
             ? 'Я знаю этот мессенджер и могу помочь почти с чем угодно: учёба, код, игры, Minecraft. Кидай фото, видео, аудио, файлы и ссылки — разберусь. Как ко мне — так и я к тебе.'
-            : 'Я — Верити в спокойном режиме. Отвечаю на любые вопросы по учёбе, коду, играм и Startrack, без сарказма, смены настроения и розыгрышей. Кидай фото, видео, файлы и ссылки.'}${O.pc ? ' На компьютере могу писать и запускать код, открывать программы и работать с файлами.' : ''}</p>
+            : 'Я — Верити в спокойном режиме. Отвечаю на любые вопросы по учёбе, коду, играм и Startrack, без сарказма, смены настроения и розыгрышей. Кидай фото, видео, файлы и ссылки.'}${V.pc ? ' На компьютере могу писать и запускать код, открывать программы и работать с файлами.' : ''}</p>
         </div>
       </div>
       <button class="pf-btn" data-act="vclear">Очистить переписку</button>
@@ -303,7 +309,7 @@ const codeKey = (c: { lang: string; code: string }) => c.lang + '\n' + c.code;
 function codeBlock(lang: string, code: string) {
   const i = codes.push({ lang, code }) - 1;
   const out = V.outs.get(codeKey(codes[i]));
-  const run = O.pc && RUNNABLE.test(lang)
+  const run = V.pc && RUNNABLE.test(lang)
     ? `<button type="button" data-vcode="${i}" data-do="run" title="Запустить и показать вывод">${O.ic('play', 14)}Запустить</button>
        ${/^html?$/i.test(lang) ? '' : `<button type="button" data-vcode="${i}" data-do="term" title="Запустить в отдельном окне (если программа ждёт ввода)">Окно</button>`}`
     : '';
@@ -332,7 +338,7 @@ async function codeAct(i: number, act: string) {
     try { await navigator.clipboard.writeText(c.code); O.toast('Код скопирован'); } catch { O.toast('Не удалось скопировать'); }
     return;
   }
-  if (!O.pc) return;
+  if (!O.pc || !V.pc) return;
   const key = codeKey(c);
   const show = (text: string) => {
     V.outs.set(key, text);
@@ -398,7 +404,7 @@ function drawMsgs() {
   const sug = pcOn() ? SUGGEST_PC : SUGGEST;
   let html = `<div class="intro v-intro">${verityFace(V.face, 96, 'v-big')}<h1>Верити™</h1><div class="intro-u">помощник Startrack</div>
     <p>Я — Верити. Помогу с учёбой, кодом, играми и самим мессенджером. Кидай фото, видео, аудио, файлы и ссылки — разберусь.
-    ${O.pc ? 'Код я могу сам написать, запустить и проверить, открыть нужную программу или найти файл у тебя на компьютере.' : ''}
+    ${V.pc ? 'Код я могу сам написать, запустить и проверить, открыть нужную программу или найти файл у тебя на компьютере.' : ''}
     Отвечаю по делу и честно. Как ко мне — так и я к тебе.</p>
     ${V.msgs.length ? '' : `<div class="v-chips">${sug.map((s) => `<button type="button" data-ask="${O.esc(s)}">${O.esc(s)}</button>`).join('')}</div>`}</div>`;
   let prev: VMsg | undefined;
@@ -444,7 +450,7 @@ async function addFiles(list: File[]) {
       } else if (f.type.startsWith('text/') || /json|xml|javascript/.test(f.type) || TEXT_EXT.test(f.name)) {
         if (f.size > 1e6) { O.toast(`«${f.name}»: текстовый файл больше 1 МБ — слишком длинный`); continue; }
         V.att.push({ kind: 'text', name: f.name, size: 0, text: await f.text() });
-      } else O.toast(`«${f.name}»: такие файлы Верити пока не открывает${O.pc ? ' — но может прочитать его с диска, если скажешь путь' : ''}`);
+      } else O.toast(`«${f.name}»: такие файлы Верити пока не открывает${V.pc ? ' — но может прочитать его с диска, если скажешь путь' : ''}`);
     } catch { O.toast(`Не удалось прочитать «${f.name}»`); }
   }
   let total = 0;

@@ -3723,6 +3723,7 @@ function renderSettingsTab() {
           <h3>Что умеет</h3>
           <p class="set-hint">Можно прислать ему фото, видео, аудио, документы и ссылки — он посмотрит и сам сходит по ссылке, а свежее найдёт в интернете.</p>
           ${!ANDROID && tauri ? `
+          <div id="vPcSec" hidden>
           <h3 style="margin-top:24px;">Доступ к компьютеру</h3>
           <p class="set-hint">Верити может работать на этом компьютере как ассистент-программист: писать и запускать код, выполнять команды, открывать программы, файлы и сайты. В своей рабочей папке он хозяйничает сам, а всё остальное делает только после «Разрешить» в системном окне.</p>
           <div class="v-pc-modes" id="vPcModes">
@@ -3730,7 +3731,8 @@ function renderSettingsTab() {
             <label><input type="radio" name="vpc" value="ask"><span><b>Спрашивать</b>Каждое действие вне рабочей папки — с твоего разрешения</span></label>
             <label><input type="radio" name="vpc" value="auto"><span><b>Без вопросов</b>Делает всё, о чём попросишь, сразу. Только если доверяешь</span></label>
           </div>
-          <p class="set-hint" id="vPcWs"></p>` : ''}
+          <p class="set-hint" id="vPcWs"></p>
+          </div>` : ''}
 
 
           <h3 style="margin-top:24px;">Управление беседой</h3>
@@ -3779,6 +3781,7 @@ function renderSettingsTab() {
       const show = (m: string) => modes.querySelectorAll<HTMLInputElement>('input').forEach((i) => { i.checked = i.value === m; });
       pcInfo().then((pc) => {
         if (!pc) return;
+        document.getElementById('vPcSec')!.hidden = false;
         show(pc.mode);
         const ws = document.getElementById('vPcWs')!;
         ws.innerHTML = `Рабочая папка: <code>${esc(pc.workspace)}</code> <button class="btn sec" id="vPcOpen">Открыть</button>`;
