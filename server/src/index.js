@@ -8,6 +8,7 @@ import { pipeline } from 'node:stream/promises';
 import { DatabaseSync } from 'node:sqlite';
 import { WebSocketServer } from 'ws';
 import { AccessToken, RoomServiceClient } from 'livekit-server-sdk';
+import { initVerity } from './verity.js';
 
 const PORT = Number(process.env.PORT || 8080);
 const DATA_DIR = process.env.DATA_DIR || './data';
@@ -507,8 +508,29 @@ function friendsView(userId) {
   return out;
 }
 
+// --- Верити ---
+// что ИИ-помощник «знает» о собеседнике — для жутковатых фактов, когда злится (без имён друзей)
+const factsQ = db.prepare(`SELECT
+  (SELECT COUNT(*) FROM friends WHERE (a = $id OR b = $id) AND status = 'accepted') AS friends,
+  (SELECT COUNT(*) FROM group_members WHERE uid = $id) AS grps,
+  (SELECT COUNT(*) FROM messages WHERE sender = $id AND kind IS NULL) AS messages`);
+function userFacts(id) {
+  const u = q.userById.get(id);
+  const n = factsQ.get({ id });
+  const days = Math.floor((Date.now() - u.created) / 864e5);
+  return [
+    `Имя: ${u.display || u.username} (ник ${u.username})`,
+    `В Startrack ${days ? days + ' дн.' : 'с сегодняшнего дня'}`,
+    `Друзей: ${n.friends}, групп: ${n.grps}, отправил сообщений: ${n.messages}`,
+    u.custom && `Его статус: «${u.custom}»`,
+    gameOf(id) && `Сейчас играет в ${gameOf(id).name}`,
+  ].filter(Boolean);
+}
+const verity = initVerity(db, { addColumn, push, userFacts });
+
 // --- http ---
 const routes = {
+  ...verity.routes,
   'POST /api/register': async (_u, b) => {
     const username = String(b.username || '').trim();
     if (!/^[\p{L}\d_.-]{2,32}$/u.test(username)) throw [400, 'Ник: 2-32 символа, буквы/цифры/_.-'];
@@ -1189,6 +1211,7 @@ function deleteUser(u) {
     qa.delUserFiles.run(u.id, u.id);
     qa.delUserGifs.run(u.id);
     qa.delUserSounds.run(u.id);
+    verity.drop(u.id);
     qa.delUserRels.run(u.id, u.id);
     for (const g of groups) {
       q.delMember.run(g.id, u.id);

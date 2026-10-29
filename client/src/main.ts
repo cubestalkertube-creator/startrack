@@ -8,6 +8,7 @@ import { closePicker, emojify, isJumbo, loadEmoji, noteUsed, openPicker as openE
 import { decodeGif, encodeGif } from './gif';
 import { BUILTIN, SB_MAX_SEC, cutWav, decodeFile, playSound, preload, preview, sbVol, setSbVol, stopSounds, type SbSound } from './soundboard';
 import { SFX_GROUPS, setSfxOn, setSfxOutput, setSfxVol, sfx, sfxLoop, sfxOn, sfxVol, type SfxGroup } from './sounds';
+import { clearVerity, closeVerity, initVerity, openVerity, renderVerity, resetVerity, toggleVeritySide, verityEvent, verityOpen, verityRow } from './verity';
 import { initWatch, watchDeaf, watchJoined, watchMount, watchOn, watchOnData, watchReset, watchStart } from './watch';
 
 // offline — так другие видят «невидимку»
@@ -106,10 +107,11 @@ const THEMES: ThemeDef[] = [
 
 const curTheme = () => store.get('theme') || 'dark';
 
-function applyTheme(id: string) {
+// persist: false — временно (пакость Верити), выбранная пользователем тема остаётся в настройках
+function applyTheme(id: string, persist = true) {
   const t = THEMES.find((x) => x.id === id) || THEMES.find((x) => x.id === 'dark') || THEMES[0];
   const root = document.documentElement;
-  store.set('theme', t.id);
+  if (persist) store.set('theme', t.id);
 
   if (t.id === 'custom') {
     let cust = { c1: '#4a00e0', c2: '#8e2de2', mode: 'dark' };
@@ -422,6 +424,7 @@ function logout() {
   S.groups = [];
   S.msgs.clear();
   S.unread.clear();
+  resetVerity();
   store.set('token', '');
   const ws = S.ws;
   S.ws = null;
@@ -472,6 +475,12 @@ function start(me: User) {
     const c = conv();
     if (c && e.dataTransfer?.files.length) stageFiles(e.dataTransfer.files);
   };
+  initVerity({
+    api, toast, esc, ic, emojify, linkify, stamp, back: BACK,
+    me: () => ({ name: uname(S.me!), avatar: (size) => avatar(S.me!, size) }),
+    setTheme: (id) => applyTheme(id ?? curTheme(), false),
+    os: () => ANDROID ? 'Android' : OS_NAME === 'Windows' ? 'Windows' : 'Linux',
+  });
   renderFriends();
   renderChat();
   renderUserbar();
@@ -506,6 +515,17 @@ async function act(b: HTMLElement) {
       return;
     }
     case 'home': goHome(); return mpane(true);
+    case 'verity':
+      S.peer = null;
+      S.gid = 0;
+      clearStaged();
+      openVerity();
+      mpane(true);
+      return renderFriends();
+    case 'vside': return toggleVeritySide();
+    case 'vclear':
+      if (await confirmDlg('Очистить переписку с Верити', 'Верити забудет весь разговор. Но не обиду.', 'Очистить')) clearVerity();
+      return;
     case 'tab': S.tab = b.dataset.tab as Tab; goHome(); return mpane(true);
     case 'back': return mpane(false);
     case 'open': { const u = friend(id); return u && openChat(u); }
@@ -597,6 +617,7 @@ function mpane(main: boolean) {
 window.addEventListener('popstate', () => document.querySelector('.app')?.classList.remove('m-main'));
 
 function goHome() {
+  closeVerity();
   S.peer = null;
   S.gid = 0;
   renderFriends();
@@ -646,7 +667,7 @@ function renderFriends() {
   const pill = $('#reqn');
   pill.hidden = !n;
   pill.textContent = String(n);
-  $('#navfr').classList.toggle('sel', !conv());
+  $('#navfr').classList.toggle('sel', !conv() && !verityOpen());
   renderDmList();
   renderRail();
   if (!conv()) return renderHome();
@@ -660,7 +681,7 @@ function renderDmList() {
   const has = (s: string) => !S.filter || s.toLowerCase().includes(S.filter);
   const groups = S.groups.filter((g) => has(gname(g)));
   const list = S.friends.friends.filter((u) => has(u.username) || has(uname(u)));
-  $('#flist').innerHTML = groups.map((g) => {
+  $('#flist').innerHTML = verityRow(S.filter) + (groups.map((g) => {
     const unread = S.unread.get('g' + g.id) || 0;
     const sub = C.state !== 'idle' && C.gid === g.id ? `<small class="incall">${ic('volume', 12)}В звонке</small>`
       : g.call.length ? `<small class="incall">${ic('volume', 12)}Звонок: ${g.call.length}</small>`
@@ -683,7 +704,7 @@ function renderDmList() {
         <div class="dm-n"><span>${esc(uname(u))}</span>${sub}</div>
         ${unreadPill(unread)}
       </div>`;
-  }).join('') || `<div class="muted">${S.filter ? 'Никого не нашлось' : 'Пока никого — добавьте друга'}</div>`;
+  }).join('') || `<div class="muted">${S.filter ? 'Никого не нашлось' : 'Пока никого — добавьте друга'}</div>`);
 }
 
 const plural = (n: number, one: string, few: string, many: string) =>
@@ -775,6 +796,7 @@ function hScroll(el: HTMLElement | null, prevLeft = 0) {
 
 // ---------- страница «Друзья» ----------
 function renderHome() {
+  if (verityOpen()) return renderVerity();
   const { friends, incoming, outgoing } = S.friends;
   const prevScroll = document.querySelector<HTMLElement>('.tb-tabs')?.scrollLeft ?? 0;
   const tab = (t: Tab, title: string, n = 0) =>
@@ -867,6 +889,7 @@ function openGroup(id: number) {
 async function openConv() {
   const c = conv();
   if (!c) return goHome();
+  closeVerity();
   clearStaged();
   mpane(true);
   S.unread.delete(c.key);
@@ -1467,6 +1490,7 @@ document.addEventListener('drop', (e) => e.preventDefault());
 
 // Профиль собеседника справа (во время звонка с ним прячется, как в Discord), в группе — участники
 function renderProfile() {
+  if (verityOpen()) return; // справа — настроение Верити, его рисует verity.ts
   const box = document.getElementById('profile');
   const p = S.peer;
   if (!box) return;
@@ -1995,6 +2019,7 @@ function notifyMsg(m: Msg) {
 
 function onEvent(ev: any) {
   switch (ev.type) {
+    case 'verity': return verityEvent(ev);
     case 'message': {
       const m: Msg = ev.msg;
       const key = msgKey(m);

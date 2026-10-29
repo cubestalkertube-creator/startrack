@@ -107,6 +107,7 @@ WorkingDirectory=/opt/startrack/server
 Environment=HOST=127.0.0.1 PORT=${API_PORT} DATA_DIR=/opt/startrack/data APP_SECRET=${APP_SECRET}
 Environment=LIVEKIT_URL=wss://${DOMAIN} LIVEKIT_API_KEY=${LK_KEY} LIVEKIT_API_SECRET=${LK_SECRET}
 Environment=ADMIN_TOKEN=${ADMIN_TOKEN} ADMIN_PORT=${ADMIN_PORT:-8081}
+Environment=POLZA_API_KEY=${POLZA_API_KEY:-}
 ExecStart=/opt/startrack/node/bin/node src/index.js
 Restart=always
 [Install]
