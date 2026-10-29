@@ -12,7 +12,7 @@ import { closePicker, emojify, isJumbo, loadEmoji, noteUsed, openPicker as openE
 import { decodeGif, encodeGif } from './gif';
 import { BUILTIN, SB_MAX_SEC, cutWav, decodeFile, playSound, preload, preview, sbVol, setSbVol, stopSounds, type SbSound } from './soundboard';
 import { SFX_GROUPS, setSfxOn, setSfxOutput, setSfxVol, sfx, sfxLoop, sfxOn, sfxVol, type SfxGroup } from './sounds';
-import { clearVerity, closeVerity, initVerity, openVerity, renderVerity, resetVerity, stopPranks, toggleVeritySide, verityEvent, verityFace, verityOpen, verityRow } from './verity';
+import { clearVerity, closeVerity, initVerity, openVerity, pcInfo, renderVerity, resetVerity, setPcMode, stopPranks, toggleVeritySide, verityEvent, verityFace, verityOpen, verityRow } from './verity';
 import { initWatch, watchDeaf, watchJoined, watchMount, watchOn, watchOnData, watchReset, watchStart } from './watch';
 
 // offline — так другие видят «невидимку»
@@ -488,6 +488,7 @@ function start(me: User) {
     setTheme: (id) => applyTheme(id ?? curTheme(), false),
     os: () => ANDROID ? 'Android' : OS_NAME === 'Windows' ? 'Windows' : 'Linux',
     isEnabled: () => verityOn(),
+    pc: !ANDROID && tauri ? tauri : null,
   });
   renderFriends();
   renderChat();
@@ -3644,7 +3645,17 @@ function renderSettingsTab() {
       ${on ? `
         <div class="v-settings-details">
           <h3>О Верити</h3>
-          <p class="set-hint">Знает мессенджер и помогает по делу: учёба, код, игры, Minecraft, вопросы про Startrack. Можно прислать ему картинку — он посмотрит. А какой у него характер… узнаете сами.</p>
+          <p class="set-hint">Знает мессенджер и помогает по делу: учёба, код, игры, Minecraft, вопросы про Startrack. Можно прислать ему фото, видео, аудио, документы и ссылки — он посмотрит и сам сходит по ссылке. А какой у него характер… узнаете сами.</p>
+
+          ${!ANDROID && tauri ? `
+          <h3 style="margin-top:24px;">Доступ к компьютеру</h3>
+          <p class="set-hint">Верити может работать на этом компьютере как ассистент-программист: писать и запускать код, выполнять команды, открывать программы, файлы и сайты. В своей рабочей папке он хозяйничает сам, а всё остальное делает только после «Разрешить» в системном окне.</p>
+          <div class="v-pc-modes" id="vPcModes">
+            <label><input type="radio" name="vpc" value="off"><span><b>Выключен</b>Только переписка: ничего на компьютере не делает</span></label>
+            <label><input type="radio" name="vpc" value="ask"><span><b>Спрашивать</b>Каждое действие вне рабочей папки — с твоего разрешения</span></label>
+            <label><input type="radio" name="vpc" value="auto"><span><b>Без вопросов</b>Делает всё, о чём попросишь, сразу. Только если доверяешь</span></label>
+          </div>
+          <p class="set-hint" id="vPcWs"></p>` : ''}
 
           <h3 style="margin-top:24px;">Управление беседой</h3>
           <p class="set-hint">Если вы хотите начать диалог с чистого листа, можно сбросить историю сообщений.</p>
@@ -3675,6 +3686,26 @@ function renderSettingsTab() {
         renderFriends();
         renderChat();
         renderSettingsTab();
+      };
+    }
+
+    const modes = document.getElementById('vPcModes');
+    if (modes) {
+      const show = (m: string) => modes.querySelectorAll<HTMLInputElement>('input').forEach((i) => { i.checked = i.value === m; });
+      pcInfo().then((pc) => {
+        if (!pc) return;
+        show(pc.mode);
+        const ws = document.getElementById('vPcWs')!;
+        ws.innerHTML = `Рабочая папка: <code>${esc(pc.workspace)}</code> <button class="btn sec" id="vPcOpen">Открыть</button>`;
+        ws.querySelector('#vPcOpen')!.addEventListener('click', () => tauri.invoke('reveal_file', { path: pc.workspace }).catch(() => {}));
+      });
+      modes.onchange = async (e) => {
+        const want = (e.target as HTMLInputElement).value as 'off' | 'ask' | 'auto';
+        try {
+          const got = await setPcMode(want);
+          show(got);
+          toast(got === 'off' ? 'Верити больше не трогает компьютер' : got === 'ask' ? 'Верити будет спрашивать разрешение' : want === got ? 'Верити работает без вопросов' : 'Оставил как было');
+        } catch (err) { toast(String(err)); pcInfo().then((pc) => pc && show(pc.mode)); }
       };
     }
 

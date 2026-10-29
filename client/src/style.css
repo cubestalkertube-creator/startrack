@@ -1290,3 +1290,47 @@ small b, .fr-n span b { font-weight: 600; color: var(--text); }
 .v-unstage:hover { background: var(--red); }
 .v-sent-img { margin-bottom: 4px; }
 .v-sent-img img { max-height: 280px; max-width: min(100%, 420px); border-radius: 10px; display: block; }
+
+/* Верити: вложения, шаги работы, блоки кода с запуском */
+.v-staged { display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 8px; }
+.v-staged[hidden] { display: none; }
+.v-chip-att { position: relative; display: flex; align-items: center; gap: 6px; height: 64px; max-width: 220px; padding: 0 12px; border-radius: 10px; background: var(--card); border: 1px solid var(--line2); color: var(--text); font-size: 13px; }
+.v-chip-att span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.v-chip-att.pic { padding: 0; overflow: visible; }
+.v-chip-att.pic img { height: 64px; max-width: 140px; border-radius: 10px; display: block; object-fit: cover; }
+.v-chip-att .v-play { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); width: 28px; height: 28px; border-radius: 50%; background: rgba(0, 0, 0, .6); color: #fff; display: grid; place-items: center; }
+.v-sent-img { display: flex; flex-wrap: wrap; gap: 6px; }
+.v-sent-img img + img { max-height: 140px; }
+.v-sent-files { display: flex; flex-wrap: wrap; gap: 6px; margin: 2px 0 4px; }
+.v-sent-files span { display: inline-flex; align-items: center; gap: 5px; padding: 4px 9px; border-radius: 8px; background: var(--card); border: 1px solid var(--line2); font-size: 13px; color: var(--text); }
+.v-steps { margin: 4px 0 6px; padding: 6px 10px; border-radius: 8px; background: var(--deep); border: 1px solid var(--line2); font-size: 13px; max-width: 760px; }
+.v-steps summary { cursor: pointer; color: var(--muted); user-select: none; }
+.v-steps[open] summary { margin-bottom: 4px; }
+.v-step { display: flex; align-items: flex-start; gap: 7px; padding: 2px 0; color: var(--text); word-break: break-word; }
+.v-step svg { flex: none; margin-top: 2px; color: #57f287; }
+.v-step.bad svg, .v-step.bad { color: #ff7a6a; }
+.v-step.now { color: var(--muted); }
+.v-step span { font-family: Consolas, "Cascadia Mono", monospace; font-size: 12.5px; }
+.v-steps .v-out { margin: 2px 0 6px 21px; }
+.v-cb { margin: 6px 0; max-width: 860px; }
+.v-cbh { display: flex; align-items: center; gap: 4px; padding: 4px 6px 4px 12px; border: 1px solid var(--line2); border-bottom: 0; border-radius: 6px 6px 0 0; background: var(--card); font-size: 12px; color: var(--muted); }
+.v-cbh span { flex: 1; text-transform: lowercase; }
+.v-cbh button { display: inline-flex; align-items: center; gap: 4px; padding: 3px 8px; border-radius: 5px; color: var(--text); font-size: 12px; }
+.v-cbh button:hover { background: var(--hover); }
+.v-cbh button[data-do="run"] { color: #2a2000; background: #f5c800; font-weight: 600; }
+.v-cbh button[data-do="run"]:hover { background: #ffd83a; }
+.v-cb .v-code { margin: 0; border-radius: 0 0 6px 6px; }
+.v-out { margin: 0; padding: 8px 12px; max-height: 320px; overflow: auto; white-space: pre-wrap; word-break: break-word; font-family: Consolas, "Cascadia Mono", monospace; font-size: 12.5px; color: #c8ccd2; background: #0c0d0f; border: 1px solid var(--line2); border-top: 0; border-radius: 0 0 6px 6px; user-select: text; }
+.v-steps .v-out { border-top: 1px solid var(--line2); border-radius: 6px; max-height: 200px; }
+.v-cb .v-code + .v-out { border-radius: 0 0 6px 6px; }
+.v-cb:has(.v-out) .v-code { border-radius: 0; }
+.v-stop { display: inline-flex; align-items: center; gap: 4px; margin-left: 8px; padding: 2px 9px; border-radius: 10px; border: 1px solid var(--line2); color: var(--muted); font-size: 12px; vertical-align: middle; }
+.v-stop:hover { color: #fff; background: var(--red); border-color: var(--red); }
+.v-pc-modes { display: grid; gap: 8px; margin: 10px 0; }
+.v-pc-modes label { display: flex; gap: 10px; align-items: flex-start; padding: 10px 12px; border-radius: 10px; background: var(--chat); border: 1px solid var(--line2); cursor: pointer; }
+.v-pc-modes label:has(input:checked) { border-color: #f5c800; box-shadow: 0 0 0 1px #f5c800 inset; }
+.v-pc-modes input { margin-top: 3px; accent-color: #f5c800; }
+.v-pc-modes span { font-size: 13px; color: var(--muted); }
+.v-pc-modes b { display: block; color: var(--head); font-size: 14px; margin-bottom: 2px; }
+#vPcWs code { font-size: 12px; padding: 1px 5px; border-radius: 4px; background: var(--deep); }
+#vPcWs .btn { margin-left: 6px; padding: 3px 10px; font-size: 12px; }

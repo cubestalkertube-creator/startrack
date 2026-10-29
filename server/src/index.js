@@ -1039,11 +1039,16 @@ const server = http.createServer(async (req, res) => {
   try {
     let body = {};
     if (req.method === 'POST') {
-      let raw = '';
+      // Верити принимает картинки, аудио и видео прямо в JSON — ему лимит побольше
+      const max = url.pathname.startsWith('/api/verity') ? 60e6 : 1e5;
+      const chunks = [];
+      let n = 0;
       for await (const chunk of req) {
-        raw += chunk;
-        if (raw.length > 1e5) throw [413, 'Слишком большой запрос'];
+        n += chunk.length;
+        if (n > max) throw [413, 'Слишком большой запрос'];
+        chunks.push(chunk);
       }
+      const raw = Buffer.concat(chunks).toString('utf8');
       body = raw ? JSON.parse(raw) : {};
     }
     const open = url.pathname === '/api/register' || url.pathname === '/api/login';

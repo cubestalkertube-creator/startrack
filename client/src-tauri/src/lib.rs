@@ -6,6 +6,8 @@ mod download;
 mod games;
 #[cfg(desktop)]
 mod update;
+#[cfg(desktop)]
+mod verity;
 
 #[cfg(desktop)]
 use tauri::Manager;
@@ -63,7 +65,9 @@ fn desktop() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_dialog::init())
         .manage(update::Pending::default())
+        .manage(verity::State::default())
         .invoke_handler(tauri::generate_handler![
             route_adapter,
             notify,
@@ -72,7 +76,10 @@ fn desktop() {
             running_procs,
             update::update_check,
             update::update_install,
-            update::update_progress
+            update::update_progress,
+            verity::verity_pc,
+            verity::verity_set_mode,
+            verity::verity_tool
         ])
         .setup(|app| {
             // Домены сервера направляем на локальный обход VPN (или хотя бы прямо на IP, минуя DNS)

@@ -46,6 +46,9 @@ pub fn reveal_file(path: String) {
             let _ = std::process::Command::new("explorer")
                 .raw_arg(format!("/select,\"{path}\""))
                 .spawn();
+        } else if Path::new(&path).is_dir() {
+            // папка (рабочая папка Верити из настроек) — просто открываем её
+            let _ = std::process::Command::new("explorer").raw_arg(format!("\"{path}\"")).spawn();
         }
     }
     #[cfg(not(windows))]
