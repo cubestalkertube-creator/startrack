@@ -1522,7 +1522,7 @@ dependencies = [
 
 [[package]]
 name = "serde_repr"
-version = "0.1.22"
+version = "0.1.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8d3b1629de253c70a0508c3899572da79ca359fdab27c7920ff00406df418906"
 dependencies = [
@@ -1589,7 +1589,7 @@ checksum = "6ce2be8dc25455e1f91df71bfa12ad37d7af1092ae736f3a6cd0e37bc7810596"
 
 [[package]]
 name = "startrack"
-version = "0.1.22"
+version = "0.1.23"
 dependencies = [
  "base64 0.22.1",
  "cef",
