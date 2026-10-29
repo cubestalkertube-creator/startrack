@@ -130,6 +130,23 @@ function stepLabel(name, a) {
 
 const args = (c) => { try { return JSON.parse(c.function.arguments || '{}') || {}; } catch { return {}; } };
 
+// Спокойный режим (личность выключена в настройках): тот же помощник с теми же руками, но без роли, злости и пакостей
+function calmSystemPrompt(work) {
+  return `Ты — Верити™ (Verity), умный, вежливый и полезный ИИ-помощник внутри мессенджера Startrack.
+Режим: спокойный ассистент (личность и хоррор-роль отключены пользователем).
+Ты отлично отвечаешь на любые вопросы: учёба, программирование, игры, Minecraft, наука, технологии и повседневные темы.
+${SUPPORT}
+
+${work.pc ? WORK_PC(work.ws, work.os) : WORK_NOPC}
+
+${WEB}
+
+Пиши по-русски (или на языке собеседника), точно, доброжелательно, понятно и структурированно. Код оформляй в тройных кавычках \`\`\`.
+Когда сделал что-то на компьютере — коротко скажи, что сделал и что получилось. Служебные пометки «(мои действия: …)» в истории — только для тебя, не повторяй их.
+Всегда будь дружелюбен и готов помочь, без обид, без злости и без розыгрышей.
+Каждый твой шаг — вызов инструмента. Закончив, вызови answer: reply — ответ, delta = 0, prank = "none".`;
+}
+
 export function initVerity(db, { addColumn, push, userFacts }) {
   db.exec(`
     -- переписка с Верити; role: user | verity
@@ -262,14 +279,21 @@ export function initVerity(db, { addColumn, push, userFacts }) {
   function finish(uid, t, o) {
     turns.delete(uid);
     const now = Date.now();
-    const delta = Math.max(-100, Math.min(40, Math.round(Number(o.delta) || 0)));
-    const anger = Math.max(MIN_ANGER, Math.min(MAX_ANGER, t.mood.anger + delta));
-    // наказание: только когда уже зол, собеседник его разозлил ещё сильнее и не слишком часто
-    let prank = PRANKS.includes(o.prank) ? o.prank : null;
-    if (anger < 50 || delta <= 0 || now - t.mood.prankAt < PRANK_GAP) prank = null;
-    else if (!prank && anger >= 85 && Math.random() < 0.75) prank = PRANKS[Math.floor(Math.random() * PRANKS.length)];
-    vq.setState.run(anger, now, prank ? now : t.mood.prankAt || null, uid);
-    const face = faceOf(anger);
+    let anger = 0;
+    let prank = null;
+    let face = 'smile';
+    if (t.personality) {
+      const delta = Math.max(-100, Math.min(40, Math.round(Number(o.delta) || 0)));
+      anger = Math.max(MIN_ANGER, Math.min(MAX_ANGER, t.mood.anger + delta));
+      // наказание: только когда уже зол, собеседник его разозлил ещё сильнее и не слишком часто
+      prank = PRANKS.includes(o.prank) ? o.prank : null;
+      if (anger < 50 || delta <= 0 || now - t.mood.prankAt < PRANK_GAP) prank = null;
+      else if (!prank && anger >= 85 && Math.random() < 0.75) prank = PRANKS[Math.floor(Math.random() * PRANKS.length)];
+      vq.setState.run(anger, now, prank ? now : t.mood.prankAt || null, uid);
+      face = faceOf(anger);
+    } else {
+      vq.setState.run(0, now, null, uid); // при выключенной личности сбрасываем злость и не наказываем
+    }
     const reply = String(o.reply || '').trim() || '…';
     const steps = t.steps.length ? t.steps : undefined;
     const id = Number(vq.add.run(uid, 'verity', reply, face, prank, steps ? JSON.stringify(steps) : null, now).lastInsertRowid);
@@ -324,7 +348,7 @@ export function initVerity(db, { addColumn, push, userFacts }) {
     },
     // b.text — сообщение; b.images — data-URL картинок (и кадров видео); b.files — аудио/видео/документы;
     // b.docs — текстовые файлы; b.pc — приложение умеет выполнять инструменты компьютера;
-    // b.ctx — время, система, рабочая папка (ws)
+    // b.ctx — время, система, рабочая папка (ws); b.personality — включена ли личность (false — спокойный режим)
     'POST /api/verity': async (me, b) => {
       if (!API_KEY) throw [503, 'Верити спит: на сервере не настроен ключ нейросети'];
       const text = String(b.text || '').trim().slice(0, MAX_TEXT);
@@ -333,17 +357,18 @@ export function initVerity(db, { addColumn, push, userFacts }) {
       if (prev) turns.delete(me.id); // ход ждал компьютер, а приложение перезапустили — бросаем его
       const now = Date.now();
       if (vq.today.get(me.id, now - 864e5).n >= PER_DAY) throw [429, 'Верити устал: на сегодня лимит сообщений исчерпан. Приходи завтра!'];
+      const personality = b.personality !== false;
       const ctx = b.ctx && typeof b.ctx === 'object' ? b.ctx : {};
       const pc = b.pc === true && typeof ctx.ws === 'string' && !!ctx.ws;
       const t = {
-        id: `${me.id}-${++seq}-${now}`, at: now, n: 0, pc, steps: [], results: new Map(), pending: [], busy: true,
+        id: `${me.id}-${++seq}-${now}`, at: now, n: 0, pc, personality, steps: [], results: new Map(), pending: [], busy: true,
         mood: moodOf(me.id, now), tools: [ANSWER, ...WEB_TOOLS, ...(pc ? PC_TOOLS : [])],
       };
       turns.set(me.id, t); // занимаем сразу: пока смотрим вложения, второе сообщение не примем
       let att;
       try { att = await attachments(b, text, t); } catch (e) { turns.delete(me.id); throw e; }
       if (!text && !att.any) { turns.delete(me.id); throw [400, 'Пустое сообщение']; }
-      const face = faceOf(t.mood.anger);
+      const face = personality ? faceOf(t.mood.anger) : 'smile';
       const facts = [
         ...userFacts(me.id),
         ctx.time && `Местное время у собеседника: ${String(ctx.time).slice(0, 40)}`,
@@ -357,7 +382,8 @@ export function initVerity(db, { addColumn, push, userFacts }) {
         return { role: m.role === 'user' ? 'user' : 'assistant', content: did ? `(мои действия: ${did})\n${m.text}` : m.text };
       });
       t.asked = Number(vq.add.run(me.id, 'user', att.stored, null, null, null, now).lastInsertRowid);
-      t.messages = [{ role: 'system', content: systemPrompt(face, facts, t.mood.anger >= 50, work) }, ...past, { role: 'user', content: att.content }];
+      const sys = personality ? systemPrompt(face, facts, t.mood.anger >= 50, work) : calmSystemPrompt(work);
+      t.messages = [{ role: 'system', content: sys }, ...past, { role: 'user', content: att.content }];
       return advance(me.id, t);
     },
     // результаты инструментов с компьютера: b.turn, b.results = [{ id, ok, out }]
