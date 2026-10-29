@@ -125,16 +125,45 @@ export function verityFace(f: Face, size: number, cls = '') {
   </svg>`;
 }
 
+export function aiAvatar(size: number, cls = '') {
+  const id = 'vai' + ++gradSeq;
+  return `<svg class="v-ai-avatar ${cls}" width="${size}" height="${size}" viewBox="0 0 100 100" aria-label="ИИ-помощник">
+    <defs>
+      <linearGradient id="${id}g" x1="0%" y1="0%" x2="100%" y2="100%">
+        <stop offset="0%" stop-color="#5865F2"/>
+        <stop offset="50%" stop-color="#7c3aed"/>
+        <stop offset="100%" stop-color="#ec4899"/>
+      </linearGradient>
+      <radialGradient id="${id}r" cx="35%" cy="30%" r="70%">
+        <stop offset="0%" stop-color="#ffffff" stop-opacity="0.35"/>
+        <stop offset="100%" stop-color="#ffffff" stop-opacity="0"/>
+      </radialGradient>
+    </defs>
+    <circle cx="50" cy="50" r="48" fill="url(#${id}g)"/>
+    <circle cx="50" cy="50" r="48" fill="url(#${id}r)"/>
+    <path d="M50 20 C50 36 36 50 20 50 C36 50 50 64 50 80 C50 64 64 50 80 50 C64 50 50 36 50 20 Z" fill="#ffffff"/>
+    <path d="M72 24 C72 29 67 34 62 34 C67 34 72 39 72 44 C72 39 77 34 82 34 C77 34 72 29 72 24 Z" fill="#ffffff" opacity="0.9"/>
+  </svg>`;
+}
+
 // ---------- список бесед ----------
 export function verityRow(filter: string) {
   if (!enabled()) return '';
-  if (filter && !'верити verity помощник ии'.includes(filter)) return '';
   const pers = hasPersonality();
-  const f = pers ? V.face : 'smile';
+  if (filter) {
+    const f = filter.toLowerCase();
+    const matchNeutral = 'помощник ии assistant ai'.includes(f);
+    const matchPers = pers && 'верити verity'.includes(f);
+    if (!matchNeutral && !matchPers) return '';
+  }
+  const av = pers ? verityFace(V.face, 32) : aiAvatar(32);
+  const name = pers ? 'Верити™' : 'ИИ-помощник';
+  const tagClass = pers ? 'v-tag' : 'v-tag v-tag-calm';
+  const sub = pers ? 'Помощник Startrack' : 'Умный ассистент';
   return `
     <div class="dm v-dm ${V.open ? 'sel' : ''}" data-act="verity">
-      <span class="v-av">${verityFace(f, 32)}</span>
-      <div class="dm-n"><span>Верити™<i class="v-tag">ИИ</i></span><small>${pers ? 'Помощник Startrack' : 'Спокойный помощник'}</small></div>
+      <span class="v-av">${av}</span>
+      <div class="dm-n"><span>${name}<i class="${tagClass}">ИИ</i></span><small>${sub}</small></div>
     </div>`;
 }
 
@@ -236,9 +265,12 @@ export async function renameVerityChat(id: number) {
 function setFace(face: Face) {
   const was = V.face;
   V.face = face;
-  document.querySelectorAll('.v-dm .v-av').forEach((el) => { el.innerHTML = verityFace(face, 32); });
+  const pers = hasPersonality();
+  document.querySelectorAll('.v-dm .v-av').forEach((el) => {
+    el.innerHTML = pers ? verityFace(face, 32) : aiAvatar(32);
+  });
   if (!V.open) return;
-  if (was !== face) document.getElementById('vchat')?.setAttribute('data-face', face);
+  if (was !== face && pers) document.getElementById('vchat')?.setAttribute('data-face', face);
   drawTop();
   drawSide();
 }
@@ -277,19 +309,20 @@ const SUGGEST_PC = ['Что ты умеешь?', 'Напиши игру «Зме
 // вызывается при каждой перерисовке «главной» области; разметку строим один раз, чтобы не терять набранный текст
 export function renderVerity() {
   const chat = document.getElementById('chat')!;
+  const pers = hasPersonality();
   if (!document.getElementById('vchat')) {
     chat.innerHTML = `
-      <div id="vchat" data-face="${V.face}">
+      <div id="vchat" data-face="${pers ? V.face : 'smile'}" class="${pers ? '' : 'v-calm-chat'}">
         <div id="msgs" class="v-msgs"></div>
         <form id="send" class="v-send">
           <div class="v-staged" hidden></div>
           <div class="composer">
             <button type="button" class="att-btn" id="vattach" title="Прикрепить: фото, видео, аудио, PDF, код и текст">${O.ic('attach', 24)}</button>
             <input type="file" id="vfile" multiple hidden>
-            <textarea rows="1" maxlength="2000" placeholder="Спросить Верити о чём угодно или кинуть ссылку"></textarea>
+            <textarea rows="1" maxlength="2000" placeholder="${pers ? 'Спросить Верити о чём угодно или кинуть ссылку' : 'Спросить ИИ-помощника о чём угодно или кинуть ссылку'}"></textarea>
             <button type="submit" class="v-go" title="Отправить">${O.ic('arrowIn', 22)}</button>
           </div>
-          <div class="v-hint">Верити — нейросеть и может ошибаться.</div>
+          <div class="v-hint">${pers ? 'Верити — нейросеть и может ошибаться.' : 'ИИ-помощник — нейросеть и может ошибаться.'}</div>
         </form>
       </div>`;
     const ta = chat.querySelector('textarea')!;
@@ -324,6 +357,17 @@ export function renderVerity() {
     drawMsgs();
     drawStaged();
     ta.focus();
+  } else {
+    const vc = document.getElementById('vchat');
+    if (vc) {
+      vc.setAttribute('data-face', pers ? V.face : 'smile');
+      vc.classList.toggle('v-calm-chat', !pers);
+    }
+    const ta = chat.querySelector('textarea');
+    if (ta) ta.placeholder = pers ? 'Спросить Верити о чём угодно или кинуть ссылку' : 'Спросить ИИ-помощника о чём угодно или кинуть ссылку';
+    const hint = chat.querySelector('.v-hint');
+    if (hint) hint.textContent = pers ? 'Верити — нейросеть и может ошибаться.' : 'ИИ-помощник — нейросеть и может ошибаться.';
+    drawMsgs();
   }
   drawTop();
   drawSide();
@@ -334,15 +378,18 @@ function drawTop() {
   if (!top || !V.open) return;
   const pers = hasPersonality();
   const f = pers ? V.face : 'smile';
+  const av = pers ? verityFace(f, 24) : aiAvatar(24);
+  const title = pers ? 'Верити™' : 'ИИ-помощник';
+  const tagClass = pers ? 'v-tag' : 'v-tag v-tag-calm';
   top.innerHTML = `
-    ${O.back}<div class="tb-title v-title"><span class="v-av">${verityFace(f, 24)}</span><b>Верити™</b><i class="v-tag">ИИ</i>
+    ${O.back}<div class="tb-title v-title"><span class="v-av">${av}</span><b>${title}</b><i class="${tagClass}">ИИ</i>
       <span class="v-sub" style="font-size:12px;color:var(--muted);margin-left:8px;">${O.esc(V.cur.title || (V.cur.id ? 'Чат' : 'Новый чат'))}</span></div>
     <div class="tb-actions">
       <button class="tb-btn v-newbtn" data-act="vnew" title="Новый чат — прошлый не потеряется">${O.ic('plus', 20)}<span>Новый чат</span></button>
       <button class="tb-btn ${pers ? 'on' : ''}" data-act="vpersonality" title="${pers ? 'Личность Верити: включена (нажмите, чтобы выключить)' : 'Личность Верити: выключена (нажмите, чтобы включить)'}">
         ${pers ? '🎭 Личность' : '🤖 Спокойный'}
       </button>
-      <button class="tb-btn ${V.showSide ? 'on' : ''}" data-act="vside" title="${V.showSide ? 'Скрыть' : 'Показать'} Верити">${O.ic('account', 22)}</button>
+      <button class="tb-btn ${V.showSide ? 'on' : ''}" data-act="vside" title="${V.showSide ? 'Скрыть инфо' : 'Показать инфо'}">${O.ic('account', 22)}</button>
     </div>`;
 }
 
@@ -352,7 +399,7 @@ export function toggleVeritySide() {
   drawSide();
 }
 
-// Справа — «портрет» Верити, переключатель личности и кнопка очистки.
+// Справа — «портрет» Верити/ассистента, переключатель личности и кнопка очистки.
 function drawSide() {
   const box = document.getElementById('profile');
   if (!box || !V.open) return;
@@ -360,30 +407,36 @@ function drawSide() {
   if (box.hidden) return;
   const pers = hasPersonality();
   const face = pers ? V.face : 'smile';
+  const av = pers ? verityFace(face, 148, 'v-big') : aiAvatar(132, 'v-big');
+  const title = pers ? 'Верити™' : 'ИИ-помощник';
+  const sub = pers ? 'Помощник Startrack' : 'Виртуальный ассистент Startrack';
+  const bio = pers 
+    ? 'Я знаю этот мессенджер и могу помочь почти с чем угодно: учёба, код, игры, Minecraft. Кидай фото, видео, аудио, файлы и ссылки — разберусь. Как ко мне — так и я к тебе.' + (V.pc ? ' На компьютере могу писать и запускать код, открывать программы и работать с файлами.' : '')
+    : 'Умный виртуальный помощник в мессенджере Startrack. Отвечаю на любые вопросы по учёбе, коду, играм и технологиям, помогаю по интерфейсу мессенджера и разбираю прикреплённые файлы.' + (V.pc ? ' На компьютере могу писать и запускать код, открывать программы и работать с файлами.' : '');
+  const clearBtn = pers ? 'Очистить этот чат' : 'Очистить этот диалог';
+
   box.innerHTML = `
-    <div class="pf v-pf" data-face="${face}">
-      <div class="v-stage">${verityFace(face, 148, 'v-big')}</div>
+    <div class="pf v-pf ${pers ? '' : 'v-calm'}" data-face="${face}">
+      <div class="v-stage">${av}</div>
       <div class="pc-body">
-        <div class="pc-names"><h2>Верити™</h2><div class="pc-u">${pers ? 'Помощник Startrack' : 'Спокойный помощник Startrack'}</div></div>
+        <div class="pc-names"><h2>${title}</h2><div class="pc-u">${sub}</div></div>
         
         <div class="pc-sec">
           <label class="switch-row" style="margin: 0; cursor: pointer;">
             <div>
-              <b>Личность и характер</b>
-              <span style="font-size:12px;">${pers ? 'Эмоции, характер и розыгрыши включены' : 'Спокойный режим: без обид и пакостей'}</span>
+              <b>Личность Верити (Minecraft)</b>
+              <span style="font-size:12px;">${pers ? 'Персонаж с эмоциями, реакциями и розыгрышами' : 'Нейтральный ИИ-ассистент: дружелюбный и без эмоций'}</span>
             </div>
             <input type="checkbox" class="switch" data-act="vtogglepers" ${pers ? 'checked' : ''}>
           </label>
         </div>
 
         <div class="pc-sec">
-          <p class="pc-bio">${pers 
-            ? 'Я знаю этот мессенджер и могу помочь почти с чем угодно: учёба, код, игры, Minecraft. Кидай фото, видео, аудио, файлы и ссылки — разберусь. Как ко мне — так и я к тебе.'
-            : 'Я — Верити в спокойном режиме. Отвечаю на любые вопросы по учёбе, коду, играм и Startrack, без сарказма, смены настроения и розыгрышей. Кидай фото, видео, файлы и ссылки.'}${V.pc ? ' На компьютере могу писать и запускать код, открывать программы и работать с файлами.' : ''}</p>
+          <p class="pc-bio">${bio}</p>
         </div>
       </div>
       ${chatsHtml()}
-      <button class="pf-btn" data-act="vclear" ${V.cur.id ? '' : 'disabled'}>Очистить этот чат</button>
+      <button class="pf-btn" data-act="vclear" ${V.cur.id ? '' : 'disabled'}>${clearBtn}</button>
     </div>`;
 }
 
@@ -485,12 +538,14 @@ const STEP_IC: Record<string, string> = {
 };
 function stepsHtml(steps: Step[] | undefined, open = false) {
   if (!steps?.length) return '';
+  const pers = hasPersonality();
   const rows = steps.map((s) => `<div class="v-step ${s.ok ? '' : 'bad'}">${O.ic(STEP_IC[s.k] || 'check', 14)}<span>${O.esc(s.t)}</span></div>${s.out ? `<pre class="v-out">${O.esc(s.out)}</pre>` : ''}`).join('');
   const n = steps.length;
-  return `<details class="v-steps" ${open ? 'open' : ''}><summary>Действия Верити: ${n}</summary>${rows}</details>`;
+  return `<details class="v-steps" ${open ? 'open' : ''}><summary>${pers ? 'Действия Верити' : 'Действия ассистента'}: ${n}</summary>${rows}</details>`;
 }
 
 function msgHtml(m: VMsg, prevRole?: string) {
+  const pers = hasPersonality();
   const mine = m.role === 'user';
   const me = O.me();
   const time = new Date(m.created).toLocaleTimeString('ru', { hour: '2-digit', minute: '2-digit' });
@@ -498,19 +553,25 @@ function msgHtml(m: VMsg, prevRole?: string) {
   const files = m.files?.length ? `<div class="v-sent-files">${m.files.map((n) => `<span>${O.ic('file', 14)}${O.esc(n)}</span>`).join('')}</div>` : '';
   const body = pics + files + (mine ? (m.text ? `<p>${inline(m.text)}</p>` : '') : stepsHtml(m.steps) + fmt(m.text));
   if (prevRole === m.role) return `<div class="msg cont"><time>${time}</time>${body}</div>`;
-  const av = mine ? me.avatar(40) : verityFace(m.face || 'grin', 40);
-  const name = mine ? O.esc(me.name) : 'Верити™<i class="v-tag">ИИ</i>';
-  return `<div class="msg head ${mine ? '' : 'v-m'}"><span class="mav">${av}</span><div class="mh"><b>${name}</b><time>${O.stamp(m.created)}</time></div>${body}</div>`;
+  const av = mine ? me.avatar(40) : (pers ? verityFace(m.face || 'grin', 40) : aiAvatar(40));
+  const tagClass = pers ? 'v-tag' : 'v-tag v-tag-calm';
+  const name = mine ? O.esc(me.name) : (pers ? 'Верити™<i class="v-tag">ИИ</i>' : `ИИ-помощник<i class="${tagClass}">ИИ</i>`);
+  return `<div class="msg head ${mine ? '' : (pers ? 'v-m' : 'v-m v-calm')}"><span class="mav">${av}</span><div class="mh"><b>${name}</b><time>${O.stamp(m.created)}</time></div>${body}</div>`;
 }
 
 // «Верити думает / работает»: шаги этого ответа появляются по мере выполнения
 function liveHtml() {
+  const pers = hasPersonality();
   const l = V.cur.live;
-  const now = l?.now ? `<div class="v-step now"><span class="v-dots"><i></i><i></i><i></i></span><span>${O.esc(l.now)}</span></div>` : '';
+  const now = l?.now ? `<div class="v-step now"><span class="v-dots ${pers ? '' : 'v-dots-calm'}"><i></i><i></i><i></i></span><span>${O.esc(l.now)}</span></div>` : '';
   const working = !!(l && (l.steps.length || l.now));
-  return `<div class="msg head v-m v-typing"><span class="mav">${verityFace('think', 40)}</span><div class="mh"><b>Верити™</b></div>
+  const av = pers ? verityFace('think', 40) : aiAvatar(40);
+  const name = pers ? 'Верити™' : 'ИИ-помощник';
+  const tagClass = pers ? 'v-tag' : 'v-tag v-tag-calm';
+  const thinkText = pers ? 'думает…' : 'печатает ответ…';
+  return `<div class="msg head v-m ${pers ? '' : 'v-calm'} v-typing"><span class="mav">${av}</span><div class="mh"><b>${name}<i class="${tagClass}">ИИ</i></b></div>
     ${working ? `<div class="v-steps v-live">${l!.steps.map((s) => `<div class="v-step ${s.ok ? '' : 'bad'}">${O.ic(STEP_IC[s.k] || 'check', 14)}<span>${O.esc(s.t)}</span></div>`).join('')}${now}</div>` : ''}
-    <p>${working ? '' : '<span class="v-dots"><i></i><i></i><i></i></span> думает…'}
+    <p>${working ? '' : `<span class="v-dots ${pers ? '' : 'v-dots-calm'}"><i></i><i></i><i></i></span> ${thinkText}`}
       ${V.cur.stop ? '<span class="muted">останавливаюсь…</span>' : `<button type="button" class="v-stop" title="Остановить">${O.ic('stop', 12)}Стоп</button>`}</p></div>`;
 }
 function drawLive() {
@@ -526,12 +587,24 @@ function drawMsgs() {
   const box = document.getElementById('msgs');
   if (!box || !V.open) return;
   codes = [];
-  const sug = pcOn() ? SUGGEST_PC : SUGGEST;
-  let html = `<div class="intro v-intro">${verityFace(V.face, 96, 'v-big')}<h1>Верити™</h1><div class="intro-u">помощник Startrack</div>
-    <p>Я — Верити. Помогу с учёбой, кодом, играми и самим мессенджером. Кидай фото, видео, аудио, файлы и ссылки — разберусь.
+  const pers = hasPersonality();
+  const sug = pcOn()
+    ? (pers ? SUGGEST_PC : ['Что ты умеешь?', 'Помоги написать скрипт на Python', 'Открой калькулятор', 'Помоги с кодом'])
+    : (pers ? SUGGEST : ['Что ты умеешь?', 'Как сменить пароль?', 'Помоги с кодом', 'Помоги с учёбой']);
+  const introAv = pers ? verityFace(V.face, 96, 'v-big') : aiAvatar(96, 'v-big');
+  const introTitle = pers ? 'Верити™' : 'ИИ-помощник';
+  const introSub = pers ? 'помощник Startrack' : 'виртуальный ассистент Startrack';
+  const introDesc = pers
+    ? `Я — Верити. Помогу с учёбой, кодом, играми и самим мессенджером. Кидай фото, видео, аудио, файлы и ссылки — разберусь.
     ${V.pc ? 'Код я могу сам написать, запустить и проверить, открыть нужную программу или найти файл у тебя на компьютере.' : ''}
-    Отвечаю по делу и честно. Как ко мне — так и я к тебе.</p>
-    ${V.cur.msgs.length ? '' : `<div class="v-chips">${sug.map((s) => `<button type="button" data-ask="${O.esc(s)}">${O.esc(s)}</button>`).join('')}</div>`}</div>`;
+    Отвечаю по делу и честно. Как ко мне — так и я к тебе.`
+    : `Привет! Я виртуальный ассистент Startrack. Помогу с учёбой, кодом, играми и самим мессенджером. Присылай фото, видео, аудио, файлы и ссылки — разберусь.
+    ${V.pc ? 'Код я могу написать, запустить и проверить, открыть нужную программу или найти файл на компьютере.' : ''}
+    Чем могу помочь?`;
+
+  let html = `<div class="intro v-intro ${pers ? '' : 'v-intro-calm'}">${introAv}<h1>${introTitle}</h1><div class="intro-u">${introSub}</div>
+    <p>${introDesc}</p>
+    ${V.cur.msgs.length ? '' : `<div class="v-chips ${pers ? '' : 'v-chips-calm'}">${sug.map((s) => `<button type="button" data-ask="${O.esc(s)}">${O.esc(s)}</button>`).join('')}</div>`}</div>`;
   let prev: VMsg | undefined;
   for (const m of V.cur.msgs) {
     html += msgHtml(m, prev && m.created - prev.created < 7 * 60e3 ? prev.role : undefined);

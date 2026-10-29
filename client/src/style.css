@@ -1240,6 +1240,20 @@ small b, .fr-n span b { font-weight: 600; color: var(--text); }
 .v-faces span { padding: 3px; border-radius: 50%; opacity: .45; }
 .v-faces span.cur { opacity: 1; box-shadow: 0 0 0 2px #f5c800; }
 
+/* Нейтральный режим ИИ-помощника */
+.v-ai-avatar { display: block; flex: none; overflow: visible; border-radius: 50%; }
+.v-tag-calm { background: var(--accent, #5865f2) !important; color: #fff !important; }
+.msg.v-m.v-calm .mh b { color: var(--accent, #5865f2) !important; }
+.v-chips.v-chips-calm button:hover { background: var(--accent, #5865f2); color: #fff; border-color: var(--accent, #5865f2); }
+.v-dots.v-dots-calm i { animation: v-dot-calm 1s infinite; }
+.v-dots.v-dots-calm i:nth-child(2) { animation-delay: .15s; }
+.v-dots.v-dots-calm i:nth-child(3) { animation-delay: .3s; }
+@keyframes v-dot-calm { 30% { transform: translateY(-4px); background: var(--accent, #5865f2); } }
+.v-pf.v-calm .v-stage {
+  background: radial-gradient(circle at 50% 60%, rgba(99, 102, 241, .25), transparent 65%), linear-gradient(rgba(99, 102, 241, .15), rgba(139, 92, 246, .08) 60%, transparent) !important;
+}
+#vchat.v-calm-chat::before { display: none !important; }
+
 /* пакости */
 .v-glitch body { animation: v-shake .12s steps(2) infinite; }
 .v-glitch .app { animation: v-glitch-f .25s steps(3) infinite; }

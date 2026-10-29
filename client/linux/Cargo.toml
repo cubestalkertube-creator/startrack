@@ -1,6 +1,6 @@
 [package]
 name = "startrack"
-version = "0.1.29"
+version = "0.1.30"
 edition = "2021"
 
 # Linux-версия: то же приложение, что client/src-tauri, но вместо WebKitGTK (в дистрибутивах он без

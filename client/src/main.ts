@@ -12,7 +12,7 @@ import { closePicker, emojify, isJumbo, loadEmoji, noteUsed, openPicker as openE
 import { decodeGif, encodeGif } from './gif';
 import { BUILTIN, SB_MAX_SEC, cutWav, decodeFile, playSound, preload, preview, sbVol, setSbVol, stopSounds, type SbSound } from './soundboard';
 import { SFX_GROUPS, setSfxOn, setSfxOutput, setSfxVol, sfx, sfxLoop, sfxOn, sfxVol, type SfxGroup } from './sounds';
-import { clearVerity, closeVerity, deleteVerityChat, initVerity, openVerity, openVerityChat, renameVerityChat, pcInfo, renderVerity, resetVerity, setPcMode, stopPranks, toggleVeritySide, verityEvent, verityFace, verityOpen, verityRow } from './verity';
+import { aiAvatar, clearVerity, closeVerity, deleteVerityChat, initVerity, openVerity, openVerityChat, renameVerityChat, pcInfo, renderVerity, resetVerity, setPcMode, stopPranks, toggleVeritySide, verityEvent, verityFace, verityOpen, verityRow } from './verity';
 import { createSession, parseSpotify, parseYt, type Item, type WState } from './watch';
 
 // offline — так другие видят «невидимку»
@@ -549,7 +549,7 @@ async function act(b: HTMLElement) {
       const next = !verityPersonality();
       store.set('verity_pers', next ? '1' : '0');
       if (!next) stopPranks();
-      toast(next ? 'Личность Верити включена' : 'Личность Верити выключена (спокойный режим)');
+      toast(next ? 'Личность Верити включена' : 'Личность Верити выключена (нейтральный режим)');
       renderVerity();
       renderDmList();
       return;
@@ -559,7 +559,7 @@ async function act(b: HTMLElement) {
       const next = cb.checked !== undefined ? cb.checked : !verityPersonality();
       store.set('verity_pers', next ? '1' : '0');
       if (!next) stopPranks();
-      toast(next ? 'Личность Верити включена' : 'Личность Верити выключена (спокойный режим)');
+      toast(next ? 'Личность Верити включена' : 'Личность Верити выключена (нейтральный режим)');
       renderVerity();
       renderDmList();
       return;
@@ -567,12 +567,19 @@ async function act(b: HTMLElement) {
     case 'vnew': return openVerityChat(0);
     case 'vchat': return openVerityChat(id);
     case 'vrename': return renameVerityChat(id);
-    case 'vdel':
-      if (await confirmDlg('Удалить чат', 'Переписка этого чата с Верити удалится насовсем.', 'Удалить')) deleteVerityChat(id);
+    case 'vdel': {
+      const pers = verityPersonality();
+      const msg = pers ? 'Переписка этого чата с Верити удалится насовсем.' : 'Переписка этого чата с ассистентом удалится насовсем.';
+      if (await confirmDlg('Удалить чат', msg, 'Удалить')) deleteVerityChat(id);
       return;
-    case 'vclear':
-      if (await confirmDlg('Очистить переписку с Верити', 'Верити забудет весь разговор. Но не обиду.', 'Очистить')) clearVerity();
+    }
+    case 'vclear': {
+      const pers = verityPersonality();
+      const title = pers ? 'Очистить переписку с Верити' : 'Очистить переписку с ИИ-помощником';
+      const desc = pers ? 'Верити забудет весь разговор. Но не обиду.' : 'Вся история этого диалога будет удалена.';
+      if (await confirmDlg(title, desc, 'Очистить')) clearVerity();
       return;
+    }
     case 'tab': S.tab = b.dataset.tab as Tab; goHome(); return mpane(true);
     case 'back': return mpane(false);
     case 'open': { const u = friend(id); return u && openChat(u); }
@@ -3585,7 +3592,7 @@ function openSettings(tab: SetTab) {
         ${navBtn('appearance', 'Внешний вид')}
         ${navBtn('voice', 'Голос и видео')}
         ${navBtn('sounds', 'Звуки')}
-        ${navBtn('assistant', 'Чат-бот Верити')}
+        ${navBtn('assistant', verityPersonality() ? 'Чат-бот Верити' : 'ИИ-помощник')}
         <hr>
         <button class="sn danger" data-set="logout">Выйти ${ic('hangup', 16)}</button>
       </div></nav>
@@ -3810,11 +3817,11 @@ function renderSettingsTab() {
         <input type="checkbox" class="switch" id="mascot_toggle" ${mascotOn() ? 'checked' : ''}>
       </label>
 
-      <div class="setting-group-title" style="margin-top: 24px;">ИИ-помощник Верити™</div>
+      <div class="setting-group-title" style="margin-top: 24px;">${verityPersonality() ? 'ИИ-помощник Верити™' : 'ИИ-помощник Startrack'}</div>
       <label class="switch-row" style="margin-top: 10px;">
-        <span class="v-av" style="display:flex;align-items:center;flex:none;">${verityFace('smile', 32)}</span>
+        <span class="v-av" style="display:flex;align-items:center;flex:none;">${verityPersonality() ? verityFace('smile', 32) : aiAvatar(32)}</span>
         <div>
-          <b>Отображать Верити в личных сообщениях</b>
+          <b>Отображать ${verityPersonality() ? 'Верити' : 'ИИ-помощника'} в личных сообщениях</b>
           <span>Чат-бот помощник на базе нейросети прямо в Startrack</span>
         </div>
         <input type="checkbox" class="switch" id="verity_app_toggle" ${verityOn() ? 'checked' : ''}>
@@ -3823,8 +3830,8 @@ function renderSettingsTab() {
       <label class="switch-row" style="margin-top: 10px;">
         <span style="font-size:24px;line-height:1;flex:none;">🎭</span>
         <div>
-          <b>Личность и характер Верити</b>
-          <span>Эмоции, живые реакции на тон общения и розыгрыши. При отключении — спокойный полезный ассистент.</span>
+          <b>Личность Верити (персонаж из Minecraft)</b>
+          <span>Эмоции, живые реакции на тон общения и розыгрыши. При отключении — нейтральный вежливый ассистент без имени Верити.</span>
         </div>
         <input type="checkbox" class="switch" id="verity_pers_app_toggle" ${verityPersonality() ? 'checked' : ''}>
       </label>
@@ -3849,6 +3856,7 @@ function renderSettingsTab() {
     if (vAppToggle) {
       vAppToggle.onchange = () => {
         const on = vAppToggle.checked;
+        const pers = verityPersonality();
         store.set('verity', on ? '1' : '0');
         if (!on) {
           if (verityOpen()) {
@@ -3856,12 +3864,13 @@ function renderSettingsTab() {
             goHome();
           }
           stopPranks();
-          toast('Чат-бот Верити скрыт');
+          toast(pers ? 'Чат-бот Верити скрыт' : 'ИИ-помощник скрыт');
         } else {
-          toast('Чат-бот Верити включён в личных сообщениях');
+          toast(pers ? 'Чат-бот Верити включён в личных сообщениях' : 'ИИ-помощник включён в личных сообщениях');
         }
         renderFriends();
         renderChat();
+        renderSettingsTab();
       };
     }
 
@@ -3871,9 +3880,10 @@ function renderSettingsTab() {
         const pers = vPersAppToggle.checked;
         store.set('verity_pers', pers ? '1' : '0');
         if (!pers) stopPranks();
-        toast(pers ? 'Личность Верити включена' : 'Личность Верити выключена (спокойный режим)');
+        toast(pers ? 'Личность Верити включена' : 'Личность Верити выключена (нейтральный режим)');
         renderFriends();
         renderChat();
+        renderSettingsTab();
       };
     }
 
@@ -3906,24 +3916,24 @@ function renderSettingsTab() {
     const on = verityOn();
     const pers = verityPersonality();
     box.innerHTML = `
-      <h2>Чат-бот Верити™</h2>
-      <p class="set-hint">Интеллектуальный помощник на базе нейросети прямо в Startrack.</p>
+      <h2>${pers ? 'Чат-бот Верити™' : 'ИИ-помощник Startrack'}</h2>
+      <p class="set-hint">${pers ? 'Персонаж из Minecraft и умный помощник на базе нейросети прямо в Startrack.' : 'Интеллектуальный виртуальный помощник на базе нейросети прямо в Startrack.'}</p>
 
       <div class="v-settings-card">
         <div class="v-settings-top">
-          <div class="v-settings-avatar">${verityFace(on && pers ? 'smile' : 'neutral', 64)}</div>
+          <div class="v-settings-avatar">${pers ? verityFace(on ? 'smile' : 'neutral', 64) : aiAvatar(64)}</div>
           <div class="v-settings-desc">
-            <b>Верити™ — персонаж-помощник</b>
-            <p>Умеет отвечать на любые вопросы: помощь по учёбе, программирование, игры (Minecraft и др.), советы или просто беседа.</p>
+            <b>${pers ? 'Верити™ — персонаж-помощник' : 'Нейтральный ИИ-помощник'}</b>
+            <p>${pers ? 'Жёлтый смайлик из сериала по Minecraft с живым характером. Умеет отвечать на любые вопросы: помощь по учёбе, программирование, игры, советы или просто беседа.' : 'Умный виртуальный ассистент. Отвечает на любые вопросы по учёбе, программированию, играм, технологиям и мессенджеру.'}</p>
             <div class="v-settings-badge ${on ? 'on' : 'off'}">
-              <span class="status-dot"></span> ${on ? (pers ? 'Включён — Личность активна' : 'Включён — Спокойный режим') : 'Скрыт из интерфейса'}
+              <span class="status-dot"></span> ${on ? (pers ? 'Включён — Личность Верити' : 'Включён — Нейтральный режим') : 'Скрыт из интерфейса'}
             </div>
           </div>
         </div>
 
         <label class="switch-row v-settings-switch">
           <div>
-            <b>Отображать Верити в списке личных сообщений</b>
+            <b>Отображать ${pers ? 'Верити' : 'ИИ-помощника'} в списке личных сообщений</b>
             <span>Доступ к чат-боту в левой панели мессенджера</span>
           </div>
           <input type="checkbox" class="switch" id="verity_main_toggle" ${on ? 'checked' : ''}>
@@ -3932,8 +3942,8 @@ function renderSettingsTab() {
         ${on ? `
           <label class="switch-row" style="margin-top:14px; padding-top:14px; border-top:1px solid var(--line2);">
             <div>
-              <b>Личность и характер Верити</b>
-              <span>Эмоции, живые реакции на тон общения и забавные розыгрыши (выключите для спокойного режима)</span>
+              <b>Личность Верити (персонаж из Minecraft)</b>
+              <span>Эмоции, живые реакции на тон общения и розыгрыши (выключите для нейтрального режима без имени Верити)</span>
             </div>
             <input type="checkbox" class="switch" id="verity_pers_toggle" ${pers ? 'checked' : ''}>
           </label>
@@ -3947,8 +3957,8 @@ function renderSettingsTab() {
         </div>
       ` : on ? `
         <div class="v-settings-details">
-          <h3>Спокойный режим активен</h3>
-          <p class="set-hint">Личность отключена: Верити отвечает как классический спокойный и вежливый ИИ-помощник, без сарказма, смены настроения и розыгрышей.</p>
+          <h3>Нейтральный режим активен</h3>
+          <p class="set-hint">Личность отключена: ассистент отвечает как классический дружелюбный и полезный ИИ, без сарказма, без упоминания Верити, смены настроения и розыгрышей.</p>
         </div>
       ` : `
         <div class="v-settings-empty">
@@ -3963,7 +3973,7 @@ function renderSettingsTab() {
           ${!ANDROID && tauri ? `
           <div id="vPcSec" hidden>
           <h3 style="margin-top:24px;">Доступ к компьютеру</h3>
-          <p class="set-hint">Верити может работать на этом компьютере как ассистент-программист: писать и запускать код, выполнять команды, открывать программы, файлы и сайты. В своей рабочей папке он хозяйничает сам, а всё остальное делает только после «Разрешить» в системном окне.</p>
+          <p class="set-hint">${pers ? 'Верити может' : 'Ассистент может'} работать на этом компьютере как ассистент-программист: писать и запускать код, выполнять команды, открывать программы, файлы и сайты. В своей рабочей папке он хозяйничает сам, а всё остальное делает только после «Разрешить» в системном окне.</p>
           <div class="v-pc-modes" id="vPcModes">
             <label><input type="radio" name="vpc" value="off"><span><b>Выключен</b>Только переписка: ничего на компьютере не делает</span></label>
             <label><input type="radio" name="vpc" value="ask"><span><b>Спрашивать</b>Каждое действие вне рабочей папки — с твоего разрешения</span></label>
@@ -3972,10 +3982,9 @@ function renderSettingsTab() {
           <p class="set-hint" id="vPcWs"></p>
           </div>` : ''}
 
-
           <h3 style="margin-top:24px;">Управление беседой</h3>
           <p class="set-hint">Если вы хотите начать диалог с чистого листа, можно сбросить историю сообщений.</p>
-          <button class="btn sec" id="vSettingsClear">${ic('trash', 16)} Очистить историю с Верити</button>
+          <button class="btn sec" id="vSettingsClear">${ic('trash', 16)} ${pers ? 'Очистить историю с Верити' : 'Очистить историю переписки'}</button>
         </div>
       ` : ''}
     `;
@@ -3991,9 +4000,9 @@ function renderSettingsTab() {
             goHome();
           }
           stopPranks();
-          toast('Чат-бот Верити скрыт');
+          toast(pers ? 'Чат-бот Верити скрыт' : 'ИИ-помощник скрыт');
         } else {
-          toast('Чат-бот Верити включён в личных сообщениях');
+          toast(pers ? 'Чат-бот Верити включён в личных сообщениях' : 'ИИ-помощник включён в личных сообщениях');
         }
         renderFriends();
         renderChat();
@@ -4007,7 +4016,7 @@ function renderSettingsTab() {
         const checked = persToggle.checked;
         store.set('verity_pers', checked ? '1' : '0');
         if (!checked) stopPranks();
-        toast(checked ? 'Личность Верити включена' : 'Личность Верити выключена (спокойный режим)');
+        toast(checked ? 'Личность Верити включена' : 'Личность Верити выключена (нейтральный режим)');
         renderFriends();
         renderChat();
         renderSettingsTab();
@@ -4030,7 +4039,7 @@ function renderSettingsTab() {
         try {
           const got = await setPcMode(want);
           show(got);
-          toast(got === 'off' ? 'Верити больше не трогает компьютер' : got === 'ask' ? 'Верити будет спрашивать разрешение' : want === got ? 'Верити работает без вопросов' : 'Оставил как было');
+          toast(got === 'off' ? (pers ? 'Верити больше не трогает компьютер' : 'Ассистент больше не трогает компьютер') : got === 'ask' ? (pers ? 'Верити будет спрашивать разрешение' : 'Ассистент будет спрашивать разрешение') : want === got ? (pers ? 'Верити работает без вопросов' : 'Ассистент работает без вопросов') : 'Оставил как было');
         } catch (err) { toast(String(err)); pcInfo().then((pc) => pc && show(pc.mode)); }
       };
     }
@@ -4038,7 +4047,9 @@ function renderSettingsTab() {
     const clr = document.getElementById('vSettingsClear');
     if (clr) {
       clr.onclick = async () => {
-        if (await confirmDlg('Очистить переписку с Верити', 'Верити забудет всю историю разговора.', 'Очистить')) {
+        const title = pers ? 'Очистить переписку с Верити' : 'Очистить переписку с ассистентом';
+        const msg = pers ? 'Верити забудет всю историю разговора.' : 'Вся история диалога с ИИ-помощником будет очищена.';
+        if (await confirmDlg(title, msg, 'Очистить')) {
           clearVerity();
           toast('История переписки очищена');
         }
