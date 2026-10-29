@@ -12,8 +12,8 @@ import { closePicker, emojify, isJumbo, loadEmoji, noteUsed, openPicker as openE
 import { decodeGif, encodeGif } from './gif';
 import { BUILTIN, SB_MAX_SEC, cutWav, decodeFile, playSound, preload, preview, sbVol, setSbVol, stopSounds, type SbSound } from './soundboard';
 import { SFX_GROUPS, setSfxOn, setSfxOutput, setSfxVol, sfx, sfxLoop, sfxOn, sfxVol, type SfxGroup } from './sounds';
-import { clearVerity, closeVerity, initVerity, openVerity, pcInfo, renderVerity, resetVerity, setPcMode, stopPranks, toggleVeritySide, verityEvent, verityFace, verityOpen, verityRow } from './verity';
-import { initWatch, watchDeaf, watchJoined, watchMount, watchOn, watchOnData, watchReset, watchStart } from './watch';
+import { clearVerity, closeVerity, deleteVerityChat, initVerity, openVerity, openVerityChat, renameVerityChat, pcInfo, renderVerity, resetVerity, setPcMode, stopPranks, toggleVeritySide, verityEvent, verityFace, verityOpen, verityRow } from './verity';
+import { createSession, parseSpotify, parseYt, type Item, type WState } from './watch';
 
 // offline — так другие видят «невидимку»
 type Status = 'online' | 'idle' | 'dnd' | 'invisible' | 'offline';
@@ -44,6 +44,7 @@ type Upload = { key: number; conv: string; name: string; size: number; sent: num
 type Tab = 'online' | 'all' | 'pending' | 'add';
 declare const __APP_VERSION__: string; // версия из package.json (vite.config.ts)
 
+const tauri = (window as any).__TAURI_INTERNALS__; // приложение для ПК и Android (в браузере — нет)
 const $ = <T extends HTMLElement = HTMLElement>(s: string, r: ParentNode = document) => r.querySelector(s) as T;
 const esc = (s: string) =>
   s.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]!);
@@ -211,6 +212,7 @@ const ICON = {
   volume: 'M3 9v6h4l5 5V4L7 9H3zm13.5 3c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02zM14 3.23v2.06c2.89.86 5 3.54 5 6.71s-2.11 5.85-5 6.71v2.06c4.01-.91 7-4.49 7-8.77s-2.99-7.86-7-8.77z',
   bell: 'M12 22c1.1 0 2-.9 2-2h-4c0 1.1.89 2 2 2zm6-6v-5c0-3.07-1.64-5.64-4.5-6.32V4c0-.83-.67-1.5-1.5-1.5s-1.5.67-1.5 1.5v.68C7.63 5.36 6 7.92 6 11v5l-2 2v1h16v-1l-2-2z',
   play: 'M8 5v14l11-7z',
+  pause: 'M6 19h4V5H6v14zm8-14v14h4V5h-4z',
   stop: 'M6 6h12v12H6z',
   download: 'M5 20h14v-2H5v2zM19 9h-4V3H9v6H5l7 7 7-7z',
   attach: 'M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm5 11h-4v4h-2v-4H7v-2h4V7h2v4h4v2z',
@@ -454,10 +456,11 @@ function start(me: User) {
           <div id="flist"></div>
         </div>
       </aside>
-      <div class="dock"><div id="voicebar" hidden></div><div class="userbar" id="userbar"></div></div>
+      <div class="dock"><div id="partybar" hidden></div><div id="voicebar" hidden></div><div class="userbar" id="userbar"></div></div>
       <main class="main">
         <header class="topbar" id="topbar"></header>
         <section id="call" hidden></section>
+        <section id="party" hidden><div id="partyban" hidden></div><div id="partybox" hidden></div></section>
         <div class="body"><section id="chat"></section><aside id="profile" hidden></aside></div>
       </main>
     </div>`;
@@ -561,6 +564,12 @@ async function act(b: HTMLElement) {
       renderDmList();
       return;
     }
+    case 'vnew': return openVerityChat(0);
+    case 'vchat': return openVerityChat(id);
+    case 'vrename': return renameVerityChat(id);
+    case 'vdel':
+      if (await confirmDlg('Удалить чат', 'Переписка этого чата с Верити удалится насовсем.', 'Удалить')) deleteVerityChat(id);
+      return;
     case 'vclear':
       if (await confirmDlg('Очистить переписку с Верити', 'Верити забудет весь разговор. Но не обиду.', 'Очистить')) clearVerity();
       return;
@@ -610,6 +619,23 @@ async function act(b: HTMLElement) {
     case 'screen': return C.room && toggleScreen();
     case 'sb': return openSoundboard(b);
     case 'yt': return startWatch();
+    case 'party': return joinParty(convKey());
+    case 'pjoin': return joinParty(convKey());
+    case 'pleave': return leaveParty();
+    case 'popen': {
+      const pid = Number(P.conv.slice(1));
+      if (P.conv[0] === 'g') return openGroup(pid);
+      const u = friend(pid);
+      return u && openChat(u);
+    }
+    case 'together': return together({ src: b.dataset.src as Item['src'], id: b.dataset.id!, title: b.dataset.title || titles.get(b.dataset.src + ':' + b.dataset.id) || 'Видео', by: S.me ? uname(S.me) : '' });
+    case 'lkplay': return floatPlay(b.dataset.src as 'yt' | 'sp', b.dataset.id!, Number(b.dataset.t) || 0);
+    case 'vidopen': {
+      pendingOpen = b.dataset.name || '';
+      const a = b.parentElement?.parentElement?.querySelector<HTMLAnchorElement>('a[data-act="dl"]');
+      a?.click();
+      return;
+    }
     case 'callfull': C.full = !C.full; return renderCall();
     case 'callfs': { const box = document.getElementById('call'); return box && toggleFullscreen(box); }
     case 'strip':
@@ -943,6 +969,7 @@ async function openConv() {
   closeVerity();
   clearStaged();
   mpane(true);
+  wsSend({ type: 'party_peek', conv: c.key });
   S.unread.delete(c.key);
   renderFriends();
   renderChat();
@@ -964,6 +991,7 @@ function renderTop() {
       ${BACK}<div class="tb-title">${gavatar(g, 24)}<b class="tb-edit" data-act="grename" data-id="${g.id}" title="Изменить название группы">${esc(gname(g))}</b></div>
       <div class="tb-actions">
         <button class="tb-btn ${g.call.length && !inCall ? 'live' : ''}" data-act="gcall" data-id="${g.id}" title="${g.call.length ? 'Присоединиться к звонку' : 'Начать голосовой звонок'}">${ic('phone', 22)}</button>
+        <button class="tb-btn ${P.conv === 'g' + g.id ? 'on' : ''}" data-act="party" title="Смотреть и слушать вместе: YouTube, Spotify, музыка">${ic('music', 22)}</button>
         <button class="tb-btn" data-act="gadd" data-id="${g.id}" title="Добавить друзей в группу">${ic('addFriend', 22)}</button>
         <button class="tb-btn ${S.showProfile ? 'on' : ''}" data-act="profile" title="${S.showProfile ? 'Скрыть список участников' : 'Показать список участников'}">${ic('friends', 22)}</button>
       </div>`;
@@ -974,6 +1002,7 @@ function renderTop() {
     ${BACK}<div class="tb-title tb-user" data-act="user" data-id="${p.id}">${avatar(p, 24, true)}<b>${esc(uname(p))}</b></div>
     <div class="tb-actions">
       <button class="tb-btn" data-act="call" data-id="${p.id}" title="Начать голосовой звонок">${ic('phone', 22)}</button>
+      <button class="tb-btn ${P.conv === 'u' + p.id ? 'on' : ''}" data-act="party" title="Смотреть и слушать вместе: YouTube, Spotify, музыка">${ic('music', 22)}</button>
       <button class="tb-btn" data-act="gnew" data-id="${p.id}" title="Создать группу с ${esc(uname(p))}">${ic('addFriend', 22)}</button>
       <button class="tb-btn ${S.showProfile ? 'on' : ''}" data-act="profile" title="${S.showProfile ? 'Скрыть профиль' : 'Показать профиль'}">${ic('account', 22)}</button>
     </div>`;
@@ -1220,7 +1249,8 @@ function renderAtt(f: Att) {
     return `<div class="att-media img" style="${mediaBox(f)}" data-act="view" data-fid="${f.id}" title="${esc(f.name)}"><img data-fid="${f.id}" src="${esc(fileUrl(f))}" alt="${esc(f.name)}" draggable="false">${
       f.type === 'image/gif' ? gifStar(f) : ''}</div>`;
   if (VID_RE.test(f.type))
-    return `<div class="att-media" style="${mediaBox(f)}"><video data-fid="${f.id}" src="${esc(fileUrl(f))}" controls preload="metadata"></video></div>
+    return `<div class="att-media" style="${mediaBox(f)}"><video data-fid="${f.id}" src="${esc(fileUrl(f))}" controls preload="metadata" onerror="this.parentElement.classList.add('bad')"></video>
+        <div class="vid-bad">${ic('play', 30)}<span>Это видео не воспроизводится внутри Startrack</span>${tauri ? `<button class="btn sm" data-act="vidopen" data-name="${esc(f.name)}">Открыть в плеере</button>` : ''}</div></div>
       <div class="att-cap"><a ${dl}>${esc(f.name)}</a><span>${fsize(f.size)}</span></div>`;
   const audio = f.type.startsWith('audio/');
   return `
@@ -1228,7 +1258,8 @@ function renderAtt(f: Att) {
       <span class="att-ic">${ic(audio ? 'music' : 'file', 30)}</span>
       <div class="att-n"><a ${dl} title="${esc(f.name)}">${esc(f.name)}</a><span>${fsize(f.size)}</span></div>
       <a class="att-dl" ${dl} title="Скачать">${ic('download', 22)}</a>
-      ${audio ? `<audio data-fid="${f.id}" src="${esc(fileUrl(f))}" controls preload="none"></audio>` : ''}
+      ${audio ? `<audio data-fid="${f.id}" src="${esc(fileUrl(f))}" controls preload="none"></audio>
+        <button class="btn sm sec att-tog" data-act="together" data-src="au" data-id="f:${f.id}" data-title="${esc(f.name.replace(/\.[^.]+$/, ''))}">${ic('friends', 16)}Слушать вместе</button>` : ''}
     </div>`;
 }
 
@@ -1349,10 +1380,10 @@ function imageLink(text: string) {
 
 // Ссылки http:// и https:// превращаем в кликабельные <a> с открытием в браузере
 function linkify(html: string): string {
-  return html.replace(/\bhttps?:\/\/[^\s<>'"]+/gi, (raw) => {
+  return html.replace(/\bhttps?:\/\/[^\s<>'"`]+/gi, (raw) => {
     let url = raw;
     let trail = '';
-    while (/[.,:;!?)]$/.test(url)) {
+    while (/[.,:;!?)*\]»]$/.test(url)) {
       if (url.endsWith(')') && (url.match(/\(/g) || []).length >= (url.match(/\)/g) || []).length) {
         break;
       }
@@ -1432,7 +1463,7 @@ function renderMessages() {
     const del = m.sender === me.id ? `<button class="msg-del" data-act="delmsg" data-id="${m.id}" title="Удалить у всех">${ic('trash', 18)}</button>` : '';
     const link = m.text ? imageLink(m.text) : '';
     const text = link ? `<div class="att-media link"><img src="${esc(link)}" alt="${esc(m.text)}" title="${esc(m.text)}" referrerpolicy="no-referrer" draggable="false"></div>`
-      : (m.text ? `<p${isJumbo(m.text) ? ' class="jumbo"' : ''}>${linkify(emojify(m.text))}</p>` : '') + (m.file ? renderAtt(m.file) : '');
+      : (m.text ? `<p${isJumbo(m.text) ? ' class="jumbo"' : ''}>${linkify(emojify(m.text))}</p>` + linkCards(m.text) : '') + (m.file ? renderAtt(m.file) : '');
     // подряд идущие сообщения одного автора в пределах 7 минут — одной группой, как в Discord
     if (prev && prev.sender === m.sender && m.created - prev.created < 7 * 60e3 && sameDay(prev.created, m.created)) {
       html += `<div class="msg cont" data-mid="${m.id}">${del}<time>${new Date(m.created).toLocaleTimeString('ru', { hour: '2-digit', minute: '2-digit' })}</time>${text}</div>`;
@@ -1454,6 +1485,59 @@ function renderMessages() {
   });
   box.scrollTop = box.scrollHeight;
   msgStick = true;
+  fillTitles(box);
+}
+
+// ---------- ссылки на YouTube и Spotify в сообщениях: превью, плеер, «смотреть вместе» ----------
+function linkCards(text: string) {
+  const seen = new Set<string>();
+  let html = '';
+  for (const u of (text.match(/https?:\/\/[^\s<>"'`]+/g) || []).slice(0, 4)) {
+    const yt = /youtu\.?be/i.test(u) ? parseYt(u) : null;
+    const sp = yt ? null : parseSpotify(u);
+    const key = yt ? 'yt:' + yt.id : sp ? 'sp:' + sp : '';
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    const title = esc(titles.get(key) || (yt ? 'YouTube' : 'Spotify'));
+    if (yt) html += `
+      <div class="lk-card yt"><div class="lk-head">${ic('youtube', 18)}<b data-title="${key}">${title}</b></div>
+        <div class="lk-media" data-act="lkplay" data-src="yt" data-id="${yt.id}" data-t="${yt.t}" title="Смотреть">
+          <img src="https://i.ytimg.com/vi/${yt.id}/hqdefault.jpg" alt="" loading="lazy" draggable="false"><span class="lk-play">${ic('play', 34)}</span></div>
+        <div class="lk-btns"><button class="btn sm sec" data-act="together" data-src="yt" data-id="${yt.id}">${ic('friends', 16)}Смотреть вместе</button></div></div>`;
+    else html += `
+      <div class="lk-card sp"><div class="lk-head"><span class="lk-sp">${ic('music', 18)}</span><b data-title="${key}">${title}</b></div>
+        <div class="lk-btns"><button class="btn sm" data-act="lkplay" data-src="sp" data-id="${sp}">${ic('play', 16)}Слушать</button>
+          <button class="btn sm sec" data-act="together" data-src="sp" data-id="${sp}">${ic('friends', 16)}Слушать вместе</button></div></div>`;
+  }
+  return html;
+}
+// названия видео и треков подгружаем после отрисовки
+function fillTitles(box: HTMLElement) {
+  box.querySelectorAll<HTMLElement>('[data-title]').forEach((el) => {
+    const key = el.dataset.title!;
+    if (titles.has(key)) return;
+    const [src, ...rest] = key.split(':');
+    mediaInfo({ src: src as Item['src'], id: rest.join(':'), title: '', by: '' }).then((t) => {
+      if (t) document.querySelectorAll<HTMLElement>(`[data-title="${key}"]`).forEach((x) => { x.textContent = t; });
+    }, () => {});
+  });
+}
+// Плеер поверх чата (в углу): лента сообщений перерисовывается целиком, и плеер прямо в ней
+// начинал бы видео заново с каждым новым сообщением
+function floatPlay(src: 'yt' | 'sp', id: string, t = 0) {
+  document.getElementById('lkfloat')?.remove();
+  const el = document.createElement('div');
+  el.id = 'lkfloat';
+  el.className = 'lk-float ' + src;
+  const url = src === 'yt'
+    ? `https://www.youtube.com/embed/${id}?autoplay=1&rel=0&playsinline=1&start=${Math.floor(t)}&origin=${encodeURIComponent(location.origin)}`
+    : `https://open.spotify.com/embed/${id}?autoplay=1`;
+  el.innerHTML = `<div class="lkf-bar"><span>${src === 'yt' ? 'YouTube' : 'Spotify'}</span>
+      <button class="ibtn" data-act="together" data-src="${src}" data-id="${id}" title="Смотреть вместе">${ic('friends', 18)}</button>
+      <button class="ibtn lkf-x" title="Закрыть">${ic('close', 18)}</button></div>
+    <iframe src="${url}" allow="autoplay; encrypted-media; picture-in-picture; fullscreen; clipboard-write" allowfullscreen referrerpolicy="strict-origin-when-cross-origin"></iframe>`;
+  el.querySelector<HTMLElement>('.lkf-x')!.onclick = () => el.remove();
+  ($('.app') || document.body).append(el);
 }
 
 // ---------- файлы ----------
@@ -1631,7 +1715,7 @@ function gameHtml(u: User) {
     <div class="pc-sec ga">
       <h4>Играет</h4>
       <div class="ga-row">
-        <div class="ga-ic ${g.icon[0] === 's' ? 'wide' : ''}">${url ? `<img src="${esc(url)}" alt="" onerror="this.remove()">` : ''}${ic('gamepad', 30)}</div>
+        <div class="ga-ic ${g.icon[0] === 's' ? 'wide' : ''}">${url ? `<img src="${esc(url)}" alt="" onload="this.parentElement.classList.add('ok')" onerror="this.remove()">` : ''}${ic('gamepad', 30)}</div>
         <div class="ga-txt"><b title="${esc(g.name)}">${esc(g.name)}</b>
           <div class="ga-meta"><span class="ga-time" data-start="${g.start}">${ic('gamepad', 14)}<span>${elapsed(g.start)}</span></span><span class="ga-marw" data-start="${g.start}">${marathon(g.start)}</span></div></div>
       </div>
@@ -2044,6 +2128,9 @@ function connectWs() {
     // сервер узнаёт, кто в групповом звонке, по соединению — после обрыва напоминаем
     if (C.gid && C.state !== 'idle') wsSend({ type: 'gcall_join', group: C.gid, ring: false });
     if (afk) wsSend({ type: 'afk', afk: true });
+    if (P.conv) wsSend({ type: 'party_join', conv: P.conv });
+    const ck = convKey();
+    if (ck) wsSend({ type: 'party_peek', conv: ck });
     procsSent = '';
     scanGames();
   };
@@ -2144,6 +2231,20 @@ function onEvent(ev: any) {
       break;
     }
     case 'gcall_ring': onGroupRing(ev.group, ev.from); break;
+    case 'party_joined': onPartyJoined(ev); break;
+    case 'party_who':
+      if (ev.conv === P.conv) {
+        P.who = ev.ids;
+        const owner = party.state()?.owner;
+        if (owner && !P.who.includes(Number(owner))) party.left(owner);
+        else party.draw();
+      }
+      break;
+    case 'party':
+      if (ev.m?.t === 'state' && ev.m.s) { if (ev.m.s.on) P.peek.set(ev.conv, ev.m.s); else P.peek.delete(ev.conv); }
+      if (ev.conv === P.conv && ev.m) party.onData(ev.m);
+      renderParty();
+      break;
     case 'call_invite': onIncoming(ev.from); break;
     case 'call_accept': if (C.peer?.id === ev.from.id) setCallState('incall'); break;
     case 'call_decline':
@@ -2244,7 +2345,7 @@ function setDeaf(deaf: boolean) {
   C.deaf = deaf;
   sfx(deaf ? 'deafen' : 'undeafen');
   if (deaf) stopSounds();
-  watchDeaf(deaf);
+  callW.deafen(deaf);
   document.querySelectorAll<HTMLAudioElement>('#audio audio').forEach((a) => (a.muted = C.deaf));
   C.room?.localParticipant.setMicrophoneEnabled(!deaf && !C.selfMute).then(renderCall, () => {});
   renderCall();
@@ -2349,6 +2450,9 @@ async function joinRoom(carry?: Carry, mode: 'auto' | 'all' = 'auto') {
   room
     .on(RoomEvent.TrackSubscribed, () => { syncAudio(room); renderStage(); })
     .on(RoomEvent.TrackUnsubscribed, (track: RemoteTrack) => { track.detach(); syncAudio(room); renderStage(); })
+    // демонстрацию закрыли: публикация исчезает уже после TrackUnsubscribed — без этого плитка оставалась чёрной
+    .on(RoomEvent.TrackUnpublished, () => { syncAudio(room); renderStage(); })
+    .on(RoomEvent.TrackPublished, renderStage)
     .on(RoomEvent.Reconnected, () => syncAudio(room))
     .on(RoomEvent.LocalTrackPublished, renderStage)
     .on(RoomEvent.LocalTrackUnpublished, (pub: LocalTrackPublication) => {
@@ -2365,14 +2469,14 @@ async function joinRoom(carry?: Carry, mode: 'auto' | 'all' = 'auto') {
     .on(RoomEvent.ParticipantConnected, (p: RemoteParticipant) => {
       if (C.room === room) sfx('join');
       // новичку — что смотрим на YouTube (чуть погодя: пусть успеет подключиться)
-      setTimeout(() => { if (C.room === room) watchJoined(p.identity); }, 1000);
+      setTimeout(() => { if (C.room === room) callW.joined(p.identity); }, 1000);
       clearTimeout(C.peerGone);
       setNet('');
       setCallState('incall');
     })
     // Собеседник пропал — ждём, вдруг переподключается. Явное «Завершить» придёт через call_end
-    .on(RoomEvent.ParticipantDisconnected, () => {
-      if (C.room === room) sfx('leave');
+    .on(RoomEvent.ParticipantDisconnected, (gone: RemoteParticipant) => {
+      if (C.room === room) { sfx('leave'); callW.left(gone.identity); }
       syncAudio(room);
       renderStage();
       renderPeople();
@@ -2592,7 +2696,7 @@ function hangup(notify: boolean) {
   C.state = 'idle';
   C.focus = '';
   C.full = false;
-  watchReset();
+  callW.reset();
   closeSoundboard();
   closeTileMenu();
   stopSounds();
@@ -2613,7 +2717,11 @@ async function toggleScreen() {
       selfBrowserSurface: 'exclude',
       surfaceSwitching: 'include',
       contentHint: C.hint,
-      resolution: { width: q.w, height: q.h, frameRate: screenCaps().fps },
+      // только верхняя граница: с «идеальными» 1920×1080 Chromium обрезал экран другой пропорции
+      // (16:10, окно программы) под 16:9 — пропадал низ картинки
+      // (нулевое resolution LiveKit считает «без ограничения» и не подставляет свои ideal-размеры)
+      resolution: { width: 0, height: 0 },
+      video: { width: { max: q.w }, height: { max: q.h }, frameRate: { ideal: screenCaps().fps, max: screenCaps().fps } } as any,
     }, screenPublishOpts());
     if (lp.isScreenShareEnabled) sfx('streamStart');
   } catch (err) {
@@ -2651,6 +2759,7 @@ setInterval(async () => {
 
 // Панель звонка видна только в беседе, где идёт звонок; «Скрыть чат» растягивает её на всю высоту
 function syncCallBox() {
+  renderParty();
   const box = document.getElementById('call');
   if (!box) return;
   box.hidden = C.state === 'idle' || !callKey() || convKey() !== callKey();
@@ -2692,7 +2801,7 @@ function renderCall() {
     <div class="cgroup">
       <button class="cbtn ${scr ? 'on' : ''}" data-act="screen" title="${scr ? 'Остановить демонстрацию' : 'Демонстрация экрана'}">${ic('screen')}</button>
       <button class="cbtn ${document.querySelector('.sb-pop') ? 'sel' : ''}" data-act="sb" title="Звуковая панель">${ic('soundboard')}</button>
-      <button class="cbtn ${watchOn() ? 'on' : ''}" data-act="yt" title="${watchOn() ? 'YouTube вместе — открыть' : 'Смотреть YouTube вместе'}">${ic('youtube')}</button>
+      <button class="cbtn ${callW.on() ? 'on' : ''}" data-act="yt" title="${callW.on() ? 'Смотрим и слушаем вместе — открыть' : 'Смотреть и слушать вместе: YouTube, Spotify, музыка'}">${ic('music')}</button>
       <button class="cbtn" data-act="settings" data-tab="voice" title="Настройки голоса и демонстрации">${ic('gear')}</button>
     </div>
     <button class="cbtn hang" data-act="hangup" title="Завершить звонок">${ic('hangup', 26)}</button>
@@ -2766,7 +2875,7 @@ function renderVoicebar() {
     <div class="vb-btns">
       <button class="vbtn ${scr ? 'on' : ''}" data-act="screen" title="${scr ? 'Остановить демонстрацию' : 'Демонстрация экрана'}">${ic('screen')}</button>
       <button class="vbtn" data-act="sb" title="Звуковая панель">${ic('soundboard')}</button>
-      <button class="vbtn ${watchOn() ? 'on' : ''}" data-act="yt" title="Смотреть YouTube вместе">${ic('youtube')}</button>
+      <button class="vbtn ${callW.on() ? 'on' : ''}" data-act="yt" title="Смотреть и слушать вместе: YouTube, Spotify, музыка">${ic('music')}</button>
       <button class="vbtn" data-act="settings" data-tab="voice" title="Настройки голоса">${ic('gear')}</button>
     </div>`;
 }
@@ -2806,7 +2915,7 @@ const userOf = (p: Participant): User => userById(Number(p.identity)) ?? { id: N
 function stageTiles(): TileSpec[] {
   const room = C.room;
   const out: TileSpec[] = [];
-  if (watchOn()) out.push({ key: 'yt', kind: 'yt' });
+  if (callW.on()) out.push({ key: 'yt', kind: 'yt' });
   const parts = room ? [room.localParticipant, ...room.remoteParticipants.values()] : [];
   // демонстрации — и те, которые мы перестали смотреть (на плитке кнопка «Смотреть»)
   for (const p of parts)
@@ -2833,7 +2942,7 @@ function renderStage() {
       el.className = 'tile ' + s.kind;
       el.dataset.key = s.key;
       stage.append(el);
-      if (s.kind === 'yt') watchMount(el);
+      if (s.kind === 'yt') callW.mount(el);
       if (s.kind === 'stream') {
         el.innerHTML = '<div class="t-vid"></div><div class="t-label"></div><div class="t-tools"></div>';
         // чужую демонстрацию, как в Discord, сразу разворачиваем
@@ -3032,10 +3141,30 @@ function onData(topic: string | undefined, payload: Uint8Array, from: string) {
   try { m = JSON.parse(new TextDecoder().decode(payload)); } catch { return; }
   if (!m || typeof m !== 'object') return;
   if (topic === 'sb') return onSound(from, m);
-  if (topic === 'yt') return watchOnData(m);
+  if (topic === 'yt') return callW.onData(m);
 }
 
-initWatch({
+// ---------- смотрим и слушаем вместе ----------
+// Названия для очереди: видео YouTube и треки Spotify — через сервер, музыка из чата — имя файла
+const titles = new Map<string, string>();
+async function mediaInfo(it: Item): Promise<string> {
+  const key = it.src + ':' + it.id;
+  if (titles.has(key)) return titles.get(key)!;
+  let t = '';
+  if (it.src === 'yt') t = (await api('/api/yt/info?v=' + it.id, undefined, 8000)).title || '';
+  else if (it.src === 'sp') t = (await api('/api/sp/info?id=' + encodeURIComponent(it.id), undefined, 8000)).title || '';
+  else if (it.id.startsWith('f:')) t = attById(it.id.slice(2))?.name.replace(/\.[^.]+$/, '') || '';
+  if (t) titles.set(key, t);
+  return t;
+}
+// Вход в Spotify / YouTube — окно в том же профиле WebView2 (только приложение для Windows)
+const loginWin = tauri && !ANDROID && OS_NAME === 'Windows'
+  ? (service: 'spotify' | 'youtube') => { tauri.invoke('login_window', { service }).catch(() => toast('Не удалось открыть окно входа')); }
+  : undefined;
+const nameOfId = (id: string) => { const u = userById(Number(id)); return u ? uname(u) : 'участник'; };
+
+// В звонке: сообщения через LiveKit
+const callW = createSession({
   me: () => C.room?.localParticipant.identity ?? String(S.me?.id ?? ''),
   leader: (except) => {
     const room = C.room;
@@ -3043,26 +3172,128 @@ initWatch({
     const ids = [room.localParticipant.identity, ...[...room.remoteParticipants.values()].map((p) => p.identity)].filter((i) => i !== except).map(Number);
     return Number(room.localParticipant.identity) === Math.min(...ids);
   },
+  present: (id) => !!C.room && (C.room.localParticipant.identity === id || [...C.room.remoteParticipants.values()].some((p) => p.identity === id)),
   send: (m, to) => sendData('yt', m, to),
   myName: () => S.me ? uname(S.me) : '',
-  info: async (id) => (await api('/api/yt/info?v=' + id, undefined, 8000)).title || '',
+  nameOf: nameOfId,
+  info: mediaInfo,
+  fileUrl: (id) => fileUrl({ id } as Att),
   toast,
   ic: (n, s) => ic(n as keyof typeof ICON, s),
   esc,
   changed: () => {
-    if (watchOn() && !C.focus) C.focus = 'yt';
+    if (callW.on() && !C.focus) C.focus = 'yt';
     renderCall();
   },
+  login: loginWin,
+  place: 'call',
 });
 
-function startWatch() {
-  if (!C.room) return toast('YouTube вместе работает в звонке');
-  if (watchOn()) {
-    if (convKey() !== callKey()) C.gid ? openGroup(C.gid) : C.peer && openChat(C.peer);
-    return setFocus('yt');
-  }
+function startWatch(item?: Item) {
+  if (!C.room) return toast('Смотреть вместе в звонке можно, когда звонок идёт');
   if (convKey() !== callKey()) C.gid ? openGroup(C.gid) : C.peer && openChat(C.peer);
-  watchStart();
+  if (callW.on()) { if (item) callW.enqueue(item); return setFocus('yt'); }
+  callW.start(item);
+}
+
+// В беседе: те же плееры и очередь, сообщения пересылает сервер. Слушать можно в одной беседе за раз;
+// музыка не останавливается, когда переходишь в другую беседу (внизу слева — строка «Слушаете вместе»)
+const P = { conv: '', who: [] as number[], peek: new Map<string, WState>(), start: null as null | { item?: Item } };
+const party = createSession({
+  me: () => String(S.me?.id ?? ''),
+  leader: (except) => {
+    const ids = P.who.filter((i) => String(i) !== except);
+    return !ids.length || S.me!.id === Math.min(...ids);
+  },
+  present: (id) => P.who.includes(Number(id)),
+  send: (m) => wsSend({ type: 'party', conv: P.conv, m }),
+  myName: () => S.me ? uname(S.me) : '',
+  nameOf: nameOfId,
+  info: mediaInfo,
+  fileUrl: (id) => fileUrl({ id } as Att),
+  toast,
+  ic: (n, s) => ic(n as keyof typeof ICON, s),
+  esc,
+  changed: () => { if (!party.on() && P.conv && !P.start) leaveParty(); else renderParty(); },
+  leave: () => leaveParty(),
+  login: loginWin,
+  place: 'chat',
+});
+
+function joinParty(conv: string, item?: Item) {
+  if (!conv) return;
+  if (P.conv && P.conv !== conv) leaveParty();
+  if (P.conv === conv) {
+    if (item) party.on() ? party.enqueue(item) : party.start(item);
+    else if (!party.on()) party.start();
+    return renderParty();
+  }
+  P.conv = conv;
+  P.who = [];
+  P.start = { item };
+  if (S.ws?.readyState !== WebSocket.OPEN) { P.conv = ''; P.start = null; return toast('Нет связи с сервером'); }
+  wsSend({ type: 'party_join', conv });
+  renderParty();
+}
+
+function leaveParty() {
+  if (!P.conv) return;
+  wsSend({ type: 'party_leave', conv: P.conv });
+  P.conv = '';
+  P.who = [];
+  P.start = null;
+  party.reset();
+  renderParty();
+}
+
+// сервер ответил на party_join: что уже играет и кто слушает
+function onPartyJoined(ev: { conv: string; state: WState | null; ids: number[] }) {
+  if (ev.conv !== P.conv) return;
+  P.who = ev.ids;
+  const want = P.start;
+  P.start = null;
+  const box = $('#partybox');
+  if (ev.state) party.onData({ t: 'state', s: ev.state });
+  if (!box.dataset.on) { box.dataset.on = '1'; party.mount(box); }
+  if (want) {
+    if (party.on()) { if (want.item) party.enqueue(want.item); }
+    else party.start(want.item);
+  } else if (!ev.state && party.on()) {
+    // переподключились, а сервер про сессию забыл (перезапуск) — напоминаем
+    wsSend({ type: 'party', conv: P.conv, m: { t: 'state', s: party.state() } });
+  } else if (!party.on()) return leaveParty();
+  renderParty();
+}
+
+// Панель над чатом: плеер, если слушаем в этой беседе, или приглашение присоединиться
+function renderParty() {
+  const sec = document.getElementById('party');
+  if (!sec) return;
+  const here = convKey();
+  const box = $('#partybox'), ban = $('#partyban');
+  if (!P.conv && box.dataset.on) { box.innerHTML = ''; box.className = ''; delete box.dataset.on; }
+  const mine = !!P.conv && P.conv === here;
+  box.hidden = !mine;
+  const peek = !mine && here ? P.peek.get(here) : undefined;
+  ban.hidden = !peek;
+  if (peek) ban.innerHTML = `${ic('music', 18)}<span>В беседе смотрят и слушают вместе${peek.vid ? `: <b>${esc(peek.vid.title)}</b>` : ''}</span>
+    <button class="btn sm" data-act="pjoin">Присоединиться</button>`;
+  sec.hidden = box.hidden && ban.hidden;
+  const bar = document.getElementById('partybar');
+  if (bar) {
+    const st = party.state();
+    bar.hidden = !P.conv || mine;
+    bar.innerHTML = bar.hidden ? '' : `<div class="pb-info" data-act="popen" title="Открыть беседу">${ic('music', 16)}<div><b>Слушаете вместе</b><span>${esc(st?.vid?.title || 'Ничего не играет')}</span></div></div>
+      <button class="ibtn" data-act="pleave" title="Выйти">${ic('close', 18)}</button>`;
+  }
+  const tb = document.querySelector<HTMLElement>('[data-act="party"]');
+  if (tb) tb.classList.toggle('on', mine);
+}
+
+// «Смотреть вместе» у ссылки в чате: идёт звонок в этой беседе — в звонок, иначе — в беседу
+function together(item: Item) {
+  if (C.room && callKey() === convKey()) return startWatch(item);
+  joinParty(convKey(), item);
 }
 
 // ---------- звуковая панель ----------
@@ -3332,8 +3563,15 @@ let micTest: { stream: MediaStream; ctx: AudioContext; audio: HTMLAudioElement; 
 function openSettings(tab: SetTab) {
   if (!S.me) return;
   if (setTab !== tab && profDirty()) return shakeSavebar();
-  const prevScroll = document.querySelector<HTMLElement>('.set-nav-in')?.scrollLeft ?? 0;
   setTab = tab;
+  // окно настроек уже открыто — меняем только содержимое вкладки, без повторной анимации появления
+  if (document.querySelector('#layer .settings')) {
+    document.querySelectorAll<HTMLElement>('#layer .set-nav .sn[data-set]').forEach((b) => b.classList.toggle('sel', b.dataset.set === tab));
+    document.querySelector<HTMLElement>('.set-nav-in .sn.sel')?.scrollIntoView({ inline: 'nearest', block: 'nearest' });
+    document.querySelector('.set-body')?.scrollTo(0, 0);
+    return renderSettingsTab();
+  }
+  const prevScroll = 0;
   const navBtn = (t: SetTab, title: string) => `<button class="sn ${setTab === t ? 'sel' : ''}" data-set="${t}">${title}</button>`;
   $('#layer').innerHTML = `
     <div class="settings">
@@ -3830,6 +4068,7 @@ function renderSettingsTab() {
         <input type="checkbox" class="switch" id="notifyon" ${store.get('notify') !== '0' ? 'checked' : ''}></div>` : ''}
       ${tauri && !ANDROID ? `<div class="switch-row"><div><b>Показывать, во что я играю</b><span>Друзья увидят в профиле запущенную игру и сколько вы в неё играете, как в Discord</span></div>
         <input type="checkbox" class="switch" id="gameson" ${store.get('games') !== '0' ? 'checked' : ''}></div>` : ''}
+      ${tauri && !ANDROID ? '<div id="deskprefs"></div>' : ''}
       ${tauri ? '<hr>' : ''}
       <h3>Звуки приложения</h3>
       <label class="fld sfx-vol"><span>Громкость звуков</span><input type="range" id="sfxvol" min="0" max="100" value="${Math.round(sfxVol * 100)}"></label>
@@ -3847,6 +4086,20 @@ function renderSettingsTab() {
     if (nt) nt.onchange = () => store.set('notify', nt.checked ? '1' : '0');
     const gm = document.getElementById('gameson') as HTMLInputElement | null;
     if (gm) gm.onchange = () => { store.set('games', gm.checked ? '1' : '0'); scanGames(); };
+    // трей и автозапуск (старые сборки этих команд не знают — тогда переключателей нет)
+    const dp = document.getElementById('deskprefs');
+    if (dp) tauri.invoke('desktop_prefs').then((p: { tray: boolean; autostart: boolean }) => {
+      dp.innerHTML = `
+        <div class="switch-row"><div><b>Сворачивать в трей при закрытии</b><span>Крестик прячет окно, как в Discord: сообщения и звонки продолжают работать. Открыть — значок Startrack в трее</span></div>
+          <input type="checkbox" class="switch" id="trayon" ${p.tray ? 'checked' : ''}></div>
+        <div class="switch-row"><div><b>Запускать вместе с ${OS_NAME === 'Windows' ? 'Windows' : 'системой'}</b><span>Startrack сам откроется в трее при входе в систему — чтобы не пропускать сообщения и звонки</span></div>
+          <input type="checkbox" class="switch" id="autoon" ${p.autostart ? 'checked' : ''}></div>`;
+      const tr = $<HTMLInputElement>('#trayon'), au = $<HTMLInputElement>('#autoon');
+      tr.onchange = () => tauri.invoke('set_tray', { on: tr.checked });
+      au.onchange = () => tauri.invoke('set_autostart', { on: au.checked })
+        .then((on: boolean) => { au.checked = on; })
+        .catch((e: unknown) => { au.checked = !au.checked; toast(String(e)); });
+    }, () => {});
     $('#rplay').onclick = () => {
       if (ringing()) return;
       ringPreview = !ringPreview;
@@ -4077,6 +4330,8 @@ async function saveProfile() {
     Object.assign(S.me!, await api('/api/me/profile', body));
     dropDraft();
     renderMe();
+    const head = document.querySelector('#layer .set-me');
+    if (head) head.innerHTML = `${avatar(S.me!, 40)}<div><b>${esc(uname(S.me!))}</b><span>Startrack ${__APP_VERSION__}</span></div>`;
     openSettings('profile');
     toast('Профиль сохранён');
   } catch (err) {
@@ -4298,15 +4553,19 @@ function stopMicTest() {
 // Не успели проверить за несколько секунд — пускаем в приложение, а найденное обновление
 // покажем зелёной кнопкой в левой панели. Пока приложение открыто, проверяем каждые 3 минуты
 // и когда окно снова в фокусе; проверка не прошла (сеть, VPN) — повторяем через минуту.
-const tauri = (window as any).__TAURI_INTERNALS__;
 const U = { version: '', notes: '', apk: '' };
 let updTimer = 0;
 let updBusy = false;
 let updLast = 0;
 
 // Скачанный файл: приложение (download.rs) сообщает, куда его сохранило
+let pendingOpen = ''; // «Открыть в плеере» у видео: после скачивания открываем файл системной программой
 (window as any).__stDownload = (path: string | null, ok: boolean) => {
   if (!ok || !path) return toast('Не удалось скачать файл');
+  if (pendingOpen && path.split(/[\\/]/).pop()!.startsWith(pendingOpen.replace(/\.[^.]+$/, ''))) {
+    pendingOpen = '';
+    return void tauri.invoke('open_path', { path }).catch(() => tauri.invoke('reveal_file', { path }).catch(() => {}));
+  }
   toast(`Сохранено в «Загрузки»: ${path.split(/[\\/]/).pop()} — нажмите, чтобы показать в папке`,
     () => tauri.invoke('reveal_file', { path }).catch(() => {}));
 };

@@ -141,10 +141,14 @@ fn invoke(cmd: &str, args: &Value) -> Result<Value, String> {
         "notify" => json!(crate::cmds::notify(arg(args, "title"), arg(args, "body"))),
         "open_url" => json!(crate::cmds::open_url(arg(args, "url"))?),
         "reveal_file" => json!(crate::cmds::reveal_file(&arg(args, "path"))),
+        "open_path" => json!(crate::cmds::open_path(&arg(args, "path"))?),
         "running_procs" => json!(crate::games::running_procs()),
         "update_check" => json!(crate::update::check()?),
         "update_install" => json!(crate::update::install()?),
         "update_progress" => json!(crate::update::progress()),
+        "desktop_prefs" => crate::desktop::prefs(),
+        "set_tray" => json!(crate::desktop::set_tray(args.get("on").and_then(Value::as_bool).unwrap_or(true))),
+        "set_autostart" => json!(crate::desktop::set_autostart(args.get("on").and_then(Value::as_bool).unwrap_or(true))?),
         _ => return Err(format!("unknown command {cmd}")),
     })
 }

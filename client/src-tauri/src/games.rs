@@ -5,27 +5,85 @@ use serde_json::{json, Value};
 use std::collections::HashMap;
 
 pub fn running_procs() -> Vec<Value> {
-    let mut seen: HashMap<String, u64> = HashMap::new();
-    for (path, start) in list() {
+    // путь -> (время запуска, appid из окружения процесса — только Linux)
+    let mut seen: HashMap<String, (u64, Option<String>)> = HashMap::new();
+    for (path, start, appid) in list() {
         let lower = path.to_lowercase().replace('\\', "/");
-        if lower.starts_with("c:/windows/") {
+        if lower.starts_with("c:/windows/") || (appid.is_none() && steam_tool(&lower)) {
             continue;
         }
-        let e = seen.entry(path).or_insert(start);
-        *e = (*e).min(start);
+        let e = seen.entry(path).or_insert((start, appid.clone()));
+        e.0 = e.0.min(start);
+        if e.1.is_none() {
+            e.1 = appid;
+        }
     }
     let me = std::env::current_exe().ok().map(|p| p.to_string_lossy().to_string());
     let mut steam_cache: HashMap<String, Vec<(String, String, String)>> = HashMap::new();
     seen.into_iter()
         .filter(|(p, _)| Some(p) != me.as_ref())
-        .map(|(path, start)| {
+        .map(|(path, (start, appid))| {
             let norm = path.replace('\\', "/");
             let parts: Vec<&str> = norm.split('/').collect();
             let tail = parts[parts.len().saturating_sub(4)..].join("/");
-            let steam = steam_app(&norm, &mut steam_cache);
+            let steam = match appid {
+                Some(id) => {
+                    let name = steam_name(&id, &mut steam_cache);
+                    Some((id, name))
+                }
+                None => steam_app(&norm, &mut steam_cache),
+            };
             json!({ "p": tail, "t": start, "steam": steam.map(|(id, name)| json!([id, name])) })
         })
         .collect()
+}
+
+// Служебное Steam, а не игра: контейнер Steam Linux Runtime, Proton, общие библиотеки
+fn steam_tool(lower: &str) -> bool {
+    let Some(i) = lower.find("/steamapps/common/") else {
+        return lower.contains("/pressure-vessel/") || lower.contains("/steam-runtime");
+    };
+    let dir = lower[i + "/steamapps/common/".len()..].split('/').next().unwrap_or("");
+    dir.starts_with("steamlinuxruntime") || dir.starts_with("proton") || dir == "steamworks shared"
+}
+
+// Название игры по appid: appmanifest_<id>.acf в одной из библиотек Steam (Linux)
+#[allow(unused_variables)]
+fn steam_name(id: &str, cache: &mut HashMap<String, Vec<(String, String, String)>>) -> String {
+    #[cfg(target_os = "linux")]
+    for lib in linux_libraries() {
+        let apps = cache.entry(lib.to_lowercase()).or_insert_with(|| read_manifests(&lib));
+        if let Some((_, name, _)) = apps.iter().find(|(a, _, _)| a == id) {
+            return name.clone();
+        }
+    }
+    String::new()
+}
+
+// Папки steamapps всех библиотек: основная и перечисленные в libraryfolders.vdf
+#[cfg(target_os = "linux")]
+fn linux_libraries() -> Vec<String> {
+    let home = std::env::var("HOME").unwrap_or_default();
+    let roots = [".steam/steam", ".local/share/Steam", ".var/app/com.valvesoftware.Steam/.local/share/Steam", "snap/steam/common/.local/share/Steam"];
+    let mut out: Vec<String> = Vec::new();
+    for r in roots {
+        let apps = format!("{home}/{r}/steamapps");
+        let Ok(text) = std::fs::read_to_string(format!("{apps}/libraryfolders.vdf")) else { continue };
+        let mut libs = vec![apps];
+        for line in text.lines() {
+            let f: Vec<&str> = line.split('"').collect();
+            if f.len() >= 4 && f[1].eq_ignore_ascii_case("path") {
+                libs.push(format!("{}/steamapps", f[3]));
+            }
+        }
+        for l in libs {
+            let canon = std::fs::canonicalize(&l).map(|p| p.to_string_lossy().to_string()).unwrap_or(l);
+            if !out.contains(&canon) {
+                out.push(canon);
+            }
+        }
+    }
+    out
 }
 
 // .../steamapps/common/<папка>/... → appid и название из steamapps/appmanifest_*.acf с этим installdir
@@ -68,9 +126,9 @@ fn read_manifests(lib: &str) -> Vec<(String, String, String)> {
     out
 }
 
-// (полный путь к exe, время запуска в мс Unix) для всех процессов, к которым есть доступ
+// (полный путь к exe, время запуска в мс Unix, appid Steam из окружения) для всех процессов, к которым есть доступ
 #[cfg(windows)]
-fn list() -> Vec<(String, u64)> {
+fn list() -> Vec<(String, u64, Option<String>)> {
     use windows::core::PWSTR;
     use windows::Win32::Foundation::{CloseHandle, FILETIME};
     use windows::Win32::System::Diagnostics::ToolHelp::{
@@ -97,7 +155,7 @@ fn list() -> Vec<(String, u64)> {
                         } else {
                             0
                         };
-                        out.push((String::from_utf16_lossy(&buf[..len as usize]), start));
+                        out.push((String::from_utf16_lossy(&buf[..len as usize]), start, None));
                     }
                     let _ = CloseHandle(h);
                 }
@@ -111,8 +169,10 @@ fn list() -> Vec<(String, u64)> {
 
 // Linux: /proc/<pid>/exe и время запуска из /proc/<pid>/stat. Игры под Wine/Proton видны как
 // wine-preloader, поэтому у них берём argv[0] — путь к .exe (диск Z: — это корень Linux).
+// Игры из Steam запускаются внутри контейнера Steam Linux Runtime и через Proton — по пути их не
+// всегда узнать, зато Steam ставит всем процессам игры переменную SteamAppId.
 #[cfg(target_os = "linux")]
-fn list() -> Vec<(String, u64)> {
+fn list() -> Vec<(String, u64, Option<String>)> {
     let tick = unsafe { libc::sysconf(libc::_SC_CLK_TCK) }.max(1) as u64;
     let boot = std::fs::read_to_string("/proc/stat")
         .ok()
@@ -130,8 +190,16 @@ fn list() -> Vec<(String, u64)> {
         }
         let Ok(exe) = std::fs::read_link(dir.join("exe")) else { continue };
         let mut path = exe.to_string_lossy().trim_end_matches(" (deleted)").to_string();
+        let appid = std::fs::read(dir.join("environ")).ok().and_then(|env| {
+            env.split(|&b| b == 0).find_map(|kv| {
+                let v = std::str::from_utf8(kv.strip_prefix(b"SteamAppId=")?).ok()?;
+                (v != "0" && !v.is_empty() && v.len() <= 10 && v.bytes().all(|b| b.is_ascii_digit())).then(|| v.to_string())
+            })
+        });
         let file = path.rsplit('/').next().unwrap_or("");
-        if file.starts_with("wine") || file.contains("preloader") {
+        if appid.is_some() {
+            // процесс игры из Steam (в том числе обёртки контейнера) — оставляем как есть
+        } else if file.starts_with("wine") || file.contains("preloader") {
             let cmd = std::fs::read(dir.join("cmdline")).unwrap_or_default();
             let argv0 = String::from_utf8_lossy(cmd.split(|&b| b == 0).next().unwrap_or(&[])).to_string();
             let b = argv0.as_bytes();
@@ -148,12 +216,12 @@ fn list() -> Vec<(String, u64)> {
             .and_then(|s| s.rsplit_once(')')?.1.split_whitespace().nth(19)?.parse::<u64>().ok())
             .map(|t| (boot + t / tick) * 1000)
             .unwrap_or(0);
-        out.push((path, start));
+        out.push((path, start, appid));
     }
     out
 }
 
 #[cfg(not(any(windows, target_os = "linux")))]
-fn list() -> Vec<(String, u64)> {
+fn list() -> Vec<(String, u64, Option<String>)> {
     Vec::new()
 }

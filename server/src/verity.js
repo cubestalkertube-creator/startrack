@@ -25,6 +25,8 @@ const MAX_STEPS = 20; // шагов (обращений к нейросети) �
 const TURN_TTL = 15 * 60e3; // сколько ждём результатов от компьютера, потом бросаем ход
 const PRANK_GAP = 40e3; // не чаще одной пакости за это время
 const PER_DAY = 150; // сообщений Верити в сутки на человека — бережём баланс
+// название чата — по первому сообщению, как в ChatGPT
+const titleOf = (text) => String(text || '').replace(/\s+/g, ' ').trim().slice(0, 60) || 'Новый чат';
 export const PRANKS = ['glitch', 'theme', 'scare', 'whisper', 'flip', 'watch'];
 
 // лицо по злости; furious — та самая безумная улыбка
@@ -157,6 +159,22 @@ export function initVerity(db, { addColumn, push, userFacts }) {
     CREATE INDEX IF NOT EXISTS verity_uid ON verity (uid, id);
   `);
   addColumn('verity', 'steps', 'TEXT'); // JSON: что Верити делал по ходу ответа (ссылки, файлы, команды)
+  // Несколько чатов с Верити, как в ChatGPT: в одном он может работать, пока пишешь в другом
+  addColumn('verity', 'chat', 'INTEGER NOT NULL DEFAULT 0');
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS verity_chats (
+      id INTEGER PRIMARY KEY AUTOINCREMENT, uid INTEGER NOT NULL, title TEXT NOT NULL DEFAULT '',
+      created INTEGER NOT NULL, updated INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS verity_chats_uid ON verity_chats (uid, updated);
+    CREATE INDEX IF NOT EXISTS verity_chat ON verity (chat, id);
+  `);
+  // переписка до появления чатов — в первый чат каждого пользователя
+  for (const o of db.prepare('SELECT uid, MIN(created) AS c, MAX(created) AS u FROM verity WHERE chat = 0 GROUP BY uid').all()) {
+    const first = db.prepare("SELECT text FROM verity WHERE uid = ? AND chat = 0 AND role = 'user' ORDER BY id LIMIT 1").get(o.uid);
+    const id = Number(db.prepare('INSERT INTO verity_chats (uid, title, created, updated) VALUES (?, ?, ?, ?)').run(o.uid, titleOf(first?.text), o.c, o.u).lastInsertRowid);
+    db.prepare('UPDATE verity SET chat = ? WHERE uid = ? AND chat = 0').run(id, o.uid);
+  }
   // злость на момент v_at; v_prank — когда была последняя пакость
   addColumn('users', 'v_anger', 'INTEGER NOT NULL DEFAULT 0');
   addColumn('users', 'v_at', 'INTEGER');
@@ -164,11 +182,19 @@ export function initVerity(db, { addColumn, push, userFacts }) {
   const vq = {
     state: db.prepare('SELECT v_anger, v_at, v_prank FROM users WHERE id = ?'),
     setState: db.prepare('UPDATE users SET v_anger = ?, v_at = ?, v_prank = ? WHERE id = ?'),
-    history: db.prepare('SELECT * FROM (SELECT id, role, text, face, prank, steps, created FROM verity WHERE uid = ? ORDER BY id DESC LIMIT ?) ORDER BY id'),
-    add: db.prepare('INSERT INTO verity (uid, role, text, face, prank, steps, created) VALUES (?, ?, ?, ?, ?, ?, ?)'),
+    history: db.prepare('SELECT * FROM (SELECT id, role, text, face, prank, steps, created FROM verity WHERE chat = ? ORDER BY id DESC LIMIT ?) ORDER BY id'),
+    add: db.prepare('INSERT INTO verity (uid, chat, role, text, face, prank, steps, created) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'),
     today: db.prepare("SELECT COUNT(*) AS n FROM verity WHERE uid = ? AND role = 'user' AND created > ?"),
     clear: db.prepare('DELETE FROM verity WHERE uid = ?'),
+    clearChat: db.prepare('DELETE FROM verity WHERE chat = ?'),
     del: db.prepare('DELETE FROM verity WHERE id = ?'),
+    chats: db.prepare('SELECT id, title, created, updated FROM verity_chats WHERE uid = ? ORDER BY updated DESC LIMIT 200'),
+    chat: db.prepare('SELECT id, title, created, updated FROM verity_chats WHERE id = ? AND uid = ?'),
+    newChat: db.prepare('INSERT INTO verity_chats (uid, title, created, updated) VALUES (?, ?, ?, ?)'),
+    touch: db.prepare("UPDATE verity_chats SET updated = ?, title = CASE WHEN title = '' THEN ? ELSE title END WHERE id = ?"),
+    rename: db.prepare('UPDATE verity_chats SET title = ? WHERE id = ?'),
+    delChat: db.prepare('DELETE FROM verity_chats WHERE id = ?'),
+    dropChats: db.prepare('DELETE FROM verity_chats WHERE uid = ?'),
   };
   const out = (m) => ({ ...m, steps: m.steps ? JSON.parse(m.steps) : undefined });
 
@@ -185,11 +211,12 @@ export function initVerity(db, { addColumn, push, userFacts }) {
 
   // Ход — один ответ Верити, который может идти в несколько шагов: нейросеть вызывает инструменты,
   // серверные (ссылки, поиск) выполняем сразу, компьютерные отдаём приложению и ждём /api/verity/continue.
-  const turns = new Map(); // uid → ход
+  const turns = new Map(); // id чата → ход (в разных чатах Верити работает одновременно)
+  const MAX_BUSY = 3; // одновременно работающих чатов у одного человека
   let seq = 0;
-  const live = (uid) => {
-    const t = turns.get(uid);
-    if (t && !t.busy && Date.now() - t.at > TURN_TTL) { turns.delete(uid); return null; }
+  const live = (key) => {
+    const t = turns.get(key);
+    if (t && !t.busy && Date.now() - t.at > TURN_TTL) { turns.delete(key); return null; }
     return t;
   };
 
@@ -235,7 +262,7 @@ export function initVerity(db, { addColumn, push, userFacts }) {
   }
 
   // шаги, пока нейросеть не ответит или не попросит компьютер
-  async function advance(uid, t) {
+  async function advance(key, t) {
     t.busy = true;
     try {
       for (;;) {
@@ -245,16 +272,16 @@ export function initVerity(db, { addColumn, push, userFacts }) {
           m = await chat(t.messages, t.tools, t.n >= MAX_STEPS);
         } catch (e) {
           console.error('verity', e.message);
-          if (turns.get(uid) !== t) return { stopped: true }; // пока думал — нажали «Стоп»
-          if (!t.n) { turns.delete(uid); vq.del.run(t.asked); throw [502, 'Верити задумался и не ответил. Попробуй ещё раз']; }
-          return finish(uid, t, { reply: 'Нейросеть оборвалась на середине работы. Напиши «продолжай» — доделаю.', delta: 0, prank: 'none' });
+          if (turns.get(key) !== t) return { stopped: true }; // пока думал — нажали «Стоп»
+          if (!t.n) { turns.delete(key); vq.del.run(t.asked); throw [502, 'Верити задумался и не ответил. Попробуй ещё раз']; }
+          return finish(key, t, { reply: 'Нейросеть оборвалась на середине работы. Напиши «продолжай» — доделаю.', delta: 0, prank: 'none' });
         }
-        if (turns.get(uid) !== t) return { stopped: true };
+        if (turns.get(key) !== t) return { stopped: true };
         t.n++;
         const calls = (m.tool_calls || []).filter((c) => c?.function?.name);
-        if (!calls.length) return finish(uid, t, { reply: m.content || '…', delta: 0, prank: 'none' });
+        if (!calls.length) return finish(key, t, { reply: m.content || '…', delta: 0, prank: 'none' });
         const ans = calls.find((c) => c.function.name === 'answer');
-        if (ans) return finish(uid, t, args(ans));
+        if (ans) return finish(key, t, args(ans));
         t.messages.push({ role: 'assistant', content: m.content || '', tool_calls: calls });
         t.pending = [];
         for (const c of calls) {
@@ -276,8 +303,9 @@ export function initVerity(db, { addColumn, push, userFacts }) {
     }
   }
 
-  function finish(uid, t, o) {
-    turns.delete(uid);
+  function finish(key, t, o) {
+    turns.delete(key);
+    const uid = t.uid;
     const now = Date.now();
     let anger = 0;
     let prank = null;
@@ -296,7 +324,8 @@ export function initVerity(db, { addColumn, push, userFacts }) {
     }
     const reply = String(o.reply || '').trim() || '…';
     const steps = t.steps.length ? t.steps : undefined;
-    const id = Number(vq.add.run(uid, 'verity', reply, face, prank, steps ? JSON.stringify(steps) : null, now).lastInsertRowid);
+    const id = Number(vq.add.run(uid, t.chat, 'verity', reply, face, prank, steps ? JSON.stringify(steps) : null, now).lastInsertRowid);
+    vq.touch.run(now, '', t.chat);
     push(uid, { type: 'verity', ...view({ anger }) }); // лицо в списке бесед на других устройствах
     return { message: { id, role: 'verity', text: reply, face, prank, steps, created: now }, ...view({ anger }), prank };
   }
@@ -338,36 +367,73 @@ export function initVerity(db, { addColumn, push, userFacts }) {
     return { content, stored: [text, marks].filter(Boolean).join(' '), any };
   }
 
+  const chatOf = (me, id) => {
+    const c = vq.chat.get(Number(id) || 0, me.id);
+    if (!c) throw [404, 'Чат не найден'];
+    return c;
+  };
+  const lastChat = (me) => vq.chats.all(me.id)[0] || null;
   const routes = {
-    'GET /api/verity': async (me) => ({ messages: vq.history.all(me.id, 200).map(out), ...view(moodOf(me.id)) }),
-    'POST /api/verity/clear': async (me) => {
-      vq.clear.run(me.id);
-      turns.delete(me.id);
+    // ?chat=<id> — переписка этого чата; без него — последнего, в котором писали
+    'GET /api/verity': async (me, _b, url) => {
+      const chats = vq.chats.all(me.id);
+      const want = Number(url.searchParams.get('chat')) || 0;
+      const c = want ? chatOf(me, want) : chats[0];
+      return { chats, chat: c?.id || 0, messages: c ? vq.history.all(c.id, 200).map(out) : [], ...view(moodOf(me.id)) };
+    },
+    'POST /api/verity/chats': async (me, b) => {
+      const now = Date.now();
+      const id = Number(vq.newChat.run(me.id, String(b.title || '').trim().slice(0, 80), now, now).lastInsertRowid);
+      return vq.chat.get(id, me.id);
+    },
+    'POST /api/verity/chats/rename': async (me, b) => {
+      const c = chatOf(me, b.chat);
+      vq.rename.run(String(b.title || '').trim().slice(0, 80) || 'Новый чат', c.id);
+      return vq.chat.get(c.id, me.id);
+    },
+    'POST /api/verity/chats/delete': async (me, b) => {
+      const c = chatOf(me, b.chat);
+      turns.delete(c.id);
+      vq.clearChat.run(c.id);
+      vq.delChat.run(c.id);
+      return { chats: vq.chats.all(me.id) };
+    },
+    // очистить переписку чата (сам чат остаётся)
+    'POST /api/verity/clear': async (me, b) => {
+      const c = b.chat === undefined ? lastChat(me) : chatOf(me, b.chat);
+      if (!c) return view(moodOf(me.id));
+      vq.clearChat.run(c.id);
+      turns.delete(c.id);
       vq.setState.run(0, Date.now(), null, me.id); // и злость заодно сбрасываем
       return view(moodOf(me.id));
     },
     // b.text — сообщение; b.images — data-URL картинок (и кадров видео); b.files — аудио/видео/документы;
     // b.docs — текстовые файлы; b.pc — приложение умеет выполнять инструменты компьютера;
     // b.ctx — время, система, рабочая папка (ws); b.personality — включена ли личность (false — спокойный режим)
+    // b.chat — id чата (0 или нет — новый чат, его id вернётся в ответе)
     'POST /api/verity': async (me, b) => {
       if (!API_KEY) throw [503, 'Верити спит: на сервере не настроен ключ нейросети'];
       const text = String(b.text || '').trim().slice(0, MAX_TEXT);
-      const prev = live(me.id);
-      if (prev?.busy) throw [429, 'Верити ещё работает над прошлым сообщением'];
-      if (prev) turns.delete(me.id); // ход ждал компьютер, а приложение перезапустили — бросаем его
       const now = Date.now();
+      // клиенты до 0.1.29 чатов не знают (chat нет вовсе) — пишут в последний чат, как раньше
+      let c = b.chat === undefined ? lastChat(me) : b.chat ? chatOf(me, b.chat) : null;
+      const prev = c && live(c.id);
+      if (prev?.busy) throw [429, 'Верити ещё работает над прошлым сообщением в этом чате'];
+      if (prev) turns.delete(c.id); // ход ждал компьютер, а приложение перезапустили — бросаем его
+      if ([...turns.values()].filter((x) => x.uid === me.id && x.busy).length >= MAX_BUSY) throw [429, `Верити уже работает в ${MAX_BUSY} чатах — дождись ответа в одном из них`];
       if (vq.today.get(me.id, now - 864e5).n >= PER_DAY) throw [429, 'Верити устал: на сегодня лимит сообщений исчерпан. Приходи завтра!'];
+      if (!c) c = vq.chat.get(Number(vq.newChat.run(me.id, '', now, now).lastInsertRowid), me.id);
       const personality = b.personality !== false;
       const ctx = b.ctx && typeof b.ctx === 'object' ? b.ctx : {};
       const pc = b.pc === true && typeof ctx.ws === 'string' && !!ctx.ws;
       const t = {
-        id: `${me.id}-${++seq}-${now}`, at: now, n: 0, pc, personality, steps: [], results: new Map(), pending: [], busy: true,
+        id: `${me.id}-${++seq}-${now}`, uid: me.id, chat: c.id, at: now, n: 0, pc, personality, steps: [], results: new Map(), pending: [], busy: true,
         mood: moodOf(me.id, now), tools: [ANSWER, ...WEB_TOOLS, ...(pc ? PC_TOOLS : [])],
       };
-      turns.set(me.id, t); // занимаем сразу: пока смотрим вложения, второе сообщение не примем
+      turns.set(c.id, t); // занимаем сразу: пока смотрим вложения, второе сообщение не примем
       let att;
-      try { att = await attachments(b, text, t); } catch (e) { turns.delete(me.id); throw e; }
-      if (!text && !att.any) { turns.delete(me.id); throw [400, 'Пустое сообщение']; }
+      try { att = await attachments(b, text, t); } catch (e) { turns.delete(c.id); throw e; }
+      if (!text && !att.any) { turns.delete(c.id); throw [400, 'Пустое сообщение']; }
       const face = personality ? faceOf(t.mood.anger) : 'smile';
       const facts = [
         ...userFacts(me.id),
@@ -377,18 +443,19 @@ export function initVerity(db, { addColumn, push, userFacts }) {
       ].filter(Boolean).map((s) => '- ' + s).join('\n');
       const work = { pc, ws: String(ctx.ws || '').slice(0, 260), os: String(ctx.os || 'Windows').slice(0, 20) };
       // в историю картинки и файлы не кладём (дорого пересылать) — только пометки; что делал — короткой строкой
-      const past = vq.history.all(me.id, HISTORY).map((m) => {
+      const past = vq.history.all(c.id, HISTORY).map((m) => {
         const did = m.steps ? JSON.parse(m.steps).map((s) => s.t).join('; ').slice(0, 1500) : '';
         return { role: m.role === 'user' ? 'user' : 'assistant', content: did ? `(мои действия: ${did})\n${m.text}` : m.text };
       });
-      t.asked = Number(vq.add.run(me.id, 'user', att.stored, null, null, null, now).lastInsertRowid);
+      t.asked = Number(vq.add.run(me.id, c.id, 'user', att.stored, null, null, null, now).lastInsertRowid);
+      vq.touch.run(now, titleOf(att.stored), c.id);
       const sys = personality ? systemPrompt(face, facts, t.mood.anger >= 50, work) : calmSystemPrompt(work);
       t.messages = [{ role: 'system', content: sys }, ...past, { role: 'user', content: att.content }];
-      return advance(me.id, t);
+      return withChat(me, c.id, await advance(c.id, t));
     },
     // результаты инструментов с компьютера: b.turn, b.results = [{ id, ok, out }]
     'POST /api/verity/continue': async (me, b) => {
-      const t = live(me.id);
+      const t = live(b.chat === undefined ? [...turns.values()].find((x) => x.uid === me.id && x.id === b.turn)?.chat : chatOf(me, b.chat).id);
       if (!t || t.id !== b.turn || !t.pending.length) throw [409, 'Этот ответ Верити уже закончен'];
       if (t.busy) throw [429, 'Верити ещё думает'];
       const got = new Map((Array.isArray(b.results) ? b.results : []).map((r) => [r?.id, r]));
@@ -403,14 +470,24 @@ export function initVerity(db, { addColumn, push, userFacts }) {
       }
       t.pending = [];
       addResults(t);
-      return advance(me.id, t);
+      return withChat(me, t.chat, await advance(t.chat, t));
     },
     // кнопка «Стоп»: бросаем ход, Верити коротко отвечает, что остановился
-    'POST /api/verity/stop': async (me) => {
-      const t = turns.get(me.id);
+    'POST /api/verity/stop': async (me, b) => {
+      const c = b.chat === undefined ? { id: [...turns.values()].find((x) => x.uid === me.id)?.chat } : chatOf(me, b.chat);
+      const t = turns.get(c.id);
       if (!t) return { stopped: false };
-      return { stopped: true, ...finish(me.id, t, { reply: t.steps.length ? 'Остановился, как ты сказал. Что успел — выше.' : 'Хорошо, не буду.', delta: 0, prank: 'none' }) };
+      return { stopped: true, ...finish(c.id, t, { reply: t.steps.length ? 'Остановился, как ты сказал. Что успел — выше.' : 'Хорошо, не буду.', delta: 0, prank: 'none' }) };
     },
   };
-  return { routes, drop: (uid) => { vq.clear.run(uid); turns.delete(uid); } };
+  // ответ вместе с чатом: у нового чата клиент узнаёт id, у безымянного — название
+  const withChat = (me, id, r) => ({ ...r, chat: vq.chat.get(id, me.id) });
+  return {
+    routes,
+    drop: (uid) => {
+      for (const [k, t] of turns) if (t.uid === uid) turns.delete(k);
+      vq.clear.run(uid);
+      vq.dropChats.run(uid);
+    },
+  };
 }

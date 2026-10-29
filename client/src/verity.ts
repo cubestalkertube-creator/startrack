@@ -33,18 +33,27 @@ type Opts = {
   setPersonality?: (on: boolean) => void;
 };
 
+// Чат с Верити, как в ChatGPT: их несколько, и пока в одном Верити работает, можно писать в другом.
+// id 0 — новый чат, которого на сервере ещё нет (появится с первым сообщением).
+type Chat = {
+  id: number; title: string; updated: number;
+  msgs: VMsg[]; loaded: boolean;
+  busy: boolean; stop: boolean;
+  live: { steps: Step[]; now: string } | null; // ход в работе: сделанные шаги и текущее действие
+};
+const newChat = (c?: { id: number; title: string; updated: number }): Chat =>
+  ({ id: c?.id ?? 0, title: c?.title ?? '', updated: c?.updated ?? Date.now(), msgs: [], loaded: !c, busy: false, stop: false, live: null });
+
 let O: Opts;
 const V = {
   open: false,
-  loaded: false,
+  listed: false, // список чатов загружен
   loading: false,
-  busy: false,
-  msgs: [] as VMsg[],
+  chats: [] as Chat[], // сохранённые чаты, свежие сверху
+  cur: newChat(), // открытый чат
   face: 'grin' as Face,
   att: [] as Att[], // вложения, ждущие отправки
   showSide: true,
-  live: null as { steps: Step[]; now: string } | null, // ход в работе: сделанные шаги и текущее действие
-  stop: false,
   pc: null as { mode: PcMode; workspace: string } | null,
   outs: new Map<string, string>(), // вывод блоков кода, запущенных кнопкой
 };
@@ -56,7 +65,7 @@ export function initVerity(o: Opts) { O = o; }
 export const verityOpen = () => V.open;
 export function closeVerity() { V.open = false; }
 export function resetVerity() {
-  Object.assign(V, { open: false, loaded: false, busy: false, msgs: [], face: 'grin', att: [], live: null, stop: false });
+  Object.assign(V, { open: false, listed: false, loading: false, chats: [], cur: newChat(), face: 'grin', att: [] });
   V.outs.clear();
   stopPranks();
 }
@@ -135,17 +144,92 @@ export async function openVerity() {
   V.open = true;
   if (matchMedia('(max-width: 760px)').matches) V.showSide = false; // на телефоне панель закрыла бы весь чат
   pcInfo();
-  if (!V.loaded && !V.loading) {
+  if (!V.listed && !V.loading) {
     V.loading = true;
     try {
+      // без ?chat сервер отдаёт список чатов и переписку последнего
       const r = await O.api('/api/verity');
-      V.msgs = r.messages;
+      mergeChats(r.chats);
+      // открытый сейчас чат (в том числе работающий) не подменяем
+      if (!V.cur.id && !V.cur.msgs.length && r.chat) V.cur = V.chats.find((c) => c.id === r.chat) ?? V.cur;
+      const c = V.chats.find((x) => x.id === r.chat);
+      if (c && !c.busy) { c.msgs = r.messages; c.loaded = true; }
       setFace(r.face);
-      V.loaded = true;
+      V.listed = true;
     } catch (err) { O.toast((err as Error).message); }
     V.loading = false;
-    if (V.open) drawMsgs();
+    if (V.open) { drawMsgs(); drawSide(); }
   }
+}
+
+// список чатов с сервера; уже открытые объекты чатов оставляем (в них может идти работа)
+function mergeChats(list: { id: number; title: string; updated: number }[]) {
+  const old = new Map(V.chats.map((c) => [c.id, c]));
+  V.chats = list.map((x) => {
+    const c = old.get(x.id);
+    if (!c) return newChat(x);
+    Object.assign(c, { title: x.title, updated: x.updated });
+    if (!c.busy) c.loaded = false; // переписку перечитаем при открытии
+    return c;
+  });
+  // работающий чат, которого вдруг нет в списке, не теряем
+  for (const c of old.values()) if (c.busy && !V.chats.includes(c)) V.chats.unshift(c);
+}
+
+async function loadChat(c: Chat) {
+  if (c.loaded || !c.id) return;
+  try {
+    const r = await O.api('/api/verity?chat=' + c.id);
+    if (!c.busy) c.msgs = r.messages;
+    c.loaded = true;
+  } catch (err) { O.toast((err as Error).message); }
+  if (V.cur === c) drawMsgs();
+}
+
+// переключиться на чат (0 — новый пустой)
+export function openVerityChat(id: number) {
+  if (!id) {
+    if (V.cur.id || V.cur.msgs.length) V.cur = newChat();
+  } else {
+    const c = V.chats.find((x) => x.id === id);
+    if (!c) return;
+    V.cur = c;
+    loadChat(c);
+  }
+  V.outs.clear();
+  drawMsgs();
+  drawSide();
+  drawTop();
+  document.querySelector<HTMLTextAreaElement>('#vchat textarea')?.focus();
+  if (matchMedia('(max-width: 760px)').matches && V.showSide) toggleVeritySide();
+}
+
+export async function deleteVerityChat(id: number) {
+  const c = V.chats.find((x) => x.id === id);
+  if (!c) return;
+  try {
+    const r = await O.api('/api/verity/chats/delete', { chat: id });
+    c.stop = true;
+    mergeChats(r.chats);
+    if (V.cur === c) V.cur = V.chats[0] ?? newChat();
+    loadChat(V.cur);
+    drawMsgs();
+    drawSide();
+    drawTop();
+  } catch (err) { O.toast((err as Error).message); }
+}
+
+export async function renameVerityChat(id: number) {
+  const c = V.chats.find((x) => x.id === id);
+  if (!c) return;
+  const title = prompt('Название чата', c.title)?.trim();
+  if (!title || title === c.title) return;
+  try {
+    const r = await O.api('/api/verity/chats/rename', { chat: id, title });
+    c.title = r.title;
+    drawSide();
+    drawTop();
+  } catch (err) { O.toast((err as Error).message); }
 }
 
 // лицо молча обновляем везде, где оно есть; ни подписей, ни шкал
@@ -162,7 +246,7 @@ function setFace(face: Face) {
 // событие с сервера: лицо поменялось на другом устройстве
 export function verityEvent(ev: { face: Face }) {
   if (!enabled()) return;
-  if (!V.open) V.loaded = false; // переписку перечитаем при следующем открытии
+  if (!V.open) V.listed = false; // чаты и переписку перечитаем при следующем открытии
   setFace(ev.face);
 }
 
@@ -252,8 +336,9 @@ function drawTop() {
   const f = pers ? V.face : 'smile';
   top.innerHTML = `
     ${O.back}<div class="tb-title v-title"><span class="v-av">${verityFace(f, 24)}</span><b>Верити™</b><i class="v-tag">ИИ</i>
-      <span class="v-sub" style="font-size:12px;color:var(--muted);margin-left:8px;">${pers ? 'Характер активен' : 'Спокойный режим'}</span></div>
+      <span class="v-sub" style="font-size:12px;color:var(--muted);margin-left:8px;">${O.esc(V.cur.title || (V.cur.id ? 'Чат' : 'Новый чат'))}</span></div>
     <div class="tb-actions">
+      <button class="tb-btn v-newbtn" data-act="vnew" title="Новый чат — прошлый не потеряется">${O.ic('plus', 20)}<span>Новый чат</span></button>
       <button class="tb-btn ${pers ? 'on' : ''}" data-act="vpersonality" title="${pers ? 'Личность Верити: включена (нажмите, чтобы выключить)' : 'Личность Верити: выключена (нажмите, чтобы включить)'}">
         ${pers ? '🎭 Личность' : '🤖 Спокойный'}
       </button>
@@ -297,8 +382,23 @@ function drawSide() {
             : 'Я — Верити в спокойном режиме. Отвечаю на любые вопросы по учёбе, коду, играм и Startrack, без сарказма, смены настроения и розыгрышей. Кидай фото, видео, файлы и ссылки.'}${V.pc ? ' На компьютере могу писать и запускать код, открывать программы и работать с файлами.' : ''}</p>
         </div>
       </div>
-      <button class="pf-btn" data-act="vclear">Очистить переписку</button>
+      ${chatsHtml()}
+      <button class="pf-btn" data-act="vclear" ${V.cur.id ? '' : 'disabled'}>Очистить этот чат</button>
     </div>`;
+}
+
+// Чаты в правой панели: открыть, переименовать, удалить; у работающего — индикатор
+function chatsHtml() {
+  const draft = !V.chats.includes(V.cur);
+  const row = (c: Chat) => `
+    <div class="v-ch ${V.cur === c ? 'sel' : ''}" data-act="vchat" data-id="${c.id}" title="${O.esc(c.title || 'Новый чат')}">
+      ${c.busy ? '<span class="v-dots"><i></i><i></i><i></i></span>' : O.ic('chat', 16)}
+      <span class="v-ch-t">${O.esc(c.title || 'Новый чат')}</span>
+      ${c.id ? `<button class="v-ch-b" data-act="vrename" data-id="${c.id}" title="Переименовать">${O.ic('edit', 14)}</button>
+      <button class="v-ch-b" data-act="vdel" data-id="${c.id}" title="Удалить чат">${O.ic('trash', 14)}</button>` : ''}
+    </div>`;
+  return `<div class="pc-sec v-chats"><h4>Чаты <button class="v-ch-new" data-act="vnew" title="Новый чат">${O.ic('plus', 16)}</button></h4>
+    ${draft ? row(V.cur) : ''}${V.chats.map(row).join('') || (draft ? '' : '<p class="muted">Пока нет чатов</p>')}</div>`;
 }
 
 // ---------- сообщения ----------
@@ -318,14 +418,39 @@ function codeBlock(lang: string, code: string) {
     <pre class="v-code"><code>${O.esc(code)}</code></pre>${out ? `<pre class="v-out">${O.esc(out)}</pre>` : ''}</div>`;
 }
 
+// Ссылка: хвостовую пунктуацию («… сайт.», «(https://…)») оставляем снаружи
+function anchor(raw: string, label?: string) {
+  let url = raw, trail = '';
+  while (/[.,:;!?)»'"]$/.test(url) && !(url.endsWith(')') && (url.match(/\(/g) || []).length >= (url.match(/\)/g) || []).length)) {
+    trail = url.slice(-1) + trail;
+    url = url.slice(0, -1);
+  }
+  return `<a href="${O.esc(url)}" target="_blank" rel="noopener noreferrer" class="chat-link">${label ?? O.esc(url)}</a>${O.esc(trail)}`;
+}
+
+// Строка ответа: `код`, [текст](ссылка), ссылки, **жирный**. Разбираем по очереди, а не заменами
+// по уже готовому HTML — иначе звёздочки и кавычки вокруг ссылки попадали в адрес и ломали её
+const INLINE = /`([^`\n]+)`|\[([^\]\n]{1,300})\]\((https?:\/\/[^\s)]+(?:\([^\s)]*\))?[^\s)]*)\)|(https?:\/\/[^\s<>"'`*\]]+|www\.[a-z0-9-]+\.[^\s<>"'`*\]]+)|\*\*([^*\n]+)\*\*/gi;
+function inline(raw: string): string {
+  let html = '', last = 0;
+  for (const m of raw.matchAll(INLINE)) {
+    html += O.emojify(raw.slice(last, m.index));
+    last = m.index! + m[0].length;
+    if (m[1] !== undefined) html += /^https?:\/\/\S+$/.test(m[1]) ? `<code>${anchor(m[1])}</code>` : `<code>${O.esc(m[1])}</code>`;
+    else if (m[2] !== undefined) html += anchor(m[3], O.emojify(m[2]));
+    else if (m[4] !== undefined) html += m[4].startsWith('www.') ? anchor('https://' + m[4]).replace(/>https:\/\/www\./, '>www.') : anchor(m[4]);
+    else html += `<b>${inline(m[5])}</b>`;
+  }
+  return html + O.emojify(raw.slice(last));
+}
+
 // простая разметка ответов: блоки кода, `код`, **жирный**, ссылки
 function fmt(text: string) {
   const parts = text.split(/```([\w+#.-]*)[^\n]*\n?([\s\S]*?)```/g);
   let html = '';
   for (let i = 0; i < parts.length; i += 3) {
     const p = parts[i];
-    if (p.trim() || i === 0) html += `<p>${O.linkify(O.emojify(p.replace(/^\n+|\n+$/g, ''))
-      .replace(/`([^`\n]+)`/g, '<code>$1</code>').replace(/\*\*([^*\n]+)\*\*/g, '<b>$1</b>'))}</p>`;
+    if (p.trim() || i === 0) html += `<p>${inline(p.replace(/^\n+|\n+$/g, ''))}</p>`;
     if (i + 2 < parts.length) html += codeBlock(parts[i + 1], parts[i + 2].replace(/\n$/, ''));
   }
   return html;
@@ -371,7 +496,7 @@ function msgHtml(m: VMsg, prevRole?: string) {
   const time = new Date(m.created).toLocaleTimeString('ru', { hour: '2-digit', minute: '2-digit' });
   const pics = m.imgs?.length ? `<div class="v-sent-img">${m.imgs.map((src) => `<img src="${src}" alt="">`).join('')}</div>` : '';
   const files = m.files?.length ? `<div class="v-sent-files">${m.files.map((n) => `<span>${O.ic('file', 14)}${O.esc(n)}</span>`).join('')}</div>` : '';
-  const body = pics + files + (mine ? (m.text ? `<p>${O.linkify(O.emojify(m.text))}</p>` : '') : stepsHtml(m.steps) + fmt(m.text));
+  const body = pics + files + (mine ? (m.text ? `<p>${inline(m.text)}</p>` : '') : stepsHtml(m.steps) + fmt(m.text));
   if (prevRole === m.role) return `<div class="msg cont"><time>${time}</time>${body}</div>`;
   const av = mine ? me.avatar(40) : verityFace(m.face || 'grin', 40);
   const name = mine ? O.esc(me.name) : 'Верити™<i class="v-tag">ИИ</i>';
@@ -380,13 +505,13 @@ function msgHtml(m: VMsg, prevRole?: string) {
 
 // «Верити думает / работает»: шаги этого ответа появляются по мере выполнения
 function liveHtml() {
-  const l = V.live;
+  const l = V.cur.live;
   const now = l?.now ? `<div class="v-step now"><span class="v-dots"><i></i><i></i><i></i></span><span>${O.esc(l.now)}</span></div>` : '';
   const working = !!(l && (l.steps.length || l.now));
   return `<div class="msg head v-m v-typing"><span class="mav">${verityFace('think', 40)}</span><div class="mh"><b>Верити™</b></div>
     ${working ? `<div class="v-steps v-live">${l!.steps.map((s) => `<div class="v-step ${s.ok ? '' : 'bad'}">${O.ic(STEP_IC[s.k] || 'check', 14)}<span>${O.esc(s.t)}</span></div>`).join('')}${now}</div>` : ''}
     <p>${working ? '' : '<span class="v-dots"><i></i><i></i><i></i></span> думает…'}
-      ${V.stop ? '<span class="muted">останавливаюсь…</span>' : `<button type="button" class="v-stop" title="Остановить">${O.ic('stop', 12)}Стоп</button>`}</p></div>`;
+      ${V.cur.stop ? '<span class="muted">останавливаюсь…</span>' : `<button type="button" class="v-stop" title="Остановить">${O.ic('stop', 12)}Стоп</button>`}</p></div>`;
 }
 function drawLive() {
   const el = document.querySelector('#msgs .v-typing');
@@ -406,14 +531,14 @@ function drawMsgs() {
     <p>Я — Верити. Помогу с учёбой, кодом, играми и самим мессенджером. Кидай фото, видео, аудио, файлы и ссылки — разберусь.
     ${V.pc ? 'Код я могу сам написать, запустить и проверить, открыть нужную программу или найти файл у тебя на компьютере.' : ''}
     Отвечаю по делу и честно. Как ко мне — так и я к тебе.</p>
-    ${V.msgs.length ? '' : `<div class="v-chips">${sug.map((s) => `<button type="button" data-ask="${O.esc(s)}">${O.esc(s)}</button>`).join('')}</div>`}</div>`;
+    ${V.cur.msgs.length ? '' : `<div class="v-chips">${sug.map((s) => `<button type="button" data-ask="${O.esc(s)}">${O.esc(s)}</button>`).join('')}</div>`}</div>`;
   let prev: VMsg | undefined;
-  for (const m of V.msgs) {
+  for (const m of V.cur.msgs) {
     html += msgHtml(m, prev && m.created - prev.created < 7 * 60e3 ? prev.role : undefined);
     prev = m;
   }
-  if (V.busy) html += liveHtml();
-  if (!V.loaded && V.loading) html += '<div class="muted v-load">Загружаю переписку…</div>';
+  if (V.cur.busy) html += liveHtml();
+  if (!V.cur.loaded) html += '<div class="muted v-load">Загружаю переписку…</div>';
   box.innerHTML = html;
   box.scrollTop = box.scrollHeight;
 }
@@ -521,9 +646,11 @@ function drawStaged() {
 
 // ---------- отправка и работа ----------
 async function send(ta: HTMLTextAreaElement, grow: () => void) {
+  const ch = V.cur;
   const text = ta.value.trim();
   const att = V.att;
-  if ((!text && !att.length) || V.busy) return;
+  if (!text && !att.length) return;
+  if (ch.busy) return O.toast('Верити ещё отвечает в этом чате — можно открыть новый чат');
   ta.value = '';
   grow();
   V.att = [];
@@ -532,15 +659,23 @@ async function send(ta: HTMLTextAreaElement, grow: () => void) {
     id: -Date.now(), role: 'user', text, face: null, prank: null, created: Date.now(),
     imgs: att.filter((a) => a.thumb).map((a) => a.thumb!), files: att.filter((a) => !a.thumb).map((a) => a.name),
   };
-  V.msgs.push(mine);
-  V.busy = true;
-  V.stop = false;
-  V.live = { steps: [], now: '' };
-  drawMsgs();
+  ch.msgs.push(mine);
+  ch.busy = true;
+  ch.stop = false;
+  ch.live = { steps: [], now: '' };
+  ch.updated = Date.now();
+  if (!ch.title) ch.title = text.replace(/\s+/g, ' ').slice(0, 60) || 'Новый чат';
+  // новый чат сразу в списке: можно уйти в другой, а этот доработает сам
+  V.chats = [ch, ...V.chats.filter((c) => c !== ch)];
+  const shown = () => V.open && V.cur === ch;
+  const redraw = () => { if (shown()) drawMsgs(); drawSide(); };
+  const live = () => { if (shown()) drawLive(); };
+  redraw();
   const pc = await pcInfo();
   const usePc = !!pc && pc.mode !== 'off';
   const mins = Math.round((Date.now() - started) / 60e3);
   const body = {
+    chat: ch.id,
     text,
     images: att.flatMap((a) => a.kind === 'image' ? [a.thumb!] : a.kind === 'video' ? a.frames! : []),
     files: att.filter((a) => a.data).map((a) => ({ name: a.name, data: a.data })),
@@ -554,62 +689,74 @@ async function send(ta: HTMLTextAreaElement, grow: () => void) {
       ws: usePc ? pc!.workspace : undefined,
     },
   };
+  // сервер отвечает вместе с чатом: так новый чат узнаёт свой id и название
+  const learn = (r: any) => {
+    if (r?.chat?.id) Object.assign(ch, { id: r.chat.id, title: r.chat.title || ch.title, updated: r.chat.updated });
+    return r;
+  };
   let turn = '';
   try {
-    let r = await O.api('/api/verity', body, 240e3);
+    let r = learn(await O.api('/api/verity', body, 240e3));
     // нейросеть просит действия на компьютере: выполняем по одному (окно «Разрешить» покажет приложение) и отдаём результат
     while (r.pending) {
       turn = r.pending.turn;
-      V.live.steps = r.steps || [];
+      ch.live!.steps = r.steps || [];
       const results: { id: string; ok: boolean; out: string }[] = [];
       for (const c of r.pending.calls as Call[]) {
-        if (V.stop) break;
-        V.live.now = c.label;
-        drawLive();
+        if (ch.stop) break;
+        ch.live!.now = c.label;
+        live();
         let res;
         try { res = { id: c.id, ok: true, out: String(await O.pc!.invoke('verity_tool', { name: c.name, args: c.args, turn })) }; }
         catch (err) { res = { id: c.id, ok: false, out: String(err) }; }
         results.push(res);
-        V.live.steps.push({ k: c.name, t: c.label, ok: res.ok });
+        ch.live!.steps.push({ k: c.name, t: c.label, ok: res.ok });
       }
-      V.live.now = '';
-      if (V.stop) { r = await O.api('/api/verity/stop', {}); break; }
-      drawLive();
-      r = await O.api('/api/verity/continue', { turn, results }, 240e3);
+      ch.live!.now = '';
+      if (ch.stop) { r = await O.api('/api/verity/stop', { chat: ch.id }); break; }
+      live();
+      r = learn(await O.api('/api/verity/continue', { chat: ch.id, turn, results }, 240e3));
     }
-    V.busy = false;
-    V.live = null;
+    ch.busy = false;
+    ch.live = null;
     if (r.message) {
-      V.msgs.push(r.message);
+      ch.msgs.push(r.message);
       setFace(r.face);
       if (r.prank && hasPersonality()) setTimeout(() => prank(r.prank), 900);
+      // ответ пришёл в чат, который сейчас не открыт, — подскажем
+      if (!shown() && V.chats.includes(ch)) O.toast(`Верити ответил в чате «${ch.title || 'Новый чат'}»`);
     }
-    drawMsgs();
+    redraw();
+    if (shown()) drawTop();
   } catch (err) {
-    V.busy = false;
-    V.live = null;
+    ch.busy = false;
+    ch.live = null;
     if (turn) {
-      O.api('/api/verity/stop', {}).catch(() => {}); // ход уже шёл — не оставляем его висеть на сервере
+      O.api('/api/verity/stop', { chat: ch.id }).catch(() => {}); // ход уже шёл — не оставляем его висеть на сервере
     } else {
-      V.msgs = V.msgs.filter((m) => m !== mine);
-      if (V.open && !ta.value) { ta.value = text; grow(); V.att = att; drawStaged(); }
+      ch.msgs = ch.msgs.filter((m) => m !== mine);
+      if (!ch.id && !ch.msgs.length) V.chats = V.chats.filter((c) => c !== ch); // новый чат так и не создался
+      if (shown() && !ta.value) { ta.value = text; grow(); V.att = att; drawStaged(); }
     }
-    drawMsgs();
+    redraw();
     O.toast((err as Error).message);
   }
 }
 
 // «Стоп»: текущее действие доделается, новых не будет
 function stopTurn() {
-  if (!V.busy || V.stop) return;
-  V.stop = true;
+  const ch = V.cur;
+  if (!ch.busy || ch.stop) return;
+  ch.stop = true;
   drawLive();
 }
 
 export async function clearVerity() {
+  const ch = V.cur;
+  if (!ch.id) return;
   try {
-    const r = await O.api('/api/verity/clear', {});
-    V.msgs = [];
+    const r = await O.api('/api/verity/clear', { chat: ch.id });
+    ch.msgs = [];
     V.outs.clear();
     setFace(r.face);
     drawMsgs();

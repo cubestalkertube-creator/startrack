@@ -313,10 +313,13 @@ async function loadGames() {
 loadGames();
 setInterval(loadGames, 864e5);
 
+const STEAM_TOOL_RE = /steam linux runtime|^proton\b|steamworks common|steam runtime/i;
 // Одна программа: p — хвост пути (a/b/game.exe), steam — [appid, название] из appmanifest
 function matchProc(proc) {
   const p = String(proc?.p || '').toLowerCase().replace(/\\/g, '/').slice(-300);
   const steamId = /^\d{1,10}$/.test(String(proc?.steam?.[0] || '')) ? String(proc.steam[0]) : '';
+  // служебное Steam в Linux (контейнер Steam Linux Runtime, Proton) — не игра
+  if (STEAM_TOOL_RE.test(String(proc?.steam?.[1] || '')) || /\/steamapps\/common\/(steamlinuxruntime|proton)|\/pressure-vessel\//.test(p)) return null;
   const app = (id) => ({ ...G.apps.get(id), app: id });
   if (steamId && G.bySteam.has(steamId)) return app(G.bySteam.get(steamId));
   const base = p.split('/').pop();
@@ -428,6 +431,7 @@ function mySound(me, id) {
   return s;
 }
 const ytInfo = new Map(); // id видео -> название и канал (oEmbed YouTube)
+const spInfo = new Map(); // track/<id> -> название (oEmbed Spotify)
 const roomFor = (a, b) => `dm_${Math.min(a, b)}_${Math.max(a, b)}`;
 const groupRoom = (id) => `grp_${id}`;
 
@@ -782,6 +786,19 @@ const routes = {
     }
     return ytInfo.get(v);
   },
+  // Название трека Spotify для очереди «Слушаем вместе» (oEmbed Spotify)
+  'GET /api/sp/info': async (_me, _b, url) => {
+    const id = String(url.searchParams.get('id') || '');
+    if (!/^(track|episode)\/[A-Za-z0-9]{22}$/.test(id)) throw [400, 'Неверная ссылка на трек'];
+    if (!spInfo.has(id)) {
+      const r = await fetch('https://open.spotify.com/oembed?url=' + encodeURIComponent('https://open.spotify.com/' + id), { signal: AbortSignal.timeout(6000) }).catch(() => null);
+      if (!r?.ok) return { title: '' };
+      const j = await r.json().catch(() => ({}));
+      if (spInfo.size >= 2000) spInfo.delete(spInfo.keys().next().value);
+      spInfo.set(id, { title: String(j.title || '').slice(0, 200) });
+    }
+    return spInfo.get(id);
+  },
   // Токен в LiveKit-комнату звонка с другом или в группе
   'POST /api/call/token': async (me, b) => {
     let room;
@@ -1065,6 +1082,69 @@ const server = http.createServer(async (req, res) => {
 // по умолчанию Node рвёт запрос через 5 минут — большой файл по медленному каналу не успел бы загрузиться
 server.requestTimeout = 3 * 3600e3;
 
+// --- «Смотрим и слушаем вместе» в беседе ---
+// Плееры и очередь — у клиентов (как в звонке), сервер только пересылает их сообщения участникам
+// беседы и помнит последнее состояние для тех, кто подключится позже. Кто слушает — по сокетам.
+const parties = new Map(); // ключ беседы -> { state, who: Map<ws, uid> }
+function partyRoom(me, conv) {
+  const m = /^([ug])(\d{1,12})$/.exec(String(conv || ''));
+  if (!m) return null;
+  const id = Number(m[2]);
+  if (m[1] === 'g') return isMember(id, me.id) ? { key: 'g' + id, members: memberIds(id), conv: () => 'g' + id } : null;
+  if (!isFriend(me.id, id)) return null;
+  const [a, b] = [me.id, id].sort((x, y) => x - y);
+  return { key: `d${a}-${b}`, members: [a, b], conv: (uid) => 'u' + (uid === a ? b : a) };
+}
+const partyWho = (p) => [...new Set(p.who.values())];
+// listeners — только тем, кто слушает; иначе всем участникам беседы (чтобы видели «слушают вместе»)
+function partySend(room, ev, listeners, except) {
+  const p = parties.get(room.key);
+  for (const uid of room.members) for (const ws of sockets.get(uid) || []) {
+    if (ws === except || ws.readyState !== 1 || (listeners && !p?.who.has(ws))) continue;
+    ws.send(JSON.stringify({ ...ev, conv: room.conv(uid) }));
+  }
+}
+const newerState = (a, b) => !b || a.v > b.v || (a.v === b.v && String(a.by) > String(b.by));
+function partyLeave(ws) {
+  const room = ws.partyRoom;
+  if (!room) return;
+  ws.partyRoom = null;
+  const p = parties.get(room.key);
+  if (!p) return;
+  p.who.delete(ws);
+  if (p.who.size) return partySend(room, { type: 'party_who', ids: partyWho(p) }, true);
+  // никто больше не слушает — сессия закончилась
+  parties.delete(room.key);
+  if (p.state?.on) partySend(room, { type: 'party', from: 0, m: { t: 'state', s: { ...p.state, on: false, vid: null, queue: [], playing: false, v: p.state.v + 1 } } });
+}
+function onParty(ws, me, m) {
+  const room = partyRoom(me, m.conv);
+  if (!room) return;
+  let p = parties.get(room.key);
+  if (m.type === 'party_peek') {
+    if (p?.state?.on) ws.send(JSON.stringify({ type: 'party', conv: m.conv, from: 0, m: { t: 'state', s: p.state } }));
+    return;
+  }
+  if (m.type === 'party_leave') return ws.partyRoom?.key === room.key && partyLeave(ws);
+  if (m.type === 'party_join') {
+    if (ws.partyRoom && ws.partyRoom.key !== room.key) partyLeave(ws);
+    if (!p) parties.set(room.key, (p = { state: null, who: new Map() }));
+    p.who.set(ws, me.id);
+    ws.partyRoom = room;
+    ws.send(JSON.stringify({ type: 'party_joined', conv: m.conv, state: p.state?.on ? p.state : null, ids: partyWho(p) }));
+    return partySend(room, { type: 'party_who', ids: partyWho(p) }, true, ws);
+  }
+  // m.m — сообщение сессии (state / sync / add), только от того, кто слушает
+  const msg = m.m;
+  if (!p?.who.has(ws) || !msg || typeof msg !== 'object' || JSON.stringify(msg).length > 30000) return;
+  if (msg.t === 'state') {
+    if (!msg.s || typeof msg.s.v !== 'number') return;
+    if (newerState(msg.s, p.state)) p.state = msg.s;
+    return partySend(room, { type: 'party', from: me.id, m: msg }, false, ws);
+  }
+  if (msg.t === 'sync' || msg.t === 'add') partySend(room, { type: 'party', from: me.id, m: msg }, true, ws);
+}
+
 const wss = new WebSocketServer({ server, path: '/ws' });
 wss.on('connection', (ws, req) => {
   const me = verify(new URL(req.url, 'http://x').searchParams.get('token'));
@@ -1086,6 +1166,7 @@ wss.on('connection', (ws, req) => {
       ws.afk = !!m.afk;
       return announce(me.id);
     }
+    if (typeof m.type === 'string' && m.type.startsWith('party')) return onParty(ws, me, m);
     // запущенные программы (null — показ игр выключен в настройках)
     if (m.type === 'procs') {
       ws.game = pickGame(m.procs);
@@ -1113,6 +1194,7 @@ wss.on('connection', (ws, req) => {
   });
   ws.on('close', () => {
     setGcall(ws, 0);
+    partyLeave(ws);
     const set = sockets.get(me.id);
     set?.delete(ws);
     if (set && set.size === 0) sockets.delete(me.id);

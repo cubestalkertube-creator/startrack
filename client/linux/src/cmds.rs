@@ -78,6 +78,17 @@ pub fn reveal_file(path: &str) {
     }
 }
 
+/// Открыть скачанный файл программой по умолчанию (видео, которое CEF без H.264 не показывает).
+/// Только файлы из папки «Загрузки» — туда кладёт вложения сам Startrack.
+pub fn open_path(path: &str) -> Result<(), String> {
+    let p = Path::new(path);
+    let ok = p.is_file() && p.canonicalize().ok().zip(downloads_dir().canonicalize().ok()).is_some_and(|(f, d)| f.starts_with(d));
+    if !ok {
+        return Err("файл не найден".into());
+    }
+    if spawn("xdg-open", &[path]) { Ok(()) } else { Err("xdg-open не найден".into()) }
+}
+
 /// Уведомление о новом сообщении, пока окно не в фокусе.
 pub fn notify(title: String, body: String) {
     std::thread::spawn(move || {

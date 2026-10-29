@@ -1165,6 +1165,10 @@ input[type=range] { accent-color: var(--accent); padding: 0; height: 40px; backg
 .ga-row { display: flex; align-items: center; gap: 12px; min-width: 0; }
 .ga-ic { position: relative; flex: none; width: 64px; height: 64px; border-radius: 10px; overflow: hidden; background: var(--card); color: var(--muted); display: grid; place-items: center; }
 .ga-ic img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+/* иконка загрузилась: у прозрачных PNG (Roblox и др.) не просвечивает серая заглушка-геймпад */
+.ga-ic.ok { background: none; border-radius: 12px; }
+.ga-ic.ok > .ic { display: none; }
+.ga-ic.ok:not(.wide) img { object-fit: contain; }
 .ga-txt { min-width: 0; display: flex; flex-direction: column; gap: 4px; }
 .ga-txt b { color: var(--head); font-size: 15px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ga-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; font-size: 13px; color: var(--muted); }
@@ -1334,3 +1338,93 @@ small b, .fr-n span b { font-weight: 600; color: var(--text); }
 .v-pc-modes b { display: block; color: var(--head); font-size: 14px; margin-bottom: 2px; }
 #vPcWs code { font-size: 12px; padding: 1px 5px; border-radius: 4px; background: var(--deep); }
 #vPcWs .btn { margin-left: 6px; padding: 3px 10px; font-size: 12px; }
+
+/* чаты Верити в правой панели */
+.v-chats h4 { display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px; }
+.v-ch-new { width: 22px; height: 22px; display: grid; place-items: center; border-radius: 4px; color: var(--muted); }
+.v-ch-new:hover { color: var(--head); background: var(--hover); }
+.v-chats { max-height: 42vh; overflow-y: auto; scrollbar-width: thin; }
+.v-ch { display: flex; align-items: center; gap: 8px; height: 34px; padding: 0 6px 0 8px; border-radius: 6px; color: var(--muted); cursor: pointer; }
+.v-ch:hover { background: var(--hover); color: var(--text); }
+.v-ch.sel { background: var(--sel); color: var(--head); }
+.v-ch .v-dots { flex: none; width: 16px; }
+.v-ch-t { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 14px; }
+.v-ch-b { display: none; width: 22px; height: 22px; place-items: center; border-radius: 4px; color: var(--muted); flex: none; }
+.v-ch:hover .v-ch-b { display: grid; }
+.v-ch-b:hover { color: var(--head); background: rgba(255, 255, 255, .08); }
+.v-newbtn { width: auto !important; padding: 0 10px; gap: 4px; display: inline-flex; align-items: center; }
+.v-newbtn span { font-size: 13px; font-weight: 500; }
+@media (max-width: 760px) { .v-newbtn span { display: none; } }
+
+/* ---------- смотрим и слушаем вместе: плееры YouTube / Spotify / музыка ---------- */
+.w-sess .yt-logo { color: var(--accent); }
+.w-sess .yt-empty .ic { color: var(--accent); }
+.w-p { position: absolute; inset: 0; visibility: hidden; }
+.w-p.on { visibility: visible; }
+.w-p iframe { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; }
+.w-p-sp { padding: 8px; }
+.w-p-sp iframe { position: static; border-radius: 12px; }
+.w-p-au audio { display: none; }
+.au-cover { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 6px; padding: 12px 24px; text-align: center; color: var(--accent); background: radial-gradient(circle at 50% 30%, rgba(88, 101, 242, .25), transparent 70%); }
+.au-cover b { color: var(--head); font-size: 16px; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.au-cover span { color: var(--muted); font-size: 12px; }
+.au-prog { position: relative; width: min(420px, 90%); height: 6px; margin-top: 10px; border-radius: 3px; background: rgba(255, 255, 255, .15); }
+.au-prog i { position: absolute; left: 0; top: 0; bottom: 0; border-radius: 3px; background: var(--accent); }
+.au-prog::after { content: attr(data-t); position: absolute; left: 0; right: 0; top: 10px; color: var(--muted); font-size: 11px; }
+.w-owner .au-prog { cursor: pointer; }
+/* не управляющий не нажимает в самом плеере: паузу и перемотку делает тот, кто включил */
+.w-shield { position: absolute; inset: 0; z-index: 1; cursor: not-allowed; }
+.w-sess:not(.w-owner) .w-own { display: none; }
+.w-vol { display: flex; align-items: center; gap: 4px; color: #ccc; flex: none; }
+.w-vol input { width: 70px; accent-color: var(--accent); }
+.w-sess[data-src="sp"] .w-vol { display: none; }
+.w-login { display: block; margin-top: 4px; font-size: 13px !important; }
+.linkbtn { color: #00a8fc; font-size: inherit; padding: 0; }
+.linkbtn:hover { text-decoration: underline; }
+.yt-qic { width: 80px; height: 45px; flex: none; display: grid; place-items: center; border-radius: 4px; background: #2b2d31; color: var(--accent); }
+@container (max-width: 640px) { .w-vol input { width: 48px; } }
+
+/* в беседе: панель над чатом */
+#party { flex: none; border-bottom: 1px solid var(--line); }
+#partyban { display: flex; align-items: center; gap: 10px; padding: 8px 16px; background: var(--deep); color: var(--text); font-size: 14px; }
+#partyban > .ic { color: var(--accent); flex: none; }
+#partyban span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#partybox { position: relative; display: flex; flex-direction: column; height: min(46vh, 440px); background: #0f0f0f; container-type: size; }
+#partybox[data-src="sp"] { height: 236px; }
+#partybox[data-src="au"] { height: 210px; }
+#partybox[data-src=""] { height: 230px; }
+/* строка в доке, когда слушаешь в другой беседе */
+#partybar { display: flex; align-items: center; gap: 6px; padding: 6px 8px 6px 10px; border-radius: 8px; margin-bottom: 6px; }
+.pb-info { flex: 1; min-width: 0; display: flex; align-items: center; gap: 8px; cursor: pointer; color: var(--accent); }
+.pb-info div { min-width: 0; display: flex; flex-direction: column; }
+.pb-info b { color: var(--green); font-size: 13px; }
+.pb-info span { color: var(--muted); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pb-info:hover span { text-decoration: underline; }
+
+/* ссылки на YouTube и Spotify в сообщениях */
+.lk-card { max-width: 420px; margin: 6px 0 2px; padding: 10px 12px 12px; border-radius: 8px; background: var(--deep); border-left: 4px solid #ff0033; }
+.lk-card.sp { border-left-color: #1db954; }
+.lk-head { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; min-width: 0; }
+.lk-head .ic { color: #ff0033; flex: none; }
+.lk-sp { color: #1db954; display: grid; }
+.lk-sp .ic { color: #1db954; }
+.lk-head b { color: var(--head); font-size: 14px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lk-media { position: relative; aspect-ratio: 16 / 9; border-radius: 6px; overflow: hidden; cursor: pointer; background: #000; }
+.lk-media img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.lk-play { position: absolute; left: 50%; top: 50%; width: 64px; height: 44px; transform: translate(-50%, -50%); display: grid; place-items: center; border-radius: 12px; background: rgba(0, 0, 0, .7); color: #fff; transition: background .15s; }
+.lk-media:hover .lk-play { background: #ff0033; }
+.lk-btns { display: flex; gap: 8px; margin-top: 8px; flex-wrap: wrap; }
+.att-tog { margin-top: 6px; }
+/* плеер поверх чата */
+.lk-float { position: fixed; right: 16px; bottom: 16px; z-index: 30; width: min(480px, calc(100vw - 32px)); background: #000; border-radius: 10px; overflow: hidden; box-shadow: 0 10px 36px rgba(0, 0, 0, .6); border: 1px solid var(--line2); }
+.lk-float iframe { display: block; width: 100%; aspect-ratio: 16 / 9; border: 0; }
+.lk-float.sp { background: #121212; }
+.lk-float.sp iframe { aspect-ratio: auto; height: 152px; }
+.lkf-bar { display: flex; align-items: center; gap: 4px; padding: 4px 6px 4px 12px; background: #181818; color: var(--muted); font-size: 13px; }
+.lkf-bar span { flex: 1; }
+.lkf-bar .ibtn { color: #ccc; }
+/* видео, которое не играет внутри приложения */
+.vid-bad { display: none; }
+.att-media.bad video { display: none; }
+.att-media.bad .vid-bad { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; padding: 12px; text-align: center; background: #111214; color: var(--muted); font-size: 13px; }
+.att-media.bad { min-height: 160px; min-width: 280px; position: relative; }

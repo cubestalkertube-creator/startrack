@@ -36,6 +36,19 @@ fn unique(path: &Path) -> PathBuf {
         .unwrap()
 }
 
+/// Открывает скачанный файл программой по умолчанию (только из папки «Загрузки»).
+#[tauri::command]
+pub fn open_path(app: tauri::AppHandle, path: String) -> Result<(), String> {
+    use tauri::Manager;
+    use tauri_plugin_opener::OpenerExt;
+    let file = Path::new(&path).canonicalize().map_err(|e| e.to_string())?;
+    let dl = app.path().download_dir().and_then(|d| Ok(d.canonicalize()?)).map_err(|e| e.to_string())?;
+    if !file.is_file() || !file.starts_with(&dl) {
+        return Err("файл не найден".into());
+    }
+    app.opener().open_path(path, None::<&str>).map_err(|e| e.to_string())
+}
+
 /// Открывает проводник с выделенным файлом.
 #[tauri::command]
 pub fn reveal_file(path: String) {

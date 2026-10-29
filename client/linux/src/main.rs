@@ -10,11 +10,12 @@ use std::sync::OnceLock;
 mod bypass;
 mod bridge;
 mod cmds;
+mod desktop;
 #[path = "../../src-tauri/src/games.rs"]
 mod games;
 mod update;
 
-const ICON: &[u8] = include_bytes!("../../src-tauri/icons/128x128.png");
+pub const ICON: &[u8] = include_bytes!("../../src-tauri/icons/128x128.png");
 const ICON_256: &[u8] = include_bytes!("../../src-tauri/icons/128x128@2x.png");
 
 /// Ключи Chromium для браузерного процесса (их же получают дочерние процессы).
@@ -43,6 +44,7 @@ fn main() {
     // Домены сервера направляем на локальный обход VPN (или хотя бы прямо на IP, минуя DNS)
     let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().expect("tokio");
     let target = rt.block_on(bypass::start());
+    desktop::init(&rt);
     let rules = bypass::DOMAINS.iter().map(|d| format!("MAP {d} {target}")).collect::<Vec<_>>().join(", ");
     let _ = SWITCHES.set(vec![
         ("autoplay-policy", "no-user-gesture-required".into()),
@@ -84,8 +86,9 @@ pub fn focus_window() {
     post_task(ThreadId::UI, Some(&mut FocusTask::new()));
 }
 
-/// Закрыть приложение (после установки обновления).
+/// Закрыть приложение (после установки обновления или из меню трея).
 pub fn quit() {
+    desktop::quitting();
     post_task(ThreadId::UI, Some(&mut QuitTask::new()));
 }
 
@@ -184,7 +187,22 @@ wrap_window_delegate! {
                 window.set_window_app_icon(Some(&mut icon));
             }
             window.show();
+            // запуск вместе с системой — сразу в трей (окно уже создано, страница грузится)
+            if std::env::args().any(|a| a == desktop::AUTOSTART_ARG) && desktop::start_hidden() {
+                window.hide();
+            }
             WINDOW.with_borrow_mut(|w| *w = Some(window.clone()));
+        }
+
+        // в cef-rs у невыполненных методов делегата ответ 0 — без этих трёх окно нельзя было растянуть и развернуть
+        fn can_resize(&self, _window: Option<&mut Window>) -> i32 {
+            1
+        }
+        fn can_maximize(&self, _window: Option<&mut Window>) -> i32 {
+            1
+        }
+        fn can_minimize(&self, _window: Option<&mut Window>) -> i32 {
+            1
         }
 
         fn on_window_destroyed(&self, _window: Option<&mut Window>) {
@@ -192,7 +210,14 @@ wrap_window_delegate! {
             WINDOW.with_borrow_mut(|w| *w = None);
         }
 
-        fn can_close(&self, _window: Option<&mut Window>) -> i32 {
+        fn can_close(&self, window: Option<&mut Window>) -> i32 {
+            // крестик — в трей, как в Discord
+            if desktop::hide_on_close() {
+                if let Some(w) = window {
+                    w.hide();
+                }
+                return 0;
+            }
             match self.view.borrow().as_ref().and_then(|v| v.browser()).and_then(|b| b.host()) {
                 Some(host) => host.try_close_browser(),
                 None => 1,

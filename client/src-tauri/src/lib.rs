@@ -5,6 +5,8 @@ mod download;
 #[cfg(desktop)]
 mod games;
 #[cfg(desktop)]
+mod tray;
+#[cfg(desktop)]
 mod update;
 #[cfg(desktop)]
 mod verity;
@@ -73,13 +75,18 @@ fn desktop() {
             notify,
             open_url,
             download::reveal_file,
+            download::open_path,
             running_procs,
             update::update_check,
             update::update_install,
             update::update_progress,
             verity::verity_pc,
             verity::verity_set_mode,
-            verity::verity_tool
+            verity::verity_tool,
+            tray::desktop_prefs,
+            tray::set_tray,
+            tray::set_autostart,
+            login_window
         ])
         .setup(|app| {
             // Домены сервера направляем на локальный обход VPN (или хотя бы прямо на IP, минуя DNS)
@@ -89,10 +96,12 @@ fn desktop() {
                 .map(|d| format!("MAP {d} {target}"))
                 .collect::<Vec<_>>()
                 .join(", ");
+            // фоновые ограничения Chromium выключены: окно в трее продолжает принимать сообщения и звонки
             #[allow(unused_mut)]
             let mut args = format!(
                 "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection \
                  --hide-screenshare-notification \
+                 --disable-background-timer-throttling --disable-renderer-backgrounding --disable-backgrounding-occluded-windows \
                  --autoplay-policy=no-user-gesture-required --host-resolver-rules=\"{rules}\""
             );
             // отладка WebView2 через CDP только в debug-сборке (порт задаёт STARTRACK_DEBUG_PORT)
@@ -102,8 +111,13 @@ fn desktop() {
                     " --remote-debugging-port={port} --use-fake-device-for-media-stream --use-fake-ui-for-media-stream"
                 ));
             }
+            // при входе в Windows запускаемся сразу в трей
+            let hidden = std::env::args().any(|a| a == tray::AUTOSTART_ARG);
+            app.manage(BrowserArgs(args.clone()));
             let win = WebviewWindowBuilder::new(app, "main", WebviewUrl::default())
                 .title("Startrack")
+                .visible(!hidden)
+                .background_throttling(tauri::utils::config::BackgroundThrottlingPolicy::Disabled)
                 .inner_size(1200.0, 760.0)
                 .min_inner_size(800.0, 500.0)
                 .additional_browser_args(&args)
@@ -116,10 +130,41 @@ fn desktop() {
                 allow_media(&win);
                 hide_screenshare_bar();
             }
+            // без значка в трее (нет Проводника и т.п.) приложение всё равно должно открыться
+            if let Err(e) = tray::init(app.handle(), &win) {
+                eprintln!("tray: {e}");
+            }
             Ok(())
         })
         .run(tauri::generate_context!())
         .expect("error while running Startrack");
+}
+
+// Аргументы WebView2 главного окна: у второго окна в том же профиле они должны совпадать
+#[cfg(desktop)]
+struct BrowserArgs(String);
+
+// Окно входа в Spotify / YouTube (Google): куки ложатся в общий профиль WebView2, и встроенные
+// плееры в чате и звонке начинают играть от имени этого аккаунта (полные треки, Premium без рекламы)
+#[cfg(desktop)]
+#[tauri::command]
+async fn login_window(app: tauri::AppHandle, service: String) -> Result<(), String> {
+    let (url, title) = match service.as_str() {
+        "spotify" => ("https://accounts.spotify.com/login?continue=https%3A%2F%2Fopen.spotify.com%2F", "Вход в Spotify"),
+        "youtube" => ("https://accounts.google.com/ServiceLogin?service=youtube&continue=https%3A%2F%2Fwww.youtube.com%2F", "Вход в YouTube"),
+        _ => return Err("unknown service".into()),
+    };
+    if let Some(w) = app.get_webview_window("login") {
+        let _ = w.close();
+    }
+    let args = app.state::<BrowserArgs>().0.clone();
+    WebviewWindowBuilder::new(&app, "login", WebviewUrl::External(url.parse().map_err(|_| "bad url")?))
+        .title(title)
+        .inner_size(520.0, 720.0)
+        .additional_browser_args(&args)
+        .build()
+        .map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 // Новое сообщение или звонок, пока приложение не в фокусе: системное уведомление
