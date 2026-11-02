@@ -1,0 +1,49 @@
+name: Native Rust GTK client
+on:
+  workflow_dispatch:
+  push:
+    tags: ['v*']
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: client
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: npm ci --prefix server
+      - shell: pwsh
+        run: |
+          ./client/scripts/setup-gtk.ps1
+          . ./client/scripts/gtk-env.ps1
+          cargo fmt --manifest-path client/Cargo.toml --check
+          cargo test --manifest-path client/Cargo.toml --lib --test api_contract --locked
+          ./client/scripts/build.ps1 -Release -Package
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Startrack-Windows-GTK
+          path: client/dist/*.zip
+  linux:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: client
+      - name: Native dependencies
+        run: sudo apt-get update && sudo apt-get install -y xvfb libgtk-4-dev libdbus-1-dev libasound2-dev libpulse-dev libpipewire-0.3-dev libxcb1-dev libxrandr-dev libxfixes-dev libgbm-dev libva-dev libdrm-dev
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: npm ci --prefix server
+      - run: xvfb-run -a cargo test --manifest-path client/Cargo.toml --lib --test api_contract --locked
+      - run: sh client/scripts/linux-local.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Startrack-Linux-GTK
+          path: client/target/release/startrack

@@ -1352,9 +1352,18 @@ small b, .fr-n span b { font-weight: 600; color: var(--text); }
 .v-ch-b { display: none; width: 22px; height: 22px; place-items: center; border-radius: 4px; color: var(--muted); flex: none; }
 .v-ch:hover .v-ch-b { display: grid; }
 .v-ch-b:hover { color: var(--head); background: rgba(255, 255, 255, .08); }
-.v-newbtn { width: auto !important; padding: 0 10px; gap: 4px; display: inline-flex; align-items: center; }
-.v-newbtn span { font-size: 13px; font-weight: 500; }
+.v-newbtn { width: auto !important; padding: 0 10px; gap: 4px; display: inline-flex; align-items: center; flex: none; white-space: nowrap; }
+.v-newbtn span { font-size: 13px; font-weight: 500; white-space: nowrap; }
 @media (max-width: 760px) { .v-newbtn span { display: none; } }
+
+/* шапка беседы Верити: заголовок не сжимается, кнопки не наезжают друг на друга */
+.tb-title.v-title { flex: 1 1 auto; min-width: 0; overflow: hidden; }
+.tb-title.v-title b { flex: none; }
+.tb-title.v-title .v-tag { flex: none; }
+.tb-title.v-title .v-sub { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.v-title .v-av, .v-title .v-av .v-face { flex: none; }
+#topbar .tb-actions { flex: none; align-items: center; }
+#topbar .tb-actions > .tb-btn { flex: none; white-space: nowrap; }
 
 /* ---------- смотрим и слушаем вместе: плееры YouTube / Spotify / музыка ---------- */
 .w-sess .yt-logo { color: var(--accent); }

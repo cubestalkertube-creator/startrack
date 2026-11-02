@@ -11,3 +11,7 @@ client/src-tauri/gen/schemas/
 !client/src/assets/ringtone.mp3
 !deploy/ringtone.mp3
 client/linux/target/
+/client/target/
+/.cache/
+# Cached files from the retired WebView/Android builds are local artifacts.
+/client/src-tauri/

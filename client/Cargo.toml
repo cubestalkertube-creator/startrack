@@ -1,0 +1,62 @@
+[package]
+name = "startrack"
+version = "0.1.32"
+edition = "2021"
+default-run = "startrack"
+
+[features]
+release-tools = ["dep:minisign"]
+
+[[bin]]
+name = "startrack-sign-update"
+path = "tools/sign-update.rs"
+required-features = ["release-tools"]
+
+[dependencies]
+anyhow = "1"
+chrono = { version = "0.4", features = ["serde"] }
+directories = "6"
+futures-util = "0.3"
+gtk = { package = "gtk4", version = "0.10.3", features = ["v4_8"] }
+livekit = { version = "0.10.0", features = ["rustls-tls-webpki-roots"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
+keyring = { version = "3", features = ["windows-native", "apple-native", "sync-secret-service"] }
+mime_guess = "2"
+open = "5"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
+rodio = { version = "0.21.1", default-features = false, features = ["playback", "wav", "mp3", "vorbis"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "fs", "io-util"] }
+tokio-tungstenite = { version = "0.28", features = ["rustls-tls-webpki-roots"] }
+tokio-util = { version = "0.7", features = ["io"] }
+url = "2"
+xcap = "0.9.8"
+tray-icon = { version = "0.26.1", default-features = false, features = ["ksni"] }
+minisign-verify = "0.3"
+minisign = { version = "0.10", optional = true }
+semver = "1"
+base64 = "0.22"
+zip = { version = "4", default-features = false, features = ["deflate"] }
+
+[target.'cfg(windows)'.dependencies]
+winreg = "0.55"
+wasapi = "0.26"
+windows = { version = "0.62", features = ["Win32_Media_Audio", "Win32_System_Diagnostics_ToolHelp", "Win32_System_Threading"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libpulse-binding = "2.30"
+libpulse-simple-binding = "2.29"
+libc = "0.2"
+
+[dev-dependencies]
+tempfile = "3"
+
+[profile.release]
+lto = "thin"
+strip = true
+
+[patch.crates-io]
+libwebrtc = { path = "vendor/libwebrtc-0.3.55" }
+webrtc-sys = { path = "vendor/webrtc-sys-0.3.52" }
+
