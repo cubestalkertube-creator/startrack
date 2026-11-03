@@ -56,13 +56,13 @@ fn desktop() {
     // Повторный запуск показывает уже открытое окно (вторая копия с другими аргументами WebView2 упала бы).
     // В debug выключено, чтобы для тестов можно было открыть два окна.
     #[cfg(not(debug_assertions))]
-    let builder = builder.plugin(tauri_plugin_single_instance::init(|app, _, _| {
+    let builder = if std::env::args().any(|a| a == "--local-preview") { builder } else { builder.plugin(tauri_plugin_single_instance::init(|app, _, _| {
         if let Some(w) = app.get_webview_window("main") {
             let _ = w.unminimize();
             let _ = w.show();
             let _ = w.set_focus();
         }
-    }));
+    })) };
     builder
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_notification::init())
@@ -114,7 +114,16 @@ fn desktop() {
             // при входе в Windows запускаемся сразу в трей
             let hidden = std::env::args().any(|a| a == tray::AUTOSTART_ARG);
             app.manage(BrowserArgs(args.clone()));
-            let win = WebviewWindowBuilder::new(app, "main", WebviewUrl::default())
+            let preview = std::env::args().any(|a| a == "--local-preview");
+            let window = WebviewWindowBuilder::new(app, "main", WebviewUrl::default());
+            let window = if preview {
+                let token = std::env::var("STARTRACK_PREVIEW_TOKEN").unwrap_or_default();
+                let script = format!("localStorage.setItem('server','http://127.0.0.1:18080');localStorage.setItem('mascot','0');{}",
+                    if token.is_empty() { String::new() } else { format!("localStorage.setItem('token',{});", serde_json::to_string(&token).unwrap()) });
+                window.data_directory(app.path().app_local_data_dir()?.join("preview-webview"))
+                    .initialization_script(script)
+            } else { window };
+            let win = window
                 .title("Startrack")
                 .visible(!hidden)
                 .background_throttling(tauri::utils::config::BackgroundThrottlingPolicy::Disabled)
@@ -130,6 +139,7 @@ fn desktop() {
                 allow_media(&win);
                 hide_screenshare_bar();
             }
+            if preview { let _ = win.set_title("Startrack — локальная проверка 0.1.31"); }
             // без значка в трее (нет Проводника и т.п.) приложение всё равно должно открыться
             if let Err(e) = tray::init(app.handle(), &win) {
                 eprintln!("tray: {e}");

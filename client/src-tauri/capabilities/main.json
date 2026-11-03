@@ -1,0 +1,11 @@
+{
+  "identifier": "main-local",
+  "description": "Native commands for bundled Startrack UI only; no remote or sandboxed app origins.",
+  "windows": ["main"],
+  "permissions": [
+    "allow-route-adapter", "allow-notify", "allow-open-url", "allow-reveal-file", "allow-open-path",
+    "allow-running-procs", "allow-update-check", "allow-update-install", "allow-update-progress",
+    "allow-verity-pc", "allow-verity-set-mode", "allow-verity-tool", "allow-desktop-prefs",
+    "allow-set-tray", "allow-set-autostart", "allow-login-window"
+  ]
+}

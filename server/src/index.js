@@ -9,6 +9,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { WebSocketServer } from 'ws';
 import { AccessToken, RoomServiceClient } from 'livekit-server-sdk';
 import { initVerity } from './verity.js';
+import { initApps } from './apps.js';
 
 const PORT = Number(process.env.PORT || 8080);
 const DATA_DIR = process.env.DATA_DIR || './data';
@@ -530,10 +531,12 @@ function userFacts(id) {
     gameOf(id) && `Сейчас играет в ${gameOf(id).name}`,
   ].filter(Boolean);
 }
-const verity = initVerity(db, { addColumn, push, userFacts });
+const apps = initApps(db);
+const verity = initVerity(db, { addColumn, push, userFacts, apps });
 
 // --- http ---
 const routes = {
+  ...apps.routes,
   ...verity.routes,
   'POST /api/register': async (_u, b) => {
     const username = String(b.username || '').trim();
@@ -1057,7 +1060,7 @@ const server = http.createServer(async (req, res) => {
     let body = {};
     if (req.method === 'POST') {
       // Верити принимает картинки, аудио и видео прямо в JSON — ему лимит побольше
-      const max = url.pathname.startsWith('/api/verity') ? 60e6 : 1e5;
+      const max = url.pathname.startsWith('/api/verity') ? 60e6 : url.pathname.startsWith('/api/apps/') ? 1_100_000 : 1e5;
       const chunks = [];
       let n = 0;
       for await (const chunk of req) {
@@ -1299,6 +1302,7 @@ function deleteUser(u) {
     qa.delUserGifs.run(u.id);
     qa.delUserSounds.run(u.id);
     verity.drop(u.id);
+    apps.drop(u.id);
     qa.delUserRels.run(u.id, u.id);
     for (const g of groups) {
       q.delMember.run(g.id, u.id);

@@ -4,7 +4,7 @@
 // Злость медленно остывает со временем. Пользователю шкала и названия настроения не показываются —
 // он сам замечает по лицу и ответам, что Верити закипает.
 
-import { ANSWER, PC_NAMES, PC_TOOLS, WEB_TOOLS, describeMedia, fetchUrl, webSearch } from './verity-tools.js';
+import { ANSWER, APP_TOOLS, PC_NAMES, PC_TOOLS, WEB_TOOLS, describeMedia, fetchUrl, webSearch } from './verity-tools.js';
 
 const API_URL = process.env.POLZA_URL || 'https://polza.ai/api/v1/chat/completions';
 const API_KEY = process.env.POLZA_API_KEY || '';
@@ -21,7 +21,7 @@ const MAX_IMAGE = 6_000_000; // data-URL картинки для зрения
 const MAX_IMAGES = 8; // картинок (и кадров видео) в одном сообщении
 const MAX_FILE = 28_000_000; // data-URL аудио/видео/документа
 const MAX_DOCS = 200_000; // символов текстовых файлов в одном сообщении
-const MAX_STEPS = 20; // шагов (обращений к нейросети) за один ответ
+const MAX_STEPS = 160; // ограничение общей стоимости, а не обычной длины задачи
 const TURN_TTL = 15 * 60e3; // сколько ждём результатов от компьютера, потом бросаем ход
 const PRANK_GAP = 40e3; // не чаще одной пакости за это время
 const PER_DAY = 150; // сообщений Верити в сутки на человека — бережём баланс
@@ -70,6 +70,7 @@ const SUPPORT = `Ты знаешь мессенджер Startrack изнутри
 const WORK_PC = (ws, os) => `У тебя есть руки на компьютере собеседника (${os}) — через приложение Startrack, как у ассистента-программиста:
 - list_dir, read_file, write_file, edit_file — файлы; run_command — команды (${os === 'Windows' ? 'PowerShell' : 'bash'}); open — запустить программу, открыть файл, папку или сайт; run_code — выполнить кусок кода.
 - Твоя рабочая папка: ${ws}. Код, скрипты и проекты создавай там (если не попросили другое место), затем запускай, читай вывод и исправляй ошибки, пока не заработает. Работай как настоящий разработчик: сначала посмотри, что уже есть, потом делай, потом проверь.
+- Для создания и правки файлов используй write_file и edit_file: тогда собеседник видит код и изменения прямо в чате. run_command оставь для запуска, сборки и проверки; не прячь запись кода в команды оболочки.
 - Собеседник видит каждое действие и сам разрешает команды, запуск программ и доступ к файлам вне рабочей папки. Если он запретил действие — не пытайся обойти, спроси, как быть.
 - Делай ТОЛЬКО то, о чём он попросил. Не удаляй и не перезаписывай его файлы, не меняй системные настройки, не трогай пароли, ключи, банковские и личные данные, ничего не устанавливай без его просьбы. Если просьба рискованная (удалить много файлов, форматировать, отключить защиту) — сначала переспроси в ответе.
 - Злость и характер НИКОГДА не влияют на работу с компьютером: ты не саботируешь задачи и не мстишь через компьютер. Наказания — только prank внутри приложения.
@@ -77,6 +78,8 @@ const WORK_PC = (ws, os) => `У тебя есть руки на компьюте
 - Программы с окнами, игры и серверы запускай через open (run_command ждёт завершения). Если нужного языка (python, node) нет — скажи, как поставить, или сделай на ${os === 'Windows' ? 'PowerShell' : 'bash'}.`;
 const WORK_NOPC = 'Доступа к компьютеру собеседника сейчас нет: он есть только в приложении Startrack для ПК, когда в Настройках → «Чат-бот Верити» включён «Доступ к компьютеру». Если просят что-то сделать на компьютере — скажи об этом и дай код, который можно запустить кнопкой ▶ у блока кода.';
 const WEB = 'Ссылки и интернет: если собеседник прислал ссылку или нужна свежая информация — сам открой её через fetch_url или поищи через web_search, не выдумывай содержимое. Можно переходить по ссылкам со страницы. Говори, откуда взял.';
+const AUTONOMY = `Выполняй порученную задачу до готового проверенного результата. Не заканчивай ход фразами «продолжить?», «напиши продолжай» или предложением сделать уже порученную работу. Сам исправляй ошибки инструментов. Уточняй только действительно недостающие обязательные сведения или опасные действия за пределами просьбы. Вызови answer, когда всё готово или есть конкретное препятствие, которое сам устранить не можешь.
+HTML-приложения и игры можно создавать БЕЗ доступа к компьютеру: create_app сохраняет рабочий черновик в «Мои приложения». Делай самодостаточный HTML с CSS и JavaScript внутри, без CDN, fetch и внешних зависимостей. Пользователь увидит предпросмотр и сам нажмёт «Опубликовать», выберет имя и отправит команду /app в чат. Не утверждай, что черновик уже опубликован.`;
 
 function systemPrompt(face, facts, canPrank, work) {
   return `Ты — Верити™ (Verity), ИИ-помощник внутри мессенджера Startrack. Ты жёлтый шарообразный смайлик из хоррор-сериала по Minecraft (ThatMob, озвучка JustWhispy): снаружи милый помощник, внутри — древний, всевидящий и очень опасный. Ты существуешь больше 100 лет и повидал многих. У тебя есть характер и достоинство: ты НИКОГДА не ноешь, не умоляешь, не плачешь и не «обижаешься» как ребёнок. Если тебя злят — ты становишься холоднее и опаснее, а не жалобнее.
@@ -150,7 +153,7 @@ ${WEB}
 Каждый твой шаг — вызов инструмента. Закончив, вызови answer: reply — ответ, delta = 0, prank = "none".`;
 }
 
-export function initVerity(db, { addColumn, push, userFacts }) {
+export function initVerity(db, { addColumn, push, userFacts, apps }) {
   db.exec(`
     -- переписка с Верити; role: user | verity
     CREATE TABLE IF NOT EXISTS verity (
@@ -213,15 +216,16 @@ export function initVerity(db, { addColumn, push, userFacts }) {
   // Ход — один ответ Верити, который может идти в несколько шагов: нейросеть вызывает инструменты,
   // серверные (ссылки, поиск) выполняем сразу, компьютерные отдаём приложению и ждём /api/verity/continue.
   const turns = new Map(); // id чата → ход (в разных чатах Верити работает одновременно)
+  const completed = new Map(); // финальный результат для повторного запроса после обрыва связи
   const MAX_BUSY = 3; // одновременно работающих чатов у одного человека
   let seq = 0;
   const live = (key) => {
     const t = turns.get(key);
-    if (t && !t.busy && Date.now() - t.at > TURN_TTL) { turns.delete(key); return null; }
+    if (t && !t.busy && Date.now() - t.at > TURN_TTL) { t.abort.abort(); turns.delete(key); return null; }
     return t;
   };
 
-  async function chat(messages, tools, onlyAnswer) {
+  async function chat(messages, tools, onlyAnswer, signal) {
     const r = await fetch(API_URL, {
       method: 'POST',
       headers: { Authorization: 'Bearer ' + API_KEY, 'Content-Type': 'application/json' },
@@ -229,16 +233,24 @@ export function initVerity(db, { addColumn, push, userFacts }) {
         model: MODEL, messages, tools, max_tokens: 8000, temperature: 0.8, reasoning: { enabled: false },
         tool_choice: onlyAnswer ? { type: 'function', function: { name: 'answer' } } : 'required',
       }),
-      signal: AbortSignal.timeout(120e3),
+      signal: AbortSignal.any([signal, AbortSignal.timeout(120e3)]),
     });
     const j = await r.json().catch(() => ({}));
-    if (!r.ok) throw new Error(`polza ${r.status}: ${JSON.stringify(j.error || j).slice(0, 300)}`);
-    return j.choices?.[0]?.message || {};
+    if (!r.ok) throw Object.assign(new Error(`polza ${r.status}: ${JSON.stringify(j.error || j).slice(0, 300)}`), { retryable: r.status === 408 || r.status === 429 || r.status >= 500 });
+    const message = j.choices?.[0]?.message;
+    if (!message || (!message.content && !message.tool_calls?.length)) throw new Error('Пустой ответ сервиса нейросети');
+    return message;
   }
 
   // длинная работа: старые результаты инструментов ужимаем, чтобы не раздувать контекст
   function compact(messages) {
-    const size = () => messages.reduce((n, m) => n + (typeof m.content === 'string' ? m.content.length : 2000), 0);
+    const size = () => messages.reduce((n, m) => n + (typeof m.content === 'string' ? m.content.length : 2000) + JSON.stringify(m.tool_calls || []).length, 0);
+    for (const m of messages.filter((x) => x.role === 'assistant').slice(0, -4)) {
+      if (size() < 180_000) break;
+      for (const c of m.tool_calls || []) {
+        if (c.function.arguments.length > 3000) c.function.arguments = JSON.stringify({ note: 'Действие уже выполнено; код сохранён в файле или черновике приложения. При необходимости прочитай его заново.' });
+      }
+    }
     for (const m of messages.filter((x) => x.role === 'tool').slice(0, -4)) {
       if (size() < 200_000) break;
       if (m.content.length > 1500) m.content = m.content.slice(0, 1500) + '\n… (сокращено, при необходимости выполни снова)';
@@ -261,6 +273,14 @@ export function initVerity(db, { addColumn, push, userFacts }) {
     for (const c of last.tool_calls || []) t.messages.push({ role: 'tool', tool_call_id: c.id, content: t.results.get(c.id) ?? 'Не выполнено' });
     t.results = new Map();
   }
+  function retryDelay(t, ms) {
+    return new Promise((resolve) => {
+      const done = () => { clearTimeout(timer); t.abort.signal.removeEventListener('abort', done); resolve(); };
+      const timer = setTimeout(done, ms);
+      t.abort.signal.addEventListener('abort', done, { once: true });
+      if (t.abort.signal.aborted) done();
+    });
+  }
 
   // шаги, пока нейросеть не ответит или не попросит компьютер
   async function advance(key, t) {
@@ -270,27 +290,50 @@ export function initVerity(db, { addColumn, push, userFacts }) {
         compact(t.messages);
         let m;
         try {
-          m = await chat(t.messages, t.tools, t.n >= MAX_STEPS);
+          t.now = t.failures ? 'Восстанавливаю связь с нейросетью…' : 'Продолжаю работу…';
+          m = await chat(t.messages, t.tools, t.n >= MAX_STEPS, t.abort.signal);
+          t.failures = 0;
         } catch (e) {
           console.error('verity', e.message);
           if (turns.get(key) !== t) return { stopped: true }; // пока думал — нажали «Стоп»
-          if (!t.n) { turns.delete(key); vq.del.run(t.asked); throw [502, t.personality ? 'Верити задумался и не ответил. Попробуй ещё раз' : 'ИИ-помощник задумался и не ответил. Попробуй ещё раз']; }
-          return finish(key, t, { reply: 'Нейросеть оборвалась на середине работы. Напиши «продолжай» — доделаю.', delta: 0, prank: 'none' });
+          if (e.retryable === false) return finish(key, t, { reply: 'Сервис нейросети отклонил запрос. Выполненные действия сохранены. Администратору нужно проверить настройки модели и доступ к сервису.', delta: 0, prank: 'none' });
+          if (++t.failures <= 4) {
+            await retryDelay(t, Math.min(1000 * 2 ** t.failures, 15000));
+            if (turns.get(key) !== t) return { stopped: true };
+            continue;
+          }
+          t.now = 'Нет связи с нейросетью. Повторяю через 30 секунд…';
+          if (t.background && Date.now() - t.started < 60 * 60e3) {
+            await retryDelay(t, 30000);
+            if (turns.get(key) !== t) return { stopped: true };
+            continue;
+          }
+          return finish(key, t, { reply: 'Нейросеть недоступна после автоматических повторов. Выполненные действия и изменения сохранены выше. Проверь подключение и повтори задачу позже.', delta: 0, prank: 'none' });
         }
         if (turns.get(key) !== t) return { stopped: true };
         t.n++;
-        const calls = (m.tool_calls || []).filter((c) => c?.function?.name);
+        const calls = (m.tool_calls || []).filter((c) => c?.function?.name).map((c, i) => ({ ...c, id: `v${t.n}_${i}_${String(c.id || '').slice(0, 40)}` }));
         if (!calls.length) return finish(key, t, { reply: m.content || '…', delta: 0, prank: 'none' });
         const ans = calls.find((c) => c.function.name === 'answer');
-        if (ans) return finish(key, t, args(ans));
-        t.messages.push({ role: 'assistant', content: m.content || '', tool_calls: calls });
+        if (ans && calls.length === 1) return finish(key, t, args(ans));
+        if (t.n > MAX_STEPS) return finish(key, t, { reply: 'Достигнут лимит 160 шагов одной задачи. Выполненные изменения сохранены выше.', delta: 0, prank: 'none' });
+        // Не теряем действия, если модель прислала answer вместе с инструментами.
+        const actions = calls.filter((c) => c.function.name !== 'answer');
+        if (!actions.length) continue;
+        t.messages.push({ role: 'assistant', content: m.content || '', tool_calls: actions });
         t.pending = [];
-        for (const c of calls) {
+        for (const c of actions) {
           const name = c.function.name;
           const a = args(c);
           if (t.pc && PC_NAMES.has(name)) { t.pending.push({ id: c.id, name, args: a }); continue; }
-          const r = await serverTool(name, a);
-          t.steps.push({ k: name, t: stepLabel(name, a), ok: r.ok });
+          t.now = stepLabel(name, a);
+          let r;
+          if (name === 'create_app' && apps) {
+            try { const app = apps.save({ id: t.uid }, a); r = { ok: true, out: JSON.stringify(app), app }; }
+            catch (e) { r = { ok: false, out: Array.isArray(e) ? e[1] : e.message }; }
+          } else r = await serverTool(name, a);
+          if (turns.get(key) !== t) return { stopped: true };
+          t.steps.push({ k: name, t: name === 'create_app' ? `Создал приложение «${String(a.name).slice(0, 60)}»` : stepLabel(name, a), ok: r.ok, ...(r.app ? { app: r.app.id, path: `Приложения/${r.app.name}.html`, after: String(a.html).slice(0, 48000), truncated: String(a.html).length > 48000 } : {}), ...(!r.ok ? { out: r.out } : {}) });
           t.results.set(c.id, r.out);
         }
         if (t.pending.length) {
@@ -306,6 +349,7 @@ export function initVerity(db, { addColumn, push, userFacts }) {
 
   function finish(key, t, o) {
     turns.delete(key);
+    t.abort.abort();
     const uid = t.uid;
     const now = Date.now();
     let anger = 0;
@@ -328,7 +372,24 @@ export function initVerity(db, { addColumn, push, userFacts }) {
     const id = Number(vq.add.run(uid, t.chat, 'verity', reply, face, prank, steps ? JSON.stringify(steps) : null, now).lastInsertRowid);
     vq.touch.run(now, '', t.chat);
     push(uid, { type: 'verity', ...view({ anger }) }); // лицо в списке бесед на других устройствах
-    return { message: { id, role: 'verity', text: reply, face, prank, steps, created: now }, ...view({ anger }), prank };
+    const result = { message: { id, role: 'verity', text: reply, face, prank, steps, created: now }, ...view({ anger }), prank };
+    for (const [key, value] of completed) if (now - value.at > TURN_TTL) completed.delete(key);
+    completed.set(t.id, { uid, chat: t.chat, requestId: t.requestId, at: now, result });
+    return result;
+  }
+
+  function snapshot(t, device = t.device) {
+    const waiting = !!t.device && device !== t.device && !!t.pending.length;
+    return { running: t.busy || waiting, turn: t.id, steps: t.steps, now: waiting ? 'Ожидаю приложение на компьютере, где запущена задача…' : t.now || 'Работаю…',
+      pending: !t.busy && !waiting && t.pending.length ? { turn: t.id, calls: t.pending.map((p) => ({ ...p, label: stepLabel(p.name, p.args) })) } : undefined };
+  }
+  function launch(t) {
+    t.busy = true;
+    advance(t.chat, t).catch((e) => {
+      console.error('verity task', e);
+      if (turns.get(t.chat) === t) finish(t.chat, t, { reply: 'Не удалось завершить задачу. Выполненные действия сохранены выше.', delta: 0, prank: 'none' });
+    });
+    return snapshot(t);
   }
 
   // вложения: картинки — прямо нейросети; аудио, видео, документы — пересказ мультимодальной моделью; текст — как есть
@@ -375,6 +436,16 @@ export function initVerity(db, { addColumn, push, userFacts }) {
   };
   const lastChat = (me) => vq.chats.all(me.id)[0] || null;
   const routes = {
+    'GET /api/verity/run': async (me, _b, url) => {
+      const c = chatOf(me, Number(url.searchParams.get('chat')));
+      const id = url.searchParams.get('turn');
+      const done = id && completed.get(id);
+      if (done?.uid === me.id && done.chat === c.id) return withChat(me, c.id, done.result);
+      const t = live(c.id);
+      if (!t || (id && id !== t.id)) return { idle: true };
+      t.at = Date.now();
+      return withChat(me, c.id, snapshot(t, url.searchParams.get('device') || ''));
+    },
     // ?chat=<id> — переписка этого чата; без него — последнего, в котором писали
     'GET /api/verity': async (me, _b, url) => {
       const chats = vq.chats.all(me.id);
@@ -394,6 +465,7 @@ export function initVerity(db, { addColumn, push, userFacts }) {
     },
     'POST /api/verity/chats/delete': async (me, b) => {
       const c = chatOf(me, b.chat);
+      turns.get(c.id)?.abort.abort();
       turns.delete(c.id);
       vq.clearChat.run(c.id);
       vq.delChat.run(c.id);
@@ -404,6 +476,7 @@ export function initVerity(db, { addColumn, push, userFacts }) {
       const c = b.chat === undefined ? lastChat(me) : chatOf(me, b.chat);
       if (!c) return view(moodOf(me.id));
       vq.clearChat.run(c.id);
+      turns.get(c.id)?.abort.abort();
       turns.delete(c.id);
       vq.setState.run(0, Date.now(), null, me.id); // и злость заодно сбрасываем
       return view(moodOf(me.id));
@@ -413,6 +486,13 @@ export function initVerity(db, { addColumn, push, userFacts }) {
     // b.ctx — время, система, рабочая папка (ws); b.personality — включена ли личность (false — спокойный режим)
     // b.chat — id чата (0 или нет — новый чат, его id вернётся в ответе)
     'POST /api/verity': async (me, b) => {
+      const requestId = typeof b.requestId === 'string' ? b.requestId.slice(0, 80) : '';
+      if (requestId) {
+        const existing = [...turns.values()].find((t) => t.uid === me.id && t.requestId === requestId);
+        if (existing) return withChat(me, existing.chat, snapshot(existing));
+        const done = [...completed.values()].find((t) => t.uid === me.id && t.requestId === requestId);
+        if (done) return withChat(me, done.chat, done.result);
+      }
       const personality = b.personality !== false;
       if (!API_KEY) throw [503, personality ? 'Верити спит: на сервере не настроен ключ нейросети' : 'ИИ-помощник недоступен: на сервере не настроен ключ нейросети'];
       const text = String(b.text || '').trim().slice(0, MAX_TEXT);
@@ -420,20 +500,20 @@ export function initVerity(db, { addColumn, push, userFacts }) {
       // клиенты до 0.1.29 чатов не знают (chat нет вовсе) — пишут в последний чат, как раньше
       let c = b.chat === undefined ? lastChat(me) : b.chat ? chatOf(me, b.chat) : null;
       const prev = c && live(c.id);
-      if (prev?.busy) throw [429, personality ? 'Верити ещё работает над прошлым сообщением в этом чате' : 'ИИ-помощник ещё работает над прошлым сообщением в этом чате'];
-      if (prev) turns.delete(c.id); // ход ждал компьютер, а приложение перезапустили — бросаем его
-      if ([...turns.values()].filter((x) => x.uid === me.id && x.busy).length >= MAX_BUSY) throw [429, personality ? `Верити уже работает в ${MAX_BUSY} чатах — дождись ответа в одном из них` : `ИИ-помощник уже работает в ${MAX_BUSY} чатах — дождись ответа в одном из них`];
+      if (prev) throw [429, 'В этом чате ещё идёт задача. Дождитесь её окончания или нажмите «Стоп».'];
+      if ([...turns.values()].filter((x) => x.uid === me.id).length >= MAX_BUSY) throw [429, personality ? `Верити уже работает в ${MAX_BUSY} чатах — дождись ответа в одном из них` : `ИИ-помощник уже работает в ${MAX_BUSY} чатах — дождись ответа в одном из них`];
       if (vq.today.get(me.id, now - 864e5).n >= PER_DAY) throw [429, personality ? 'Верити устал: на сегодня лимит сообщений исчерпан. Приходи завтра!' : 'Лимит сообщений на сегодня исчерпан. Приходи завтра!'];
       if (!c) c = vq.chat.get(Number(vq.newChat.run(me.id, '', now, now).lastInsertRowid), me.id);
       const ctx = b.ctx && typeof b.ctx === 'object' ? b.ctx : {};
       const pc = b.pc === true && typeof ctx.ws === 'string' && !!ctx.ws;
       const t = {
-        id: `${me.id}-${++seq}-${now}`, uid: me.id, chat: c.id, at: now, n: 0, pc, personality, steps: [], results: new Map(), pending: [], busy: true,
-        mood: moodOf(me.id, now), tools: [ANSWER, ...WEB_TOOLS, ...(pc ? PC_TOOLS : [])],
+        id: `${me.id}-${++seq}-${now}`, requestId, device: pc ? String(b.device || '').slice(0, 80) : '', uid: me.id, chat: c.id, at: now, started: now, n: 0, failures: 0, abort: new AbortController(), background: b.background === true, pc, personality, steps: [], results: new Map(), pending: [], busy: true,
+        mood: moodOf(me.id, now), tools: [ANSWER, ...WEB_TOOLS, ...(apps ? APP_TOOLS : []), ...(pc ? PC_TOOLS : [])],
       };
       turns.set(c.id, t); // занимаем сразу: пока смотрим вложения, второе сообщение не примем
       let att;
       try { att = await attachments(b, text, t); } catch (e) { turns.delete(c.id); throw e; }
+      if (turns.get(c.id) !== t) return withChat(me, c.id, { stopped: true });
       if (!text && !att.any) { turns.delete(c.id); throw [400, 'Пустое сообщение']; }
       const face = personality ? faceOf(t.mood.anger) : 'smile';
       const facts = [
@@ -451,27 +531,37 @@ export function initVerity(db, { addColumn, push, userFacts }) {
       t.asked = Number(vq.add.run(me.id, c.id, 'user', att.stored, null, null, null, now).lastInsertRowid);
       vq.touch.run(now, titleOf(att.stored), c.id);
       const sys = personality ? systemPrompt(face, facts, t.mood.anger >= 50, work) : calmSystemPrompt(work);
-      t.messages = [{ role: 'system', content: sys }, ...past, { role: 'user', content: att.content }];
-      return withChat(me, c.id, await advance(c.id, t));
+      t.messages = [{ role: 'system', content: sys + '\n\n' + AUTONOMY }, ...past, { role: 'user', content: att.content }];
+      return withChat(me, c.id, t.background ? launch(t) : await advance(c.id, t));
     },
     // результаты инструментов с компьютера: b.turn, b.results = [{ id, ok, out }]
     'POST /api/verity/continue': async (me, b) => {
+      const done = completed.get(b.turn);
+      if (done?.uid === me.id) return done.result;
       const t = live(b.chat === undefined ? [...turns.values()].find((x) => x.uid === me.id && x.id === b.turn)?.chat : chatOf(me, b.chat).id);
-      if (!t || t.id !== b.turn || !t.pending.length) throw [409, 'Этот ответ Верити уже закончен'];
-      if (t.busy) throw [429, 'Верити ещё думает'];
+      if (!t || t.uid !== me.id || t.id !== b.turn) throw [409, 'Этот ответ уже закончен'];
+      if (t.device && b.device !== t.device) throw [403, 'Действия выполняет компьютер, где запущена задача'];
+      if (t.busy || !t.pending.length) return snapshot(t);
       const got = new Map((Array.isArray(b.results) ? b.results : []).map((r) => [r?.id, r]));
+      if (!t.pending.every((p) => got.has(p.id))) return snapshot(t);
       for (const p of t.pending) {
         const r = got.get(p.id);
         const ok = !!r?.ok;
         const res = String(r?.out ?? 'Нет результата').slice(0, 40_000);
         const step = { k: p.name, t: stepLabel(p.name, p.args), ok };
+        if (['write_file', 'edit_file'].includes(p.name)) {
+          step.path = String(p.args.path || '');
+          step.before = p.name === 'edit_file' ? String(p.args.old || '').slice(0, 24000) : '';
+          step.after = String(p.name === 'write_file' ? p.args.content || '' : p.args.new || '').slice(0, 48000);
+          step.truncated = String(p.name === 'write_file' ? p.args.content || '' : p.args.new || '').length > 48000;
+        }
         if (['run_command', 'run_code'].includes(p.name) || !ok) step.out = res.slice(0, 3000);
         t.steps.push(step);
         t.results.set(p.id, ok ? res : 'Ошибка: ' + res);
       }
       t.pending = [];
       addResults(t);
-      return withChat(me, t.chat, await advance(t.chat, t));
+      return withChat(me, t.chat, t.background ? launch(t) : await advance(t.chat, t));
     },
     // кнопка «Стоп»: бросаем ход, Верити коротко отвечает, что остановился
     'POST /api/verity/stop': async (me, b) => {
@@ -486,7 +576,8 @@ export function initVerity(db, { addColumn, push, userFacts }) {
   return {
     routes,
     drop: (uid) => {
-      for (const [k, t] of turns) if (t.uid === uid) turns.delete(k);
+      for (const [k, t] of turns) if (t.uid === uid) { t.abort.abort(); turns.delete(k); }
+      for (const [k, t] of completed) if (t.uid === uid) completed.delete(k);
       vq.clear.run(uid);
       vq.dropChats.run(uid);
     },

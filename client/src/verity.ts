@@ -6,8 +6,10 @@
 // В приложении для ПК у него есть руки (O.pc): файлы, команды, программы, запуск кода — сервер просит
 // действие, приложение выполняет (и спрашивает разрешение нативным окном, см. src-tauri/src/verity.rs).
 
+import { openApp, saveHtmlApp } from './apps';
+
 export type Face = 'grin' | 'smile' | 'neutral' | 'annoyed' | 'angry' | 'furious' | 'think';
-type Step = { k: string; t: string; ok: boolean; out?: string }; // что Верити сделал по ходу ответа
+type Step = { k: string; t: string; ok: boolean; out?: string; path?: string; before?: string; after?: string; truncated?: boolean; app?: string };
 type Call = { id: string; name: string; args: unknown; label: string }; // действие на компьютере, которое просит сервер
 type VMsg = {
   id: number; role: 'user' | 'verity'; text: string; face: Face | null; prank: string | null; created: number;
@@ -39,6 +41,7 @@ type Chat = {
   id: number; title: string; updated: number;
   msgs: VMsg[]; loaded: boolean;
   busy: boolean; stop: boolean;
+  turn?: string;
   live: { steps: Step[]; now: string } | null; // ход в работе: сделанные шаги и текущее действие
 };
 const newChat = (c?: { id: number; title: string; updated: number }): Chat =>
@@ -65,6 +68,8 @@ export function initVerity(o: Opts) { O = o; }
 export const verityOpen = () => V.open;
 export function closeVerity() { V.open = false; }
 export function resetVerity() {
+  session++;
+  for (const ch of V.chats) ch.stop = true;
   Object.assign(V, { open: false, listed: false, loading: false, chats: [], cur: newChat(), face: 'grin', att: [] });
   V.outs.clear();
   stopPranks();
@@ -183,6 +188,7 @@ export async function openVerity() {
       if (!V.cur.id && !V.cur.msgs.length && r.chat) V.cur = V.chats.find((c) => c.id === r.chat) ?? V.cur;
       const c = V.chats.find((x) => x.id === r.chat);
       if (c && !c.busy) { c.msgs = r.messages; c.loaded = true; }
+      if (c) resumeChat(c);
       setFace(r.face);
       V.listed = true;
     } catch (err) { O.toast((err as Error).message); }
@@ -211,6 +217,7 @@ async function loadChat(c: Chat) {
     const r = await O.api('/api/verity?chat=' + c.id);
     if (!c.busy) c.msgs = r.messages;
     c.loaded = true;
+    resumeChat(c);
   } catch (err) { O.toast((err as Error).message); }
   if (V.cur === c) drawMsgs();
 }
@@ -302,6 +309,14 @@ export async function setPcMode(mode: PcMode): Promise<PcMode> {
   return m;
 }
 const pcOn = () => !!V.pc && V.pc.mode !== 'off';
+function deviceId() {
+  try {
+    const old = localStorage.getItem('verity-device');
+    if (old) return old;
+    const id = crypto.randomUUID(); localStorage.setItem('verity-device', id); return id;
+  } catch { return 'session-' + started; }
+}
+const runPath = (chat: number, turn?: string) => '/api/verity/run?chat=' + chat + '&device=' + encodeURIComponent(deviceId()) + (turn ? '&turn=' + encodeURIComponent(turn) : '');
 
 const SUGGEST = ['Что ты умеешь?', 'Как сменить пароль?', 'Что нового в мире сегодня?', 'Помоги с домашкой'];
 const SUGGEST_PC = ['Что ты умеешь?', 'Напиши игру «Змейка» на Python и запусти', 'Открой калькулятор', 'Что лежит у меня на рабочем столе?'];
@@ -338,6 +353,8 @@ export function renderVerity() {
       if (s) { ta.value = s.dataset.ask!; send(ta, grow); return; }
       const b = el.closest<HTMLElement>('[data-vcode]');
       if (b) codeAct(Number(b.dataset.vcode), b.dataset.do!);
+      const app = el.closest<HTMLElement>('[data-vapp]');
+      if (app) openApp(app.dataset.vapp!);
       if (el.closest('.v-stop')) stopTurn();
     });
     const file = chat.querySelector<HTMLInputElement>('#vfile')!;
@@ -386,6 +403,7 @@ function drawTop() {
       <span class="v-sub" style="font-size:12px;color:var(--muted);margin-left:8px;">${O.esc(V.cur.title || (V.cur.id ? 'Чат' : 'Новый чат'))}</span></div>
     <div class="tb-actions">
       <button class="tb-btn v-newbtn" data-act="vnew" title="Новый чат — прошлый не потеряется">${O.ic('plus', 20)}<span>Новый чат</span></button>
+      <button class="tb-btn" data-act="apps" title="Мои приложения">${O.ic('code', 20)}</button>
       <button class="tb-btn ${pers ? 'on' : ''}" data-act="vpersonality" title="${pers ? 'Личность Верити: включена (нажмите, чтобы выключить)' : 'Личность Верити: выключена (нажмите, чтобы включить)'}">
         ${pers ? '🎭 Личность' : '🤖 Спокойный'}
       </button>
@@ -460,9 +478,9 @@ let codes: { lang: string; code: string }[] = []; // блоки кода на э
 const codeKey = (c: { lang: string; code: string }) => c.lang + '\n' + c.code;
 
 function codeBlock(lang: string, code: string) {
-  const i = codes.push({ lang, code }) - 1;
+  const i = registerCode(lang, code);
   const out = V.outs.get(codeKey(codes[i]));
-  const run = V.pc && RUNNABLE.test(lang)
+  const run = /^html?$/i.test(lang) ? `<button type="button" data-vcode="${i}" data-do="app">${O.ic('play', 14)}Предпросмотр и публикация</button>` : V.pc && RUNNABLE.test(lang)
     ? `<button type="button" data-vcode="${i}" data-do="run" title="Запустить и показать вывод">${O.ic('play', 14)}Запустить</button>
        ${/^html?$/i.test(lang) ? '' : `<button type="button" data-vcode="${i}" data-do="term" title="Запустить в отдельном окне (если программа ждёт ввода)">Окно</button>`}`
     : '';
@@ -516,6 +534,10 @@ async function codeAct(i: number, act: string) {
     try { await navigator.clipboard.writeText(c.code); O.toast('Код скопирован'); } catch { O.toast('Не удалось скопировать'); }
     return;
   }
+  if (act === 'app') {
+    try { await saveHtmlApp(c.code); } catch (err) { O.toast((err as Error).message); }
+    return;
+  }
   if (!O.pc || !V.pc) return;
   const key = codeKey(c);
   const show = (text: string) => {
@@ -534,12 +556,20 @@ async function codeAct(i: number, act: string) {
 
 const STEP_IC: Record<string, string> = {
   fetch_url: 'arrowOut', web_search: 'search', list_dir: 'file', read_file: 'eye', write_file: 'edit', edit_file: 'edit',
-  run_command: 'play', run_code: 'play', open: 'arrowOut', media: 'eye',
+  run_command: 'play', run_code: 'play', open: 'arrowOut', media: 'eye', create_app: 'code',
 };
+function registerCode(lang: string, code: string) {
+  const found = codes.findIndex((c) => c.lang === lang && c.code === code);
+  return found >= 0 ? found : codes.push({ lang, code }) - 1;
+}
+function stepHtml(s: Step) {
+  const change = s.path && s.after !== undefined ? `<details class="v-file-change"><summary>${O.esc(s.path)} · ${s.k === 'write_file' ? 'запись файла' : 'изменения'}</summary>${s.before ? `<pre class="removed">${O.esc(s.before)}</pre>` : ''}<pre class="added">${O.esc(s.after)}</pre>${s.truncated ? '<span class="muted">Показана часть файла</span>' : ''}${s.ok && !s.truncated && s.k === 'write_file' && /\.html?$/i.test(s.path) ? `<button class="btn sm sec" data-vcode="${registerCode('html', s.after)}" data-do="app">Предпросмотр и публикация</button>` : ''}</details>` : '';
+  return `<div class="v-step ${s.ok ? '' : 'bad'}">${O.ic(STEP_IC[s.k] || 'check', 14)}<span>${O.esc(s.t)}</span></div>${change}${s.out ? `<pre class="v-out">${O.esc(s.out)}</pre>` : ''}${s.app ? `<button class="btn sm sec" data-vapp="${O.esc(s.app)}">${O.ic('play', 14)}Открыть приложение</button>` : ''}`;
+}
 function stepsHtml(steps: Step[] | undefined, open = false) {
   if (!steps?.length) return '';
   const pers = hasPersonality();
-  const rows = steps.map((s) => `<div class="v-step ${s.ok ? '' : 'bad'}">${O.ic(STEP_IC[s.k] || 'check', 14)}<span>${O.esc(s.t)}</span></div>${s.out ? `<pre class="v-out">${O.esc(s.out)}</pre>` : ''}`).join('');
+  const rows = steps.map(stepHtml).join('');
   const n = steps.length;
   return `<details class="v-steps" ${open ? 'open' : ''}><summary>${pers ? 'Действия Верити' : 'Действия ассистента'}: ${n}</summary>${rows}</details>`;
 }
@@ -570,7 +600,8 @@ function liveHtml() {
   const tagClass = pers ? 'v-tag' : 'v-tag v-tag-calm';
   const thinkText = pers ? 'думает…' : 'печатает ответ…';
   return `<div class="msg head v-m ${pers ? '' : 'v-calm'} v-typing"><span class="mav">${av}</span><div class="mh"><b>${name}<i class="${tagClass}">ИИ</i></b></div>
-    ${working ? `<div class="v-steps v-live">${l!.steps.map((s) => `<div class="v-step ${s.ok ? '' : 'bad'}">${O.ic(STEP_IC[s.k] || 'check', 14)}<span>${O.esc(s.t)}</span></div>`).join('')}${now}</div>` : ''}
+    ${working ? `<div class="v-steps v-live">${l!.steps.map(stepHtml).join('')}${now}</div>` : ''}
+    <div class="v-task-status">Задача выполняется автоматически · можно перейти в другую беседу</div>
     <p>${working ? '' : `<span class="v-dots ${pers ? '' : 'v-dots-calm'}"><i></i><i></i><i></i></span> ${thinkText}`}
       ${V.cur.stop ? '<span class="muted">останавливаюсь…</span>' : `<button type="button" class="v-stop" title="Остановить">${O.ic('stop', 12)}Стоп</button>`}</p></div>`;
 }
@@ -579,7 +610,9 @@ function drawLive() {
   if (!el) return drawMsgs();
   const box = document.getElementById('msgs')!;
   const atEnd = box.scrollHeight - box.scrollTop - box.clientHeight < 80;
+  const expanded = new Set([...el.querySelectorAll('details[open] summary')].map((s) => s.textContent));
   el.outerHTML = liveHtml();
+  box.querySelectorAll<HTMLDetailsElement>('.v-typing details').forEach((d) => { if (expanded.has(d.querySelector('summary')?.textContent || '')) d.open = true; });
   if (atEnd) box.scrollTop = box.scrollHeight;
 }
 
@@ -749,6 +782,9 @@ async function send(ta: HTMLTextAreaElement, grow: () => void) {
   const mins = Math.round((Date.now() - started) / 60e3);
   const body = {
     chat: ch.id,
+    background: true,
+    device: deviceId(),
+    requestId: crypto.randomUUID(),
     text,
     images: att.flatMap((a) => a.kind === 'image' ? [a.thumb!] : a.kind === 'video' ? a.frames! : []),
     files: att.filter((a) => a.data).map((a) => ({ name: a.name, data: a.data })),
@@ -767,46 +803,21 @@ async function send(ta: HTMLTextAreaElement, grow: () => void) {
     if (r?.chat?.id) Object.assign(ch, { id: r.chat.id, title: r.chat.title || ch.title, updated: r.chat.updated });
     return r;
   };
-  let turn = '';
   try {
-    let r = learn(await O.api('/api/verity', body, 240e3));
-    // нейросеть просит действия на компьютере: выполняем по одному (окно «Разрешить» покажет приложение) и отдаём результат
-    while (r.pending) {
-      turn = r.pending.turn;
-      ch.live!.steps = r.steps || [];
-      const results: { id: string; ok: boolean; out: string }[] = [];
-      for (const c of r.pending.calls as Call[]) {
-        if (ch.stop) break;
-        ch.live!.now = c.label;
-        live();
-        let res;
-        try { res = { id: c.id, ok: true, out: String(await O.pc!.invoke('verity_tool', { name: c.name, args: c.args, turn })) }; }
-        catch (err) { res = { id: c.id, ok: false, out: String(err) }; }
-        results.push(res);
-        ch.live!.steps.push({ k: c.name, t: c.label, ok: res.ok });
+    let r;
+    for (let attempt = 0; ; attempt++) {
+      try { r = learn(await O.api('/api/verity', body, 240e3)); break; }
+      catch (err) {
+        if (attempt >= 2 || !/связаться|не ответил|fetch|network/i.test((err as Error).message)) throw err;
+        ch.live!.now = 'Восстанавливаю соединение…'; live();
+        await delay(2000 * (attempt + 1));
       }
-      ch.live!.now = '';
-      if (ch.stop) { r = await O.api('/api/verity/stop', { chat: ch.id }); break; }
-      live();
-      r = learn(await O.api('/api/verity/continue', { chat: ch.id, turn, results }, 240e3));
     }
-    ch.busy = false;
-    ch.live = null;
-    if (r.message) {
-      ch.msgs.push(r.message);
-      setFace(r.face);
-      if (r.prank && hasPersonality()) setTimeout(() => prank(r.prank), 900);
-      // ответ пришёл в чат, который сейчас не открыт, — подскажем
-      if (!shown() && V.chats.includes(ch)) O.toast(`Верити ответил в чате «${ch.title || 'Новый чат'}»`);
-    }
-    redraw();
-    if (shown()) drawTop();
+    await drive(ch, r);
   } catch (err) {
     ch.busy = false;
     ch.live = null;
-    if (turn) {
-      O.api('/api/verity/stop', { chat: ch.id }).catch(() => {}); // ход уже шёл — не оставляем его висеть на сервере
-    } else {
+    if (!ch.turn) {
       ch.msgs = ch.msgs.filter((m) => m !== mine);
       if (!ch.id && !ch.msgs.length) V.chats = V.chats.filter((c) => c !== ch); // новый чат так и не создался
       if (shown() && !ta.value) { ta.value = text; grow(); V.att = att; drawStaged(); }
@@ -816,11 +827,105 @@ async function send(ta: HTMLTextAreaElement, grow: () => void) {
   }
 }
 
+const delay = (ms: number) => new Promise<void>((resolve) => window.setTimeout(resolve, ms));
+let session = 0;
+type ToolResult = { id: string; ok: boolean; out: string };
+function journal(turn: string): Record<string, ToolResult | 'started'> {
+  try { return JSON.parse(localStorage.getItem('verity-tools:' + turn) || '{}'); } catch { return {}; }
+}
+function saveJournal(turn: string, data: Record<string, ToolResult | 'started'>) {
+  try { localStorage.setItem('verity-tools:' + turn, JSON.stringify(data)); } catch { /* session cache still prevents retries */ }
+}
+async function resumeChat(ch: Chat) {
+  if (ch.busy || !ch.id) return;
+  const activeSession = session;
+  try {
+    const r = await O.api(runPath(ch.id));
+    if (activeSession !== session || ch.busy || (!r.running && !r.pending)) return;
+    ch.busy = true; ch.stop = false; ch.live = { steps: r.steps || [], now: r.now || '' };
+    await drive(ch, r);
+  } catch { /* older servers do not expose background jobs */ }
+}
+async function drive(ch: Chat, first: any) {
+  const activeSession = session;
+  const update = () => { if (V.open && V.cur === ch) drawLive(); drawSide(); };
+  let r = first;
+  const cache = new Map<string, Record<string, ToolResult | 'started'>>();
+  while (activeSession === session) {
+    if (r.chat?.id) Object.assign(ch, { id: r.chat.id, title: r.chat.title || ch.title });
+    ch.turn = r.turn || r.pending?.turn || ch.turn;
+    if (r.message || r.idle || (r.stopped && !r.running && !r.pending)) break;
+    if (!r.running && !r.pending) break; // legacy server's final response
+    ch.live = { steps: r.steps || ch.live?.steps || [], now: r.now || 'Продолжаю работу…' };
+    update();
+    let continuation: { chat: number; turn: string; device: string; results: ToolResult[] } | null = null;
+    if (r.pending && !ch.stop) {
+      const turn = r.pending.turn;
+      const saved = cache.get(turn) || journal(turn); cache.set(turn, saved);
+      const results: ToolResult[] = [];
+      for (const c of r.pending.calls as Call[]) {
+        if (ch.stop || activeSession !== session) break;
+        ch.live.now = c.label; update();
+        let res: ToolResult;
+        const previous = saved[c.id];
+        if (previous && previous !== 'started') res = previous;
+        else if (previous === 'started') res = { id: c.id, ok: false, out: 'Приложение перезапустилось во время действия. Его результат неизвестен. Проверь файлы перед повтором; команды с побочными эффектами автоматически не повторяй.' };
+        else {
+          saved[c.id] = 'started'; saveJournal(turn, saved);
+          try {
+            if (!O.pc) throw new Error('Открой Startrack на компьютере, чтобы продолжить действие');
+            res = { id: c.id, ok: true, out: String(await O.pc.invoke('verity_tool', { name: c.name, args: c.args, turn })).slice(0, 40000) };
+          } catch (err) { res = { id: c.id, ok: false, out: String(err) }; }
+        }
+        saved[c.id] = res; saveJournal(turn, saved); results.push(res);
+        const a = c.args as Record<string, any>;
+        ch.live.steps.push({ k: c.name, t: c.label, ok: res.ok,
+          ...(['write_file', 'edit_file'].includes(c.name) ? { path: String(a.path || ''), before: c.name === 'edit_file' ? String(a.old || '').slice(0, 24000) : '', after: String(c.name === 'write_file' ? a.content || '' : a.new || '').slice(0, 48000), truncated: String(c.name === 'write_file' ? a.content || '' : a.new || '').length > 48000 } : {}),
+          ...(!res.ok || ['run_command', 'run_code'].includes(c.name) ? { out: res.out.slice(0, 3000) } : {}) });
+        update();
+      }
+      continuation = { chat: ch.id, turn, device: deviceId(), results };
+    } else await delay(1500);
+    if (activeSession !== session) return;
+    for (let retry = 0; ; retry++) {
+      if (activeSession !== session) return;
+      try {
+        if (ch.stop) {
+          r = await O.api('/api/verity/stop', { chat: ch.id });
+          if (!r.message && ch.turn) r = await O.api(runPath(ch.id, ch.turn));
+        } else r = continuation ? await O.api('/api/verity/continue', continuation, 240e3)
+          : await O.api(runPath(ch.id, ch.turn));
+        break;
+      } catch (err) {
+        if (activeSession !== session) return;
+        if ([401, 403, 404, 409].includes((err as Error & { status?: number }).status || 0)) {
+          O.toast((err as Error).message); r = { idle: true }; break;
+        }
+        ch.live!.now = 'Нет соединения. Повторяю автоматически…'; update();
+        await delay(Math.min(2000 * (retry + 1), 10000));
+      }
+    }
+  }
+  if (activeSession !== session) return;
+  ch.busy = false; ch.live = null;
+  if (ch.turn) { try { localStorage.removeItem('verity-tools:' + ch.turn); } catch {} }
+  ch.turn = undefined;
+  if (r.message) {
+    if (!ch.msgs.some((m) => m.id === r.message.id)) ch.msgs.push(r.message);
+    setFace(r.face);
+    if (r.prank && hasPersonality()) setTimeout(() => prank(r.prank), 900);
+    if ((!V.open || V.cur !== ch) && V.chats.includes(ch)) O.toast(`Помощник ответил в чате «${ch.title || 'Новый чат'}»`);
+  } else if (r.idle) { ch.loaded = false; await loadChat(ch); }
+  if (V.open && V.cur === ch) { drawMsgs(); drawTop(); }
+  drawSide();
+}
+
 // «Стоп»: текущее действие доделается, новых не будет
 function stopTurn() {
   const ch = V.cur;
   if (!ch.busy || ch.stop) return;
   ch.stop = true;
+  O.api('/api/verity/stop', { chat: ch.id }).catch(() => {});
   drawLive();
 }
 

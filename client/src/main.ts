@@ -14,6 +14,8 @@ import { BUILTIN, SB_MAX_SEC, cutWav, decodeFile, playSound, preload, preview, s
 import { SFX_GROUPS, setSfxOn, setSfxOutput, setSfxVol, sfx, sfxLoop, sfxOn, sfxVol, type SfxGroup } from './sounds';
 import { aiAvatar, clearVerity, closeVerity, deleteVerityChat, initVerity, openVerity, openVerityChat, renameVerityChat, pcInfo, renderVerity, resetVerity, setPcMode, stopPranks, toggleVeritySide, verityEvent, verityFace, verityOpen, verityRow } from './verity';
 import { createSession, parseSpotify, parseYt, type Item, type WState } from './watch';
+import { appCard, appCommand, fillAppCards, initApps, openApp, openApps, resetApps } from './apps';
+import { audioPlayer, bindAudio, initMedia } from './media';
 
 // offline — так другие видят «невидимку»
 type Status = 'online' | 'idle' | 'dnd' | 'invisible' | 'offline';
@@ -189,6 +191,8 @@ const S = {
 
 // ---------- иконки и аватарки ----------
 const ICON = {
+  code: 'M8.7 6.3 3 12l5.7 5.7 1.4-1.4L5.8 12l4.3-4.3zM15.3 6.3l-1.4 1.4 4.3 4.3-4.3 4.3 1.4 1.4L21 12z',
+  minus: 'M5 11h14v2H5z',
   logo: 'M12 4l2.16 5.61 6 .28-4.69 3.75 1.64 5.81L12 16.13l-5.11 3.32 1.64-5.81L3.84 9.89l6-.28z',
   friends: 'M16 11c1.66 0 2.99-1.34 2.99-3S17.66 5 16 5c-1.66 0-3 1.34-3 3s1.34 3 3 3zm-8 0c1.66 0 2.99-1.34 2.99-3S9.66 5 8 5C6.34 5 5 6.34 5 8s1.34 3 3 3zm0 2c-2.33 0-7 1.17-7 3.5V19h14v-2.5c0-2.33-4.67-3.5-7-3.5zm8 0c-.29 0-.62.02-.97.05 1.16.84 1.97 1.97 1.97 3.45V19h6v-2.5c0-2.33-4.67-3.5-7-3.5z',
   addFriend: 'M15 12c2.21 0 4-1.79 4-4s-1.79-4-4-4-4 1.79-4 4 1.79 4 4 4zm-9-2V7H4v3H1v2h3v3h2v-3h3v-2H6zm9 4c-2.67 0-8 1.34-8 4v2h16v-2c0-2.66-5.33-4-8-4z',
@@ -327,7 +331,7 @@ async function api(path: string, body?: unknown, timeoutMs = 15000, retries = 0)
   }
   const data = await r.json().catch(() => ({}));
   if (r.status === 401 && S.me) logout();
-  if (!r.ok) throw new Error(data.error || 'Ошибка сервера: HTTP ' + r.status);
+  if (!r.ok) throw Object.assign(new Error(data.error || 'Ошибка сервера: HTTP ' + r.status), { status: r.status });
   return data;
 }
 
@@ -435,6 +439,7 @@ function logout() {
   S.msgs.clear();
   S.unread.clear();
   resetVerity();
+  resetApps();
   store.set('token', '');
   const ws = S.ws;
   S.ws = null;
@@ -452,6 +457,7 @@ function start(me: User) {
         <div class="side-top"><input id="find" placeholder="Найти беседу" spellcheck="false"></div>
         <div class="side-list">
           <div class="nav-item" id="navfr" data-act="home">${ic('friends', 24)}<span>Друзья</span><span class="pill" id="reqn" hidden></span></div>
+          <div class="nav-item" data-act="apps">${ic('code', 24)}<span>Мои приложения</span></div>
           <div class="dm-head"><span>Личные сообщения</span><button class="ibtn sm" data-act="gnew" title="Создать группу">${ic('plus', 16)}</button></div>
           <div id="flist"></div>
         </div>
@@ -486,6 +492,13 @@ function start(me: User) {
     const c = conv();
     if (c && e.dataTransfer?.files.length) stageFiles(e.dataTransfer.files);
   };
+  initMedia({ esc, ic: (n, s) => ic(n as keyof typeof ICON, s), toast });
+  initApps({ api, esc, ic: (n, s) => ic(n as keyof typeof ICON, s), toast, share: (command) => {
+    if (verityOpen() || !conv()) return false;
+    const ta = document.querySelector<HTMLTextAreaElement>('#send textarea');
+    if (!ta) return false;
+    insertText(ta, command); return true;
+  } });
   initVerity({
     api, toast, esc, ic, emojify, linkify, stamp, back: BACK,
     me: () => ({ name: uname(S.me!), avatar: (size) => avatar(S.me!, size) }),
@@ -636,6 +649,8 @@ async function act(b: HTMLElement) {
       return u && openChat(u);
     }
     case 'together': return together({ src: b.dataset.src as Item['src'], id: b.dataset.id!, title: b.dataset.title || titles.get(b.dataset.src + ':' + b.dataset.id) || 'Видео', by: S.me ? uname(S.me) : '' });
+    case 'apps': mpane(true); return openApps();
+    case 'appopen': return openApp(b.dataset.app!);
     case 'lkplay': return floatPlay(b.dataset.src as 'yt' | 'sp', b.dataset.id!, Number(b.dataset.t) || 0);
     case 'vidopen': {
       pendingOpen = b.dataset.name || '';
@@ -1099,7 +1114,7 @@ function renderAttShelf() {
   });
 }
 
-const composerHint = (c: Conv) => `Написать ${c.to.group ? `в «${c.name}»` : c.name}`;
+const composerHint = (c: Conv) => `Написать ${c.to.group ? `в «${c.name}»` : c.name} · /app — приложение`;
 
 function renderChat() {
   syncCallBox();
@@ -1136,6 +1151,14 @@ function renderChat() {
   const send = async () => {
     const text = replaceCodes(ta.value.trim());
     if (!text && !stagedFiles.length) return;
+    if (/^\/app(?:\s|$)/.test(text)) {
+      const slug = appCommand(text);
+      if (!slug) { await openApps(); return; }
+      try {
+        const a = await api('/api/apps/info?id=' + encodeURIComponent(slug));
+        if (!a.published) return toast('Сначала опубликуй приложение в «Мои приложения»');
+      } catch (err) { toast((err as Error).message); return; }
+    }
     const filesToSend = [...stagedFiles];
     stagedFiles = [];
     renderAttShelf();
@@ -1265,7 +1288,7 @@ function renderAtt(f: Att) {
       <span class="att-ic">${ic(audio ? 'music' : 'file', 30)}</span>
       <div class="att-n"><a ${dl} title="${esc(f.name)}">${esc(f.name)}</a><span>${fsize(f.size)}</span></div>
       <a class="att-dl" ${dl} title="Скачать">${ic('download', 22)}</a>
-      ${audio ? `<audio data-fid="${f.id}" src="${esc(fileUrl(f))}" controls preload="none"></audio>
+      ${audio ? `${audioPlayer(f.id, fileUrl(f), f.name)}
         <button class="btn sm sec att-tog" data-act="together" data-src="au" data-id="f:${f.id}" data-title="${esc(f.name.replace(/\.[^.]+$/, ''))}">${ic('friends', 16)}Слушать вместе</button>` : ''}
     </div>`;
 }
@@ -1470,7 +1493,7 @@ function renderMessages() {
     const del = m.sender === me.id ? `<button class="msg-del" data-act="delmsg" data-id="${m.id}" title="Удалить у всех">${ic('trash', 18)}</button>` : '';
     const link = m.text ? imageLink(m.text) : '';
     const text = link ? `<div class="att-media link"><img src="${esc(link)}" alt="${esc(m.text)}" title="${esc(m.text)}" referrerpolicy="no-referrer" draggable="false"></div>`
-      : (m.text ? `<p${isJumbo(m.text) ? ' class="jumbo"' : ''}>${linkify(emojify(m.text))}</p>` + linkCards(m.text) : '') + (m.file ? renderAtt(m.file) : '');
+      : (m.text ? appCard(m.text) || `<p${isJumbo(m.text) ? ' class="jumbo"' : ''}>${linkify(emojify(m.text))}</p>` + linkCards(m.text) : '') + (m.file ? renderAtt(m.file) : '');
     // подряд идущие сообщения одного автора в пределах 7 минут — одной группой, как в Discord
     if (prev && prev.sender === m.sender && m.created - prev.created < 7 * 60e3 && sameDay(prev.created, m.created)) {
       html += `<div class="msg cont" data-mid="${m.id}">${del}<time>${new Date(m.created).toLocaleTimeString('ru', { hour: '2-digit', minute: '2-digit' })}</time>${text}</div>`;
@@ -1484,15 +1507,17 @@ function renderMessages() {
   html += S.uploads.filter((u) => u.conv === c.key).map(renderUpload).join('');
   // уже показанные картинки и плееры переносим в новую разметку как есть:
   // не перекачиваются, а видео/музыка не останавливаются, когда приходит новое сообщение
-  const keep = new Map([...box.querySelectorAll<HTMLElement>('img[data-fid], video[data-fid], audio[data-fid]')].map((el) => [el.dataset.fid!, el]));
+  const keep = new Map([...box.querySelectorAll<HTMLElement>('img[data-fid], video[data-fid], .audio-player[data-fid]')].map((el) => [el.dataset.fid!, el]));
   box.innerHTML = html;
-  box.querySelectorAll<HTMLElement>('img[data-fid], video[data-fid], audio[data-fid]').forEach((el) => {
+  box.querySelectorAll<HTMLElement>('img[data-fid], video[data-fid], .audio-player[data-fid]').forEach((el) => {
     const old = keep.get(el.dataset.fid!);
     if (old) el.replaceWith(old);
   });
   box.scrollTop = box.scrollHeight;
   msgStick = true;
   fillTitles(box);
+  bindAudio(box);
+  fillAppCards(box);
 }
 
 // ---------- ссылки на YouTube и Spotify в сообщениях: превью, плеер, «смотреть вместе» ----------
@@ -1529,9 +1554,9 @@ function fillTitles(box: HTMLElement) {
     }, () => {});
   });
 }
-// Плеер поверх чата (в углу): лента сообщений перерисовывается целиком, и плеер прямо в ней
-// начинал бы видео заново с каждым новым сообщением
+// Постоянная область активности в беседе: новые сообщения не пересоздают iframe.
 function floatPlay(src: 'yt' | 'sp', id: string, t = 0) {
+  resetApps();
   document.getElementById('lkfloat')?.remove();
   const el = document.createElement('div');
   el.id = 'lkfloat';
@@ -1539,12 +1564,18 @@ function floatPlay(src: 'yt' | 'sp', id: string, t = 0) {
   const url = src === 'yt'
     ? `https://www.youtube.com/embed/${id}?autoplay=1&rel=0&playsinline=1&start=${Math.floor(t)}&origin=${encodeURIComponent(location.origin)}`
     : `https://open.spotify.com/embed/${id}?autoplay=1`;
-  el.innerHTML = `<div class="lkf-bar"><span>${src === 'yt' ? 'YouTube' : 'Spotify'}</span>
+  const title = titles.get(src + ':' + id) || (src === 'yt' ? 'YouTube' : 'Spotify');
+  el.innerHTML = `<div class="lkf-bar">${ic(src === 'yt' ? 'youtube' : 'music', 20)}<div><b>${esc(title)}</b><small>Личный просмотр · ${src === 'yt' ? 'YouTube' : 'Spotify'}</small></div>
       <button class="ibtn" data-act="together" data-src="${src}" data-id="${id}" title="Смотреть вместе">${ic('friends', 18)}</button>
+      <button class="ibtn lkf-fold" title="Свернуть плеер" aria-expanded="true">${ic('minus', 18)}</button>
       <button class="ibtn lkf-x" title="Закрыть">${ic('close', 18)}</button></div>
-    <iframe src="${url}" allow="autoplay; encrypted-media; picture-in-picture; fullscreen; clipboard-write" allowfullscreen referrerpolicy="strict-origin-when-cross-origin"></iframe>`;
+    <iframe title="${esc(title)}" src="${url}" allow="autoplay; encrypted-media; picture-in-picture; fullscreen; clipboard-write" allowfullscreen referrerpolicy="strict-origin-when-cross-origin"></iframe>`;
   el.querySelector<HTMLElement>('.lkf-x')!.onclick = () => el.remove();
-  ($('.app') || document.body).append(el);
+  el.querySelector<HTMLElement>('.lkf-fold')!.onclick = (e) => {
+    const folded = el.classList.toggle('folded');
+    const b = (e.currentTarget as HTMLElement); b.title = folded ? 'Развернуть плеер' : 'Свернуть плеер'; b.setAttribute('aria-expanded', String(!folded));
+  };
+  $('.main > .body').before(el);
 }
 
 // ---------- файлы ----------

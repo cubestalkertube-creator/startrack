@@ -436,15 +436,15 @@ export function createSession(O: Opts) {
       <div class="yt-bar">
         <span class="yt-logo">${ic('music', 22)}</span>
         <div class="yt-now"></div>
-        <form class="yt-form"><input placeholder="Ссылка: YouTube, Spotify или mp3" spellcheck="false">
+        <form class="yt-form"><input aria-label="Ссылка на видео или музыку" placeholder="Ссылка: YouTube, Spotify или mp3" spellcheck="false">
           <button class="btn sm" data-y="go"></button></form>
         <button class="ibtn w-own" data-y="pp" title="Пауза / играть">${ic('play', 20)}</button>
         <button class="ibtn w-own" data-y="next" title="Следующее из очереди">${ic('skip', 20)}</button>
         <button class="ibtn yt-qbtn" data-y="queue" title="Очередь">${ic('queue', 20)}<i></i></button>
-        <label class="w-vol" title="Громкость (только у вас)">${ic('volume', 18)}<input type="range" min="0" max="100" value="${Math.round(vol * 100)}"></label>
+        <label class="w-vol" title="Громкость (только у вас)">${ic('volume', 18)}<input aria-label="Громкость совместного просмотра" type="range" min="0" max="100" value="${Math.round(vol * 100)}"></label>
         <button class="ibtn" data-y="close"></button>
       </div>
-      <div class="yt-main">
+      <div class="yt-body"><div class="yt-main">
         <div class="w-p w-p-yt yt-player"><div></div></div>
         <div class="w-p w-p-sp"><div></div></div>
         <div class="w-p w-p-au"><div class="au-cover">${ic('music', 64)}<b></b><span></span>
@@ -457,7 +457,7 @@ export function createSession(O: Opts) {
             <button type="button" class="linkbtn" data-y="login" data-s="youtube">Войти в YouTube</button></span>` : ''}</div>
         <div class="yt-err" hidden></div>
       </div>
-      <div class="yt-q" hidden></div>`;
+      <div class="yt-q" hidden></div></div>`;
     const form = el.querySelector<HTMLFormElement>('.yt-form')!;
     const inp = form.querySelector('input')!;
     let busy = false;
@@ -487,7 +487,7 @@ export function createSession(O: Opts) {
       const i = Number(b.dataset.i);
       const own = isCtrl();
       switch (b.dataset.y) {
-        case 'queue': { const q = el.querySelector<HTMLElement>('.yt-q')!; q.hidden = !q.hidden; return draw(); }
+        case 'queue': { const q = el.querySelector<HTMLElement>('.yt-q')!; q.hidden = !q.hidden; el.classList.toggle('queue-open', !q.hidden); b.setAttribute('aria-expanded', String(!q.hidden)); return draw(); }
         case 'login': return O.login?.(b.dataset.s as 'spotify' | 'youtube');
         case 'close':
           if (own) return commit({ on: false, vid: null, queue: [], playing: false, pos: 0 });
