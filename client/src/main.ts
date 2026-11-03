@@ -438,6 +438,7 @@ function logout() {
   S.groups = [];
   S.msgs.clear();
   S.unread.clear();
+  directCalls.clear();
   resetVerity();
   resetApps();
   store.set('token', '');
@@ -551,6 +552,7 @@ async function act(b: HTMLElement) {
     case 'home': goHome(); return mpane(true);
     case 'verity':
       if (!verityOn()) return;
+      resetApps();
       S.peer = null;
       S.gid = 0;
       clearStaged();
@@ -667,6 +669,7 @@ async function act(b: HTMLElement) {
     case 'twatch': return setWatching(b.dataset.key!, !!b.dataset.on);
     case 'tpip': return tilePip(b.dataset.key!);
     case 'tfs': { const t = tileEl(b.dataset.key!); return t && toggleFullscreen(t); }
+    case 'tfocus': return setFocus(C.focus === b.dataset.key ? '' : b.dataset.key!);
     case 'tmenu': { const t = tileEl(b.dataset.key!); if (!t) return; const r = b.getBoundingClientRect(); return openTileMenu(t, r.left, r.bottom + 4); }
     case 'hangup': return hangup(true);
     case 'settings': return openSettings((b.dataset.tab as SetTab) || 'account');
@@ -703,6 +706,7 @@ function mpane(main: boolean) {
 window.addEventListener('popstate', () => document.querySelector('.app')?.classList.remove('m-main'));
 
 function goHome() {
+  resetApps();
   closeVerity();
   S.peer = null;
   S.gid = 0;
@@ -783,7 +787,7 @@ function renderDmList() {
     const unread = S.unread.get('u' + u.id) || 0;
     const inCall = C.state !== 'idle' && !C.gid && C.peer?.id === u.id;
     // под именем, как в Discord, — свой статус
-    const sub = inCall ? `<small class="incall">${ic('volume', 12)}В звонке</small>` : playing(u) ? `<small>${gameLine(u)}</small>`
+    const sub = inCall ? `<small class="incall">${ic('volume', 12)}В звонке</small>` : directCalls.get(u.id)?.length ? `<small class="incall">${ic('volume', 12)}Можно присоединиться</small>` : playing(u) ? `<small>${gameLine(u)}</small>`
       : u.custom && u.online ? `<small>${emojify(u.custom)}</small>` : '';
     return `
       <div class="dm ${S.peer?.id === u.id ? 'sel' : ''} ${unread ? 'unread' : ''}" data-act="open" data-id="${u.id}">
@@ -986,6 +990,7 @@ function openGroup(id: number) {
 }
 
 async function openConv() {
+  resetApps();
   const c = conv();
   if (!c) return goHome();
   closeVerity();
@@ -1023,7 +1028,7 @@ function renderTop() {
   $('#topbar').innerHTML = `
     ${BACK}<div class="tb-title tb-user" data-act="user" data-id="${p.id}">${avatar(p, 24, true)}<b>${esc(uname(p))}</b></div>
     <div class="tb-actions">
-      <button class="tb-btn" data-act="call" data-id="${p.id}" title="Начать голосовой звонок">${ic('phone', 22)}</button>
+      <button class="tb-btn ${directCalls.get(p.id)?.length ? 'live' : ''}" data-act="call" data-id="${p.id}" title="${directCalls.get(p.id)?.length ? 'Присоединиться к звонку' : 'Начать голосовой звонок'}">${ic('phone', 22)}</button>
       <button class="tb-btn ${P.conv === 'u' + p.id ? 'on' : ''}" data-act="party" title="Смотреть и слушать вместе: YouTube, Spotify, музыка">${ic('music', 22)}</button>
       <button class="tb-btn" data-act="gnew" data-id="${p.id}" title="Создать группу с ${esc(uname(p))}">${ic('addFriend', 22)}</button>
       <button class="tb-btn ${S.showProfile ? 'on' : ''}" data-act="profile" title="${S.showProfile ? 'Скрыть профиль' : 'Показать профиль'}">${ic('account', 22)}</button>
@@ -1454,6 +1459,7 @@ function renderSys(m: Msg, who: string) {
   return `<div class="msg sys"><span class="sys-ic ${cls}">${ic(icon, 18)}</span><p>${text} <time>${stamp(m.created)}</time></p></div>`;
 }
 
+const messageMarkup = new WeakMap<HTMLElement, string>();
 function renderMessages() {
   const box = document.getElementById('msgs');
   const c = conv();
@@ -1508,10 +1514,27 @@ function renderMessages() {
   // уже показанные картинки и плееры переносим в новую разметку как есть:
   // не перекачиваются, а видео/музыка не останавливаются, когда приходит новое сообщение
   const keep = new Map([...box.querySelectorAll<HTMLElement>('img[data-fid], video[data-fid], .audio-player[data-fid]')].map((el) => [el.dataset.fid!, el]));
-  box.innerHTML = html;
+  // Keep unchanged message nodes attached: detaching an iframe restarts its game.
+  const template = document.createElement('template');
+  template.innerHTML = html;
+  const existing = new Map([...box.querySelectorAll<HTMLElement>(':scope > [data-mid]')].map((el) => [el.dataset.mid!, el]));
+  const next = [...template.content.children].map((node) => {
+    const el = node as HTMLElement, markup = el.outerHTML;
+    const old = existing.get(el.dataset.mid!);
+    if (old && messageMarkup.get(old) === markup) return old;
+    messageMarkup.set(el, markup);
+    return el;
+  });
+  const retained = new Set(next);
+  for (const el of [...box.children]) if (!retained.has(el as HTMLElement)) el.remove();
+  let cursor = box.firstChild;
+  for (const el of next) {
+    if (el === cursor) cursor = cursor.nextSibling;
+    else box.insertBefore(el, cursor);
+  }
   box.querySelectorAll<HTMLElement>('img[data-fid], video[data-fid], .audio-player[data-fid]').forEach((el) => {
     const old = keep.get(el.dataset.fid!);
-    if (old) el.replaceWith(old);
+    if (old && old !== el) el.replaceWith(old);
   });
   box.scrollTop = box.scrollHeight;
   msgStick = true;
@@ -2165,6 +2188,7 @@ function connectWs() {
     loadGroups().catch(() => {});
     // сервер узнаёт, кто в групповом звонке, по соединению — после обрыва напоминаем
     if (C.gid && C.state !== 'idle') wsSend({ type: 'gcall_join', group: C.gid, ring: false });
+    if (C.peer && C.room && C.state !== 'idle') wsSend({ type: 'dcall_join', peer: C.peer.id });
     if (afk) wsSend({ type: 'afk', afk: true });
     if (P.conv) wsSend({ type: 'party_join', conv: P.conv });
     const ck = convKey();
@@ -2284,13 +2308,23 @@ function onEvent(ev: any) {
       renderParty();
       break;
     case 'call_invite': onIncoming(ev.from); break;
+    case 'dcalls':
+      directCalls.clear();
+      for (const c of ev.calls || []) if (c.users?.length) directCalls.set(c.peer, c.users);
+      renderFriends();
+      break;
+    case 'dcall':
+      if (ev.users?.length) directCalls.set(ev.peer, ev.users); else directCalls.delete(ev.peer);
+      if (C.incoming?.id === ev.peer && !ev.users?.length) closeIncoming();
+      renderFriends();
+      break;
     case 'call_accept': if (C.peer?.id === ev.from.id) setCallState('incall'); break;
     case 'call_decline':
       if (C.peer?.id === ev.from.id && C.state === 'calling') { toast(`${uname(userById(ev.from.id) ?? ev.from)} отклонил(а) звонок`); hangup(false); }
       break;
     case 'call_end':
       if (C.incoming?.id === ev.from.id) closeIncoming();
-      if (C.peer?.id === ev.from.id) hangup(false);
+      if (C.peer?.id === ev.from.id && C.state === 'calling') hangup(false);
       break;
     // ответили/отклонили на другом нашем устройстве
     case 'call_accept_self': case 'call_decline_self': case 'call_end_self':
@@ -2300,6 +2334,8 @@ function onEvent(ev: any) {
 }
 
 // ---------- calls ----------
+const directCalls = new Map<number, number[]>();
+const streamViewers = new Set<string>();
 const QUALITY = {
   '720p30': { w: 1280, h: 720, fps: 30, br: 2_500_000 },
   '1080p30': { w: 1920, h: 1080, fps: 30, br: 4_500_000 },
@@ -2336,7 +2372,6 @@ const C = {
   switching: false,
   gen: 0, // номер звонка: после сброса незавершённые подключения закрываются
   rejoins: 0,
-  peerGone: 0,
   net: '', // статус связи в шапке звонка
   focus: '', // развёрнутая плитка: 'u5' — участник, 's<sid>' — демонстрация, 'yt' — YouTube
   strip: store.get('callStrip') !== '0', // под развёрнутой плиткой — ряд остальных
@@ -2462,7 +2497,7 @@ async function reconnect(toRelay: boolean) {
 
 // mode: 'auto' — по ситуации (VPN/обрывы -> TURN/TLS), 'all' — все пути (UDP, TCP 7881, TURN), запасной вариант
 // Подключение к комнате звонка: с другом (C.peer) или в группе (C.gid)
-async function joinRoom(carry?: Carry, mode: 'auto' | 'all' = 'auto') {
+async function joinRoom(carry?: Carry, mode: 'auto' | 'all' = 'auto'): Promise<Room> {
   const gen = C.gen;
   const peer = C.peer;
   const { url, token } = await api('/api/call/token', C.gid ? { group: C.gid } : { peer: peer!.id }, 7000, 2);
@@ -2486,8 +2521,17 @@ async function joinRoom(carry?: Carry, mode: 'auto' | 'all' = 'auto') {
   let joined = false; // до успешного connect обрывы обрабатывает catch ниже, а не события
   const mine = () => C.room === room && joined;
   room
-    .on(RoomEvent.TrackSubscribed, () => { syncAudio(room); renderStage(); })
-    .on(RoomEvent.TrackUnsubscribed, (track: RemoteTrack) => { track.detach(); syncAudio(room); renderStage(); })
+    .on(RoomEvent.TrackSubscribed, (_track: RemoteTrack, pub: RemoteTrackPublication, p: RemoteParticipant) => {
+      if (C.room !== room) return;
+      if (pub.source === Track.Source.ScreenShare) sendData('stream-watch', { sid: pub.trackSid, watching: true }, [p.identity]);
+      syncAudio(room); renderStage();
+    })
+    .on(RoomEvent.TrackUnsubscribed, (track: RemoteTrack, pub: RemoteTrackPublication, p: RemoteParticipant) => {
+      track.detach();
+      if (C.room !== room) return;
+      if (pub.source === Track.Source.ScreenShare) sendData('stream-watch', { sid: pub.trackSid, watching: false }, [p.identity]);
+      syncAudio(room); renderStage();
+    })
     // демонстрацию закрыли: публикация исчезает уже после TrackUnsubscribed — без этого плитка оставалась чёрной
     .on(RoomEvent.TrackUnpublished, () => { syncAudio(room); renderStage(); })
     .on(RoomEvent.TrackPublished, renderStage)
@@ -2495,6 +2539,7 @@ async function joinRoom(carry?: Carry, mode: 'auto' | 'all' = 'auto') {
     .on(RoomEvent.LocalTrackPublished, renderStage)
     .on(RoomEvent.LocalTrackUnpublished, (pub: LocalTrackPublication) => {
       pub.track?.detach().forEach((e) => e.remove());
+      for (const key of streamViewers) if (key.startsWith(pub.trackSid + ':')) streamViewers.delete(key);
       if (mine() && pub.source === Track.Source.ScreenShare) sfx('streamEnd');
       renderStage();
     })
@@ -2505,24 +2550,24 @@ async function joinRoom(carry?: Carry, mode: 'auto' | 'all' = 'auto') {
       if (C.room === room && p) onData(topic, payload, p.identity);
     })
     .on(RoomEvent.ParticipantConnected, (p: RemoteParticipant) => {
-      if (C.room === room) sfx('join');
+      if (C.room !== room) return;
+      sfx('join');
       // новичку — что смотрим на YouTube (чуть погодя: пусть успеет подключиться)
       setTimeout(() => { if (C.room === room) callW.joined(p.identity); }, 1000);
-      clearTimeout(C.peerGone);
       setNet('');
       setCallState('incall');
     })
-    // Собеседник пропал — ждём, вдруг переподключается. Явное «Завершить» придёт через call_end
+    // Уход собеседника не завершает комнату оставшегося участника.
     .on(RoomEvent.ParticipantDisconnected, (gone: RemoteParticipant) => {
-      if (C.room === room) { sfx('leave'); callW.left(gone.identity); }
+      if (C.room !== room) return;
+      sfx('leave'); callW.left(gone.identity);
+      for (const key of streamViewers) if (key.endsWith(':' + gone.identity)) streamViewers.delete(key);
       syncAudio(room);
       renderStage();
       renderPeople();
-      // в группе звонок продолжается, даже если остался один
+      // Звонок продолжается с одним участником; собеседник может вернуться.
       if (!peer || room.remoteParticipants.size > 0 || C.state !== 'incall') return;
-      setNet(`${uname(peer)} переподключается…`);
-      clearTimeout(C.peerGone);
-      C.peerGone = window.setTimeout(() => { if (mine() && room.remoteParticipants.size === 0) { toast('Собеседник отключился'); hangup(true); } }, 20000);
+      setNet(`${uname(peer)} вышел(а) · можно вернуться в звонок`);
     })
     .on(RoomEvent.Reconnecting, () => {
       if (!mine()) return;
@@ -2560,6 +2605,7 @@ async function joinRoom(carry?: Carry, mode: 'auto' | 'all' = 'auto') {
     return joinRoom(carry);
   }
   if (room.remoteParticipants.size > 0) { C.state = 'incall'; setNet(''); }
+  if (peer) wsSend({ type: 'dcall_join', peer: peer.id });
   if (!carry && C.state === 'incall') sfx('connect');
   for (const t of carry?.tracks || [])
     if (t.track.readyState === 'live')
@@ -2570,6 +2616,7 @@ async function joinRoom(carry?: Carry, mode: 'auto' | 'all' = 'auto') {
     toast('Нет доступа к микрофону');
   }
   renderCall();
+  return room;
 }
 
 async function startCall(peer: User) {
@@ -2577,11 +2624,20 @@ async function startCall(peer: User) {
   C.peer = peer;
   C.gid = 0;
   setCallState('calling');
+  const gen = C.gen;
   try {
-    await joinRoom();
-    wsSend({ type: 'call_invite', to: peer.id });
-    C.ringTimer = window.setTimeout(() => { if (C.state === 'calling') { toast('Нет ответа'); hangup(true); } }, 30000);
+    const status = await api('/api/call/status?peer=' + peer.id);
+    if (C.gen !== gen || C.peer?.id !== peer.id) return;
+    const resume = status.users.some((id: number) => id !== S.me!.id);
+    if (resume) setCallState('incall');
+    const room = await joinRoom();
+    if (C.gen !== gen || C.peer?.id !== peer.id) return;
+    if (!resume && !room.remoteParticipants.size) {
+      wsSend({ type: 'call_invite', to: peer.id });
+      C.ringTimer = window.setTimeout(() => { if (C.state === 'calling') { toast('Нет ответа'); hangup(true); } }, 30000);
+    }
   } catch (err) {
+    if (C.gen !== gen) return;
     toast('Не удалось начать звонок: ' + (err as Error).message);
     hangup(false);
   }
@@ -2723,9 +2779,9 @@ function hangup(notify: boolean) {
   if (C.state !== 'idle') sfx('disconnect');
   C.gen++;
   clearTimeout(C.ringTimer);
-  clearTimeout(C.peerGone);
   C.net = '';
   if (notify && C.peer && C.state !== 'idle') wsSend({ type: 'call_end', to: C.peer.id });
+  if (C.peer) wsSend({ type: 'dcall_leave', peer: C.peer.id });
   if (C.gid) wsSend({ type: 'gcall_leave', group: C.gid });
   const room = C.room;
   C.room = null;
@@ -2733,6 +2789,7 @@ function hangup(notify: boolean) {
   C.gid = 0;
   C.state = 'idle';
   C.focus = '';
+  streamViewers.clear();
   C.full = false;
   callW.reset();
   closeSoundboard();
@@ -2842,7 +2899,7 @@ function renderCall() {
       <button class="cbtn ${callW.on() ? 'on' : ''}" data-act="yt" title="${callW.on() ? 'Смотрим и слушаем вместе — открыть' : 'Смотреть и слушать вместе: YouTube, Spotify, музыка'}">${ic('music')}</button>
       <button class="cbtn" data-act="settings" data-tab="voice" title="Настройки голоса и демонстрации">${ic('gear')}</button>
     </div>
-    <button class="cbtn hang" data-act="hangup" title="Завершить звонок">${ic('hangup', 26)}</button>
+    <button class="cbtn hang" data-act="hangup" title="Выйти из звонка">${ic('hangup', 26)}</button>
     <div class="cside">
       <button class="cbtn side" data-act="strip" title="${C.strip ? 'Скрыть участников' : 'Показать участников'}" ${C.focus ? '' : 'hidden'}>${ic(C.strip ? 'chevronDown' : 'chevronUp', 18)}${ic('friends', 18)}</button>
       <button class="cbtn side" data-act="callfs" title="${fs ? 'Выйти из полноэкранного режима' : 'Во весь экран'}">${ic(fs ? 'fsExit' : 'fs', 24)}</button>
@@ -2983,8 +3040,6 @@ function renderStage() {
       if (s.kind === 'yt') callW.mount(el);
       if (s.kind === 'stream') {
         el.innerHTML = '<div class="t-vid"></div><div class="t-label"></div><div class="t-tools"></div>';
-        // чужую демонстрацию, как в Discord, сразу разворачиваем
-        if (!C.focus && s.p !== C.room?.localParticipant) C.focus = s.key;
       }
     }
     // порядок для раскладки: YouTube, демонстрации, участники. Сами элементы не переставляем —
@@ -3056,7 +3111,7 @@ function layoutStage() {
   tiles.forEach((t) => t.classList.toggle('big', t === focus));
   if (focus) {
     const rest = tiles.filter((t) => t !== focus);
-    const sh = C.strip && rest.length ? Math.round(Math.min(150, Math.max(80, H * 0.2))) : 0;
+    const sh = C.strip && rest.length ? Math.max(0, Math.floor(Math.min(150, H * 0.2, ((W - gap * (rest.length - 1)) / rest.length) * 9 / 16))) : 0;
     place(focus, 0, 0, W, H - (sh ? sh + gap : 0));
     const tw = Math.min((sh * 16) / 9, (W - gap * (rest.length - 1)) / rest.length);
     let x = (W - (tw * rest.length + gap * (rest.length - 1))) / 2;
@@ -3180,6 +3235,13 @@ function onData(topic: string | undefined, payload: Uint8Array, from: string) {
   if (!m || typeof m !== 'object') return;
   if (topic === 'sb') return onSound(from, m);
   if (topic === 'yt') return callW.onData(m);
+  if (topic === 'stream-watch') {
+    const pub = C.room?.localParticipant.getTrackPublication(Track.Source.ScreenShare);
+    if (!pub || m.sid !== pub.trackSid || typeof m.watching !== 'boolean' || !C.room?.remoteParticipants.has(from)) return;
+    const key = pub.trackSid + ':' + from;
+    if (!m.watching) streamViewers.delete(key);
+    else if (!streamViewers.has(key)) { streamViewers.add(key); sfx('streamViewer'); }
+  }
 }
 
 // ---------- смотрим и слушаем вместе ----------
@@ -3219,10 +3281,7 @@ const callW = createSession({
   toast,
   ic: (n, s) => ic(n as keyof typeof ICON, s),
   esc,
-  changed: () => {
-    if (callW.on() && !C.focus) C.focus = 'yt';
-    renderCall();
-  },
+  changed: renderCall,
   login: loginWin,
   place: 'call',
 });
@@ -3230,7 +3289,7 @@ const callW = createSession({
 function startWatch(item?: Item) {
   if (!C.room) return toast('Смотреть вместе в звонке можно, когда звонок идёт');
   if (convKey() !== callKey()) C.gid ? openGroup(C.gid) : C.peer && openChat(C.peer);
-  if (callW.on()) { if (item) callW.enqueue(item); return setFocus('yt'); }
+  if (callW.on()) { if (item) callW.enqueue(item); else setFocus('yt'); return; }
   callW.start(item);
 }
 

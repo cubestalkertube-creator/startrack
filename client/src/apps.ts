@@ -9,21 +9,51 @@ type Opts = {
 let O: Opts;
 let selected: App | null = null;
 let request = 0;
-const titles = new Map<string, App>();
 export function initApps(o: Opts) { O = o; }
-export function resetApps() { request++; selected = null; document.getElementById('app-room')?.remove(); }
+export function resetApps() {
+  request++; selected = null;
+  document.getElementById('app-room')?.remove();
+  document.querySelector('.main')?.classList.remove('apps-open');
+  document.querySelector('[data-act="apps"]')?.classList.remove('sel');
+}
 export const appCommand = (text: string) => /^\/app\s+([\p{L}\p{N}_-]{1,80})\s*$/u.exec(text.trim())?.[1] || '';
 export function appCard(text: string) {
   const slug = appCommand(text);
-  return slug ? `<div class="chat-app-card"><span class="app-symbol">${O.ic('code', 24)}</span><div><b data-app-title="${O.esc(slug)}">${O.esc(titles.get(slug)?.name || slug)}</b><span>Приложение Startrack · откроется в чате</span></div><button class="btn sm" data-act="appopen" data-app="${O.esc(slug)}">${O.ic('play', 16)}Открыть</button></div>` : '';
+  return slug ? `<section class="chat-app-card" data-app-slug="${O.esc(slug)}"><header><span class="app-symbol">${O.ic('code', 22)}</span><div><b data-app-title="${O.esc(slug)}">${O.esc(slug)}</b><span>Приложение Startrack</span></div><button class="ibtn" data-app-expand title="Развернуть приложение">${O.ic('fs', 20)}</button></header><div class="chat-app-preview"><span class="muted">Загружаю приложение…</span></div></section>` : '';
+}
+const pending = new Map<string, Promise<App>>();
+function fetchApp(slug: string) {
+  let promise = pending.get(slug);
+  if (!promise) {
+    promise = O.api('/api/apps/get?id=' + encodeURIComponent(slug)).finally(() => pending.delete(slug));
+    pending.set(slug, promise!);
+  }
+  return promise!;
+}
+function appFrame(a: App) {
+  const frame = document.createElement('iframe');
+  frame.title = a.name; frame.setAttribute('sandbox', 'allow-scripts');
+  frame.setAttribute('allow', "camera 'none'; microphone 'none'; geolocation 'none'; clipboard-read 'none'; clipboard-write 'none'");
+  frame.referrerPolicy = 'no-referrer'; frame.srcdoc = appDocument(a.html || '');
+  return frame;
 }
 export function fillAppCards(box: HTMLElement) {
-  box.querySelectorAll<HTMLElement>('[data-app-title]').forEach(async (el) => {
-    const slug = el.dataset.appTitle!;
+  box.querySelectorAll<HTMLElement>('.chat-app-card').forEach(async (card) => {
+    if (card.dataset.loading) return;
+    card.dataset.loading = '1';
+    const slug = card.dataset.appSlug!;
+    card.querySelector<HTMLButtonElement>('[data-app-expand]')!.onclick = () => {
+      if (document.fullscreenElement === card) document.exitFullscreen().catch(() => {});
+      else card.requestFullscreen().catch(() => O.toast('Не удалось развернуть приложение'));
+    };
     try {
-      const a = titles.get(slug) || await O.api('/api/apps/info?id=' + encodeURIComponent(slug));
-      titles.set(slug, a); if (el.isConnected) el.textContent = a.name;
-    } catch { if (el.isConnected) el.title = 'Приложение удалено или недоступно'; }
+      const a = await fetchApp(slug);
+      if (!card.isConnected) return;
+      card.querySelector('[data-app-title]')!.textContent = a.name;
+      card.querySelector('.chat-app-preview')!.replaceChildren(appFrame(a));
+    } catch {
+      if (card.isConnected) card.querySelector('.chat-app-preview')!.textContent = 'Приложение удалено или недоступно';
+    }
   });
 }
 
@@ -34,6 +64,8 @@ export function appDocument(html: string) {
 }
 function room() {
   document.getElementById('lkfloat')?.classList.add('folded');
+  document.querySelector('.main')?.classList.add('apps-open');
+  document.querySelector('[data-act="apps"]')?.classList.add('sel');
   let box = document.getElementById('app-room');
   if (!box) {
     box = document.createElement('section'); box.id = 'app-room';
@@ -47,7 +79,7 @@ function room() {
   return box;
 }
 function heading(title: string, subtitle: string, buttons = '') {
-  return `<header class="activity-head"><span class="app-symbol">${O.ic('code', 22)}</span><div><b>${O.esc(title)}</b><small>${O.esc(subtitle)}</small></div>${buttons}<button class="ibtn" data-app-action="close" title="Закрыть">${O.ic('close', 20)}</button></header>`;
+  return `<header class="activity-head"><button class="ibtn" data-app-action="close" title="Вернуться к беседе">${O.ic('arrowOut', 20)}</button><span class="app-symbol">${O.ic('code', 22)}</span><div><b>${O.esc(title)}</b><small>${O.esc(subtitle)}</small></div>${buttons}</header>`;
 }
 export async function openApps() {
   const seq = ++request;
@@ -75,11 +107,7 @@ export async function openApp(id: string) {
       + (a.published ? '' : `<form class="app-publish-form"><label>Название <input name="name" maxlength="60" value="${O.esc(a.name)}" required></label><span>После публикации появится команда для отправки друзьям.</span></form>`)
       + '<div class="app-preview"></div>';
     box.querySelector('form')?.addEventListener('submit', (e) => { e.preventDefault(); box.querySelector<HTMLButtonElement>('[data-app-action="publish"]')?.click(); });
-    const frame = document.createElement('iframe');
-    frame.title = a.name; frame.setAttribute('sandbox', 'allow-scripts');
-    frame.setAttribute('allow', "camera 'none'; microphone 'none'; geolocation 'none'; clipboard-read 'none'; clipboard-write 'none'");
-    frame.referrerPolicy = 'no-referrer'; frame.srcdoc = appDocument(a.html || '');
-    box.querySelector('.app-preview')!.append(frame);
+    box.querySelector('.app-preview')!.append(appFrame(a));
   } catch (err) {
     if (seq === request) box.innerHTML = heading('Приложение недоступно', 'Startrack') + `<div class="apps-content"><p>${O.esc((err as Error).message)}</p><button class="btn sm sec" data-app-action="library">Мои приложения</button></div>`;
   }
@@ -123,6 +151,6 @@ async function action(b: HTMLElement) {
   }
 }
 function share(slug: string) {
-  if (O.share('/app ' + slug)) O.toast('Команда добавлена в сообщение. Нажми Enter, чтобы отправить');
+  if (O.share('/app ' + slug)) { resetApps(); O.toast('Команда добавлена в сообщение. Нажми Enter, чтобы отправить'); document.querySelector<HTMLTextAreaElement>('#send textarea')?.focus(); }
   else O.toast('Открой беседу с другом и напиши /app ' + slug);
 }

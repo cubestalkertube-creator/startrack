@@ -3,7 +3,7 @@
 
 type Note = { f: number; t: number; d: number; v?: number; to?: number };
 export type Sfx = 'message' | 'connect' | 'disconnect' | 'join' | 'leave' | 'mute' | 'unmute'
-  | 'deafen' | 'undeafen' | 'streamStart' | 'streamEnd' | 'calling' | 'ring';
+  | 'deafen' | 'undeafen' | 'streamStart' | 'streamEnd' | 'streamViewer' | 'calling' | 'ring';
 
 const N = { A4: 440, C5: 523.25, D5: 587.33, E5: 659.25, G5: 783.99, A5: 880, B5: 987.77, C6: 1046.5, D6: 1174.66, E6: 1318.51 };
 
@@ -20,6 +20,7 @@ const SOUNDS: Record<Sfx, Note[]> = {
   undeafen: [{ f: N.G5 / 2, t: 0, d: 0.12, v: 0.4 }, { f: N.D5, t: 0.07, d: 0.12, v: 0.4 }, { f: N.G5, t: 0.14, d: 0.25, v: 0.45 }],
   streamStart: [{ f: 420, t: 0, d: 0.22, v: 0.3, to: 840 }, { f: N.A5, t: 0.16, d: 0.2, v: 0.4 }, { f: N.E6, t: 0.24, d: 0.45, v: 0.35 }],
   streamEnd: [{ f: N.E6, t: 0, d: 0.15, v: 0.35 }, { f: N.A5, t: 0.08, d: 0.2, v: 0.4 }, { f: 840, t: 0.16, d: 0.3, v: 0.3, to: 420 }],
+  streamViewer: [{ f: N.E5, t: 0, d: 0.18, v: 0.35 }, { f: N.B5, t: 0.1, d: 0.3, v: 0.35 }],
   // гудки: исходящий вызов и входящий звонок (если нет своей мелодии)
   calling: [{ f: N.D5, t: 0, d: 0.7, v: 0.35 }, { f: N.A5, t: 0.22, d: 0.9, v: 0.3 }],
   ring: [{ f: N.E5, t: 0, d: 0.3 }, { f: N.A5, t: 0.12, d: 0.3 }, { f: N.E5, t: 0.24, d: 0.3 }, { f: N.A5, t: 0.36, d: 0.3 }, { f: N.C6, t: 0.48, d: 0.8 }],
@@ -32,7 +33,7 @@ export const SFX_GROUPS = {
   call: { title: 'Вход и выход из звонка', hint: 'Вы или собеседник подключились или отключились', sounds: ['connect', 'disconnect', 'join', 'leave'] },
   mute: { title: 'Микрофон', hint: 'Выключение и включение микрофона', sounds: ['mute', 'unmute'] },
   deafen: { title: 'Звук', hint: 'Отключение и включение звука', sounds: ['deafen', 'undeafen'] },
-  stream: { title: 'Демонстрация экрана', hint: 'Начало и конец демонстрации', sounds: ['streamStart', 'streamEnd'] },
+  stream: { title: 'Демонстрация экрана', hint: 'Начало, конец демонстрации и подключение зрителя', sounds: ['streamStart', 'streamEnd', 'streamViewer'] },
   calling: { title: 'Исходящий вызов', hint: 'Гудки, пока друг не ответил', sounds: ['calling'] },
 } as const satisfies Record<string, { title: string; hint: string; sounds: Sfx[] }>;
 export type SfxGroup = keyof typeof SFX_GROUPS;

@@ -10,6 +10,7 @@ import { WebSocketServer } from 'ws';
 import { AccessToken, RoomServiceClient } from 'livekit-server-sdk';
 import { initVerity } from './verity.js';
 import { initApps } from './apps.js';
+import { createDirectCalls } from './direct-calls.js';
 
 const PORT = Number(process.env.PORT || 8080);
 const DATA_DIR = process.env.DATA_DIR || './data';
@@ -218,6 +219,7 @@ function verify(token) {
 
 // --- realtime ---
 const sockets = new Map(); // userId -> Set<ws>
+const dcalls = createDirectCalls(push);
 const online = (id) => sockets.has(id);
 function push(userId, event) {
   const data = JSON.stringify(event);
@@ -803,6 +805,11 @@ const routes = {
     return spInfo.get(id);
   },
   // Токен в LiveKit-комнату звонка с другом или в группе
+  'GET /api/call/status': async (me, _b, url) => {
+    const peer = Number(url.searchParams.get('peer'));
+    if (!isFriend(me.id, peer)) throw [403, 'Звонить можно только друзьям'];
+    return { users: dcalls.users(me.id, peer) };
+  },
   'POST /api/call/token': async (me, b) => {
     let room;
     if (b.group) room = groupRoom(memberGroup(me, b.group).id);
@@ -1155,6 +1162,7 @@ wss.on('connection', (ws, req) => {
   if (!sockets.has(me.id)) sockets.set(me.id, new Set());
   sockets.get(me.id).add(ws);
   ws.uid = me.id;
+  ws.send(JSON.stringify({ type: 'dcalls', calls: dcalls.snapshot(me.id).filter((c) => isFriend(me.id, c.peer)) }));
   q.seen.run(Date.now(), me.id);
   announce(me.id);
 
@@ -1170,6 +1178,13 @@ wss.on('connection', (ws, req) => {
       return announce(me.id);
     }
     if (typeof m.type === 'string' && m.type.startsWith('party')) return onParty(ws, me, m);
+    if (m.type === 'dcall_join' || m.type === 'dcall_leave') {
+      const peer = Number(m.peer);
+      if (!isFriend(me.id, peer)) return;
+      if (m.type === 'dcall_join') dcalls.join(ws, peer);
+      else dcalls.leave(ws);
+      return;
+    }
     // запущенные программы (null — показ игр выключен в настройках)
     if (m.type === 'procs') {
       ws.game = pickGame(m.procs);
@@ -1191,11 +1206,16 @@ wss.on('connection', (ws, req) => {
     }
     const to = Number(m.to);
     if (!['call_invite', 'call_accept', 'call_decline', 'call_end'].includes(m.type) || !isFriend(me.id, to)) return;
+    if (m.type === 'call_end') dcalls.leave(ws);
+    if (m.type === 'call_invite' && dcalls.users(me.id, to).includes(to)) {
+      return push(me.id, { type: 'call_accept', from: { id: to, username: q.userById.get(to).username } });
+    }
     push(to, { type: m.type, from: { id: me.id, username: me.username } });
     // остальные вкладки/устройства звонящего тоже должны убрать окно входящего звонка
     if (m.type !== 'call_invite') push(me.id, { type: m.type + '_self', peer: to });
   });
   ws.on('close', () => {
+    dcalls.leave(ws);
     setGcall(ws, 0);
     partyLeave(ws);
     const set = sockets.get(me.id);

@@ -457,7 +457,7 @@ export function createSession(O: Opts) {
             <button type="button" class="linkbtn" data-y="login" data-s="youtube">Войти в YouTube</button></span>` : ''}</div>
         <div class="yt-err" hidden></div>
       </div>
-      <div class="yt-q" hidden></div></div>`;
+      <div class="yt-q" hidden></div></div>${O.place === 'call' ? `<div class="yt-compact"><div class="t-tools"><button class="t-btn" data-act="tfocus" data-key="yt" title="Развернуть плеер">${ic('fs', 18)}</button><button class="t-btn" data-act="tfs" data-key="yt" title="Во весь экран">${ic('fs', 18)}</button></div><div class="t-label">${ic('music', 16)}<span class="yt-compact-title">Смотрим и слушаем вместе</span></div></div><div class="yt-size-tools"><button class="ibtn" data-act="tfocus" data-key="yt" title="Свернуть плеер">${ic('minus', 18)}</button><button class="ibtn" data-act="tfs" data-key="yt" title="Во весь экран">${ic('fs', 18)}</button></div>` : ''}`;
     const form = el.querySelector<HTMLFormElement>('.yt-form')!;
     const inp = form.querySelector('input')!;
     let busy = false;
@@ -527,6 +527,8 @@ export function createSession(O: Opts) {
     if (!tile || !st) return;
     const { esc, ic } = O;
     const v = st.vid;
+    const compactTitle = tile.querySelector('.yt-compact-title');
+    if (compactTitle) compactTitle.textContent = v?.title || 'Смотрим и слушаем вместе';
     const own = isCtrl();
     const boss = ctrlId();
     tile.classList.toggle('w-owner', own);

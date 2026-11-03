@@ -488,7 +488,7 @@ button { font: inherit; color: inherit; cursor: pointer; border: 0; background: 
 #call { position: relative; background: #000; padding: 8px 16px 12px; display: flex; flex-direction: column; gap: 10px; height: 52vh; min-height: 220px; max-height: calc(100% - 140px); flex: none; --ring: #000; }
 #call.full { flex: 1; height: auto !important; max-height: none; }
 .main.callfull .body { display: none; }
-#call:fullscreen { height: 100% !important; max-height: none; padding: 12px 16px 16px; }
+#call:fullscreen { position: fixed; inset: 0; width: 100%; height: 100% !important; min-height: 0; max-height: none; padding: 12px 16px 16px; }
 .call-grip { position: absolute; left: 0; right: 0; bottom: -4px; height: 8px; cursor: ns-resize; z-index: 3; }
 .call-grip:hover { background: linear-gradient(transparent 3px, var(--accent) 3px 5px, transparent 5px); }
 #call.full .call-grip, #call:fullscreen .call-grip { display: none; }
@@ -503,7 +503,7 @@ button { font: inherit; color: inherit; cursor: pointer; border: 0; background: 
 .tile.off { display: none; }
 .tile::after { content: ""; position: absolute; inset: 0; border-radius: inherit; pointer-events: none; transition: box-shadow .1s; }
 .tile.speak::after { box-shadow: inset 0 0 0 3px var(--green); }
-.tile:fullscreen { border-radius: 0; }
+.tile:fullscreen { position: fixed !important; inset: 0 !important; width: 100% !important; height: 100% !important; margin: 0 !important; max-width: none; max-height: none; border-radius: 0; transition: none; }
 .tile.user { display: grid; place-items: center; }
 .t-bg { position: absolute; inset: 0; }
 .t-bg::after { content: ""; position: absolute; inset: 0; background: rgba(0, 0, 0, .3); }
@@ -516,7 +516,7 @@ button { font: inherit; color: inherit; cursor: pointer; border: 0; background: 
 .t-label span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .t-mute { color: #f23f43; display: grid; }
 .t-vid { position: absolute; inset: 0; display: grid; place-items: center; background: #000; }
-.t-vid video { width: 100%; height: 100%; object-fit: contain; display: block; }
+.t-vid video { width: 100%; height: 100%; min-width: 0; min-height: 0; object-fit: contain; display: block; }
 .t-ph { display: flex; flex-direction: column; align-items: center; gap: 12px; padding: 8px; text-align: center; color: var(--muted); font-size: 14px; }
 .t-tools { position: absolute; top: 8px; right: 8px; display: flex; align-items: center; gap: 6px; z-index: 1; }
 .t-live { background: var(--red); color: #fff; font-size: 11px; font-weight: 700; padding: 2px 6px; border-radius: 4px; letter-spacing: .02em; }
@@ -1046,6 +1046,16 @@ input[type=range] { accent-color: var(--accent); padding: 0; height: 40px; backg
 
 /* ---------- YouTube вместе ---------- */
 .tile.yt { display: flex; flex-direction: column; background: var(--deep); cursor: default; }
+.yt-compact { display: none; }
+.yt-size-tools { position: absolute; top: 8px; right: 8px; display: flex; gap: 4px; z-index: 3; }
+.tile.yt > .yt-bar { padding-right: 88px; }
+.tile.yt:not(.big):not(:fullscreen) { cursor: pointer; }
+.tile.yt:not(.big):not(:fullscreen) > .yt-bar,
+.tile.yt:not(.big):not(:fullscreen) > .yt-size-tools { display: none; }
+.tile.yt:not(.big):not(:fullscreen) > .yt-body { pointer-events: none; }
+.tile.yt:not(.big):not(:fullscreen) > .yt-compact { display: block; position: absolute; inset: 0; z-index: 2; background: linear-gradient(transparent 55%, rgba(0, 0, 0, .45)); }
+.tile.yt:not(.big):not(:fullscreen) .yt-empty > span,
+.tile.yt:not(.big):not(:fullscreen) .yt-empty > b { display: none; }
 .yt-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 10px 12px; background: var(--base); border-bottom: 1px solid var(--line2); flex: none; min-width: 0; }
 .yt-logo { color: #ff0033; display: grid; flex: none; }
 .yt-now { flex: 1 1 120px; min-width: 0; display: flex; flex-direction: column; line-height: 1.25; }
@@ -1468,7 +1478,8 @@ small b, .fr-n span b { font-weight: 600; color: var(--text); }
 .audio-track input { display: block; width: 100%; height: 5px; margin: 4px 0 8px; padding: 0; accent-color: var(--accent); cursor: pointer; }
 .audio-times { display: flex; justify-content: space-between; font: 11px Consolas, monospace; color: var(--muted); }
 .audio-volume { width: 64px; min-width: 0; padding: 0; accent-color: var(--accent); }
-#app-room { flex: 0 1 520px; min-height: 200px; height: 55vh; max-height: 65vh; display: flex; flex-direction: column; background: var(--chat); border-bottom: 1px solid var(--line2); }
+.main.apps-open > :not(#app-room) { display: none !important; }
+#app-room { flex: 1; min-height: 0; min-width: 0; display: flex; flex-direction: column; background: var(--chat); overflow: hidden; }
 .activity-head { display: flex; align-items: center; gap: 10px; padding: 12px 16px; background: var(--base); border-bottom: 1px solid var(--line2); flex: none; }
 .activity-head > div { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
 .activity-head b { color: var(--head); overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-size: 14px; }
@@ -1493,10 +1504,15 @@ small b, .fr-n span b { font-weight: 600; color: var(--text); }
 .app-publish-form label { display: flex; align-items: center; gap: 8px; color: var(--head); }
 .app-publish-form input { width: 200px; padding: 6px 8px; }
 .app-publish-form > span { font-size: 12px; color: var(--muted); }
-.chat-app-card { display: flex; align-items: center; gap: 12px; width: min(100%, 460px); margin: 8px 0; padding: 14px; border-radius: 8px; background: var(--base); border: 1px solid var(--line2); }
-.chat-app-card > div { display: flex; flex: 1; min-width: 0; flex-direction: column; gap: 4px; }
+.chat-app-card { display: flex; flex-direction: column; width: min(100%, 560px); margin: 8px 0; border-radius: 10px; overflow: hidden; background: var(--base); border: 1px solid var(--line2); }
+.chat-app-card > header { display: flex; align-items: center; gap: 10px; padding: 10px 12px; border-bottom: 1px solid var(--line2); }
+.chat-app-card > header > div { display: flex; flex: 1; min-width: 0; flex-direction: column; gap: 4px; }
 .chat-app-card b { color: var(--head); font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .chat-app-card span:not(.app-symbol) { color: var(--muted); font-size: 12px; }
+.chat-app-preview { height: 340px; background: var(--deep); display: grid; place-items: center; min-height: 0; }
+.chat-app-preview iframe { width: 100%; height: 100%; border: 0; display: block; }
+.chat-app-card:fullscreen { width: 100%; height: 100%; margin: 0; border: 0; border-radius: 0; }
+.chat-app-card:fullscreen .chat-app-preview { flex: 1; height: auto; }
 .v-file-change { margin: 6px 0; border: 1px solid var(--line2); border-radius: 6px; overflow: hidden; }
 .v-file-change summary { padding: 8px 10px; background: var(--card); color: var(--text); cursor: pointer; font: 12px Consolas, monospace; overflow-wrap: anywhere; }
 .v-file-change pre { margin: 0; padding: 10px; max-height: 260px; overflow: auto; font: 12px/1.6 Consolas, monospace; white-space: pre-wrap; word-break: break-word; user-select: text; background: var(--deep); }
