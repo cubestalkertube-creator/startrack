@@ -7,7 +7,7 @@ import path from 'node:path';
 import { pipeline } from 'node:stream/promises';
 import { DatabaseSync } from 'node:sqlite';
 import { WebSocketServer } from 'ws';
-import { AccessToken, RoomServiceClient } from 'livekit-server-sdk';
+import { AccessToken, RoomServiceClient, TrackSource } from 'livekit-server-sdk';
 import { initVerity } from './verity.js';
 import { initApps } from './apps.js';
 import { createDirectCalls } from './direct-calls.js';
@@ -102,6 +102,7 @@ addColumn('users', 'banned', 'INTEGER');
 addColumn('users', 'ban_reason', 'TEXT');
 addColumn('users', 'tokver', 'INTEGER NOT NULL DEFAULT 0');
 addColumn('users', 'seen', 'INTEGER');
+addColumn('users', 'voice_muted', 'INTEGER NOT NULL DEFAULT 0');
 
 const AVATARS_DIR = path.join(DATA_DIR, 'avatars');
 const GIFS_DIR = path.join(DATA_DIR, 'gifs');
@@ -125,7 +126,7 @@ const q = {
   userById: db.prepare(`SELECT ${cols('users')} FROM users WHERE id = ?`),
   userPassById: db.prepare('SELECT pass, tokver FROM users WHERE id = ?'),
   setPass: db.prepare('UPDATE users SET pass = ?, tokver = tokver + 1 WHERE id = ?'),
-  authUser: db.prepare(`SELECT ${cols('users')}, banned, tokver FROM users WHERE id = ?`),
+  authUser: db.prepare(`SELECT ${cols('users')}, banned, tokver, voice_muted FROM users WHERE id = ?`),
   seen: db.prepare('UPDATE users SET seen = ? WHERE id = ?'),
   addUser: db.prepare('INSERT INTO users (username, pass, created) VALUES (?, ?, ?)'),
   setProfile: db.prepare('UPDATE users SET display = ?, bio = ?, pronouns = ?, custom = ?, bcolor = ? WHERE id = ?'),
@@ -252,7 +253,7 @@ function pub(u) {
   };
 }
 // себе показываем выбранный статус (в том числе «невидимку»)
-const selfView = (u) => ({ ...pub(u), status: STATUSES.includes(u.status) ? u.status : 'online', online: true, game: gameOf(u.id) });
+const selfView = (u) => ({ ...pub(u), status: STATUSES.includes(u.status) ? u.status : 'online', online: true, game: gameOf(u.id), voiceMuted: !!q.authUser.get(u.id)?.voice_muted });
 
 const shown = new Map(); // id -> статус, который последним разослали контактам
 function announce(id) {
@@ -397,6 +398,18 @@ function setImage(id, kind, name) {
   const old = q.userById.get(id)?.[kind];
   q.setImage[kind].run(name, id);
   if (old) fs.rmSync(path.join(AVATARS_DIR, old), { force: true });
+}
+// Одинаковые ограничения для редактора владельца и админки.
+function saveProfile(u, b) {
+  const str = (k, max, oneLine = true) => {
+    if (b[k] === undefined) return u[k] || '';
+    const s = String(b[k] ?? '');
+    return (oneLine ? s.replace(/\s+/g, ' ') : s.replace(/\r/g, '').replace(/\n{3,}/g, '\n\n')).trim().slice(0, max);
+  };
+  const bcolor = b.bcolor === undefined ? u.bcolor || '' : String(b.bcolor || '');
+  if (bcolor && !/^#[0-9a-f]{6}$/i.test(bcolor)) throw [400, 'Неверный цвет баннера'];
+  q.setProfile.run(str('display', 32), str('bio', 190, false), str('pronouns', 40), str('custom', 128), bcolor, u.id);
+  for (const kind of ['avatar', 'banner']) if (b[kind] === null) setImage(u.id, kind, null);
 }
 function isFriend(a, b) {
   const r = q.rel.get(a, b, b, a);
@@ -560,15 +573,7 @@ const routes = {
   'GET /api/me': async (me) => selfView(me),
   // Свой профиль: присланные поля меняем, остальные не трогаем; avatar/banner: null — убрать картинку
   'POST /api/me/profile': async (me, b) => {
-    const str = (k, max, oneLine = true) => {
-      if (b[k] === undefined) return me[k] || '';
-      const s = String(b[k] ?? '');
-      return (oneLine ? s.replace(/\s+/g, ' ') : s.replace(/\r/g, '').replace(/\n{3,}/g, '\n\n')).trim().slice(0, max);
-    };
-    const bcolor = b.bcolor === undefined ? me.bcolor || '' : String(b.bcolor || '');
-    if (bcolor && !/^#[0-9a-f]{6}$/i.test(bcolor)) throw [400, 'Неверный цвет баннера'];
-    q.setProfile.run(str('display', 32), str('bio', 190, false), str('pronouns', 40), str('custom', 128), bcolor, me.id);
-    for (const kind of ['avatar', 'banner']) if (b[kind] === null) setImage(me.id, kind, null);
+    saveProfile(me, b);
     pushProfile(me.id);
     return selfView(q.userById.get(me.id));
   },
@@ -818,8 +823,9 @@ const routes = {
       if (!isFriend(me.id, peer)) throw [403, 'Звонить можно только друзьям'];
       room = roomFor(me.id, peer);
     }
-    const at = new AccessToken(LK_KEY, LK_SECRET, { identity: String(me.id), name: me.username, ttl: '6h' });
-    at.addGrant({ room, roomJoin: true, canPublish: true, canSubscribe: true, canPublishData: true });
+    const at = new AccessToken(LK_KEY, LK_SECRET, { identity: String(me.id), name: me.username, ttl: '1m' });
+    at.addGrant({ room, roomJoin: true, canPublish: true, canSubscribe: true, canPublishData: true,
+      canPublishSources: sourceIds(!!me.voice_muted) });
     return { url: LK_URL, token: await at.toJwt(), room };
   },
 };
@@ -908,8 +914,8 @@ const sizeError = (req, max, what) => {
 
 // Аватарка или баннер (?kind=banner): тело — картинка, уже обрезанная и уменьшенная клиентом
 const MAGIC = { png: /^\x89PNG/, jpg: /^\xff\xd8\xff/, gif: /^GIF8/, webp: /^RIFF....WEBP/s };
-async function uploadImage(req, res, url, send) {
-  const me = verify(bearer(req));
+async function uploadImage(req, res, url, send, target = null) {
+  const me = target || verify(bearer(req));
   if (!me) return send(401, { error: 'Нужно войти' });
   const kind = url.searchParams.get('kind') === 'banner' ? 'banner' : 'avatar';
   const ext = IMAGE_EXT[String(req.headers['content-type'] || '').toLowerCase()];
@@ -919,11 +925,13 @@ async function uploadImage(req, res, url, send) {
   const data = await readBody(req, Number(req.headers['content-length']));
   if (!data) return res.destroyed || send(400, { error: 'Загрузка прервалась' });
   if (!MAGIC[ext].test(data.subarray(0, 12).toString('latin1'))) return send(415, { error: 'Файл не похож на картинку' });
+  if (!q.userById.get(me.id)) return send(404, { error: 'Пользователь не найден' });
   const name = crypto.randomBytes(16).toString('hex') + '.' + ext;
   fs.writeFileSync(path.join(AVATARS_DIR, name), data);
   setImage(me.id, kind, name);
   pushProfile(me.id);
-  send(200, selfView(q.userById.get(me.id)));
+  if (target) auditLog(req, 'profile_image', me.id, { username: adminUser(me.id).username, kind });
+  send(200, target ? userCard(adminUser(me.id)) : selfView(q.userById.get(me.id)));
 }
 
 // Своя гифка с компьютера — сразу в избранное (?w=&h= — размер для превью)
@@ -1162,6 +1170,7 @@ wss.on('connection', (ws, req) => {
   if (!sockets.has(me.id)) sockets.set(me.id, new Set());
   sockets.get(me.id).add(ws);
   ws.uid = me.id;
+  ws.send(JSON.stringify({ type: 'me', user: selfView(me) }));
   ws.send(JSON.stringify({ type: 'dcalls', calls: dcalls.snapshot(me.id).filter((c) => isFriend(me.id, c.peer)) }));
   q.seen.run(Date.now(), me.id);
   announce(me.id);
@@ -1246,7 +1255,9 @@ const MAX_RINGTONE = 5 * 1024 * 1024;
 
 const qa = {
   users: db.prepare('SELECT id, username, display, avatar, created, seen, banned FROM users ORDER BY id DESC'),
-  user: db.prepare('SELECT id, username, display, avatar, banner, status, created, seen, banned, ban_reason, tokver FROM users WHERE id = ?'),
+  user: db.prepare(`SELECT ${cols('users')}, seen, banned, ban_reason, tokver, voice_muted FROM users WHERE id = ?`),
+  setUsername: db.prepare('UPDATE users SET username = ? WHERE id = ?'),
+  setVoiceMute: db.prepare('UPDATE users SET voice_muted = ? WHERE id = ?'),
   counts: db.prepare(`SELECT
     (SELECT COUNT(*) FROM friends WHERE (a = $id OR b = $id) AND status = 'accepted') AS friends,
     (SELECT COUNT(*) FROM friends WHERE (a = $id OR b = $id) AND status = 'pending') AS requests,
@@ -1390,6 +1401,48 @@ function ringtoneInfo() {
 const PASS_CHARS = 'abcdefghijkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789';
 const tempPass = () => Array.from({ length: 12 }, () => PASS_CHARS[crypto.randomInt(PASS_CHARS.length)]).join('');
 
+const sourceIds = (muted) => [TrackSource.CAMERA, ...(muted ? [] : [TrackSource.MICROPHONE]), TrackSource.SCREEN_SHARE, TrackSource.SCREEN_SHARE_AUDIO];
+const managedRoom = (name) => /^(dm_\d+_\d+|grp_\d+)$/.test(name);
+async function liveCalls(uid) {
+  const rooms = (await lk.listRooms()).filter((r) => managedRoom(r.name));
+  const calls = await Promise.all(rooms.map(async (r) => {
+    try {
+      const participants = await lk.listParticipants(r.name);
+      return participants.some((p) => p.identity === String(uid)) ? { room: r.name, participants } : null;
+    } catch (e) { if (e.code === 'not_found') return null; throw e; }
+  }));
+  return calls.filter(Boolean);
+}
+async function applyVoiceMute(uid, muted) {
+  for (const c of await liveCalls(uid)) {
+    const p = c.participants.find((p) => p.identity === String(uid));
+    try {
+      await lk.updateParticipant(c.room, p.identity, { permission: {
+        canPublish: true, canSubscribe: true, canPublishData: true, canPublishSources: sourceIds(muted),
+      } });
+      if (muted) for (const t of p.tracks) if (t.source === TrackSource.MICROPHONE && !t.muted)
+        await lk.mutePublishedTrack(c.room, p.identity, t.sid, true);
+    } catch (e) { if (e.code !== 'not_found') throw e; }
+  }
+}
+// В self-hosted LiveKit старый JWT живёт до истечения TTL. Повторная проверка
+// возвращает ограничение и после подключения со старым токеном, включая старые клиенты.
+let voiceQueue = Promise.resolve();
+const voiceJob = (fn) => {
+  const job = voiceQueue.then(fn);
+  voiceQueue = job.catch(() => {});
+  return job;
+};
+let voiceSweep = false;
+setInterval(() => {
+  if (voiceSweep || !db.prepare('SELECT 1 FROM users WHERE voice_muted = 1 LIMIT 1').get()) return;
+  voiceSweep = true;
+  voiceJob(async () => {
+    for (const u of db.prepare('SELECT id FROM users WHERE voice_muted = 1').all()) await applyVoiceMute(u.id, true);
+  }).catch((e) => console.error('Не удалось применить голосовой mute:', e.message)).finally(() => { voiceSweep = false; });
+}, 5000).unref();
+const screenRequests = new Map();
+
 const adminRoutes = {
   'GET /api/stats': () => {
     const disk = fs.statfsSync(DATA_DIR);
@@ -1412,6 +1465,57 @@ const adminRoutes = {
       .slice(0, 200).map((u) => ({ ...u, online: online(u.id) }));
   },
   'GET /api/user': (_b, url) => userCard(adminUser(url.searchParams.get('id'))),
+  'POST /api/user/profile': (b, _url, req) => {
+    const u = adminUser(b.id);
+    const username = b.username === undefined ? u.username : String(b.username).trim();
+    if (!/^[\p{L}\d_.-]{2,32}$/u.test(username)) throw [400, 'Ник: 2–32 символа, буквы/цифры/_.-'];
+    const existing = q.userByName.get(username);
+    if (existing && existing.id !== u.id) throw [409, 'Этот ник уже занят'];
+    if (b.status !== undefined && !STATUSES.includes(b.status)) throw [400, 'Неизвестный статус'];
+    saveProfile(u, b);
+    qa.setUsername.run(username, u.id);
+    if (b.status !== undefined) q.setStatus.run(b.status, u.id);
+    announce(u.id);
+    pushProfile(u.id);
+    auditLog(req, 'profile', u.id, { username, previous_username: u.username,
+      fields: ['username', 'display', 'pronouns', 'bio', 'custom', 'bcolor', 'avatar', 'banner', 'status'].filter((k) => b[k] !== undefined) });
+    return userCard(adminUser(u.id));
+  },
+  'GET /api/user/calls': async (_b, url) => {
+    const u = adminUser(url.searchParams.get('id'));
+    return (await liveCalls(u.id)).map((c) => ({ room: c.room,
+      participants: c.participants.map((p) => ({ id: Number(p.identity), name: q.userById.get(Number(p.identity))?.username || p.name,
+        microphone: p.tracks.some((t) => t.source === TrackSource.MICROPHONE && !t.muted),
+        screen: p.tracks.some((t) => t.source === TrackSource.SCREEN_SHARE && !t.muted) })) }));
+  },
+  'POST /api/user/voice': (b, _url, req) => voiceJob(async () => {
+    const u = adminUser(b.id);
+    if (typeof b.muted !== 'boolean') throw [400, 'Укажите muted: true или false'];
+    qa.setVoiceMute.run(Number(b.muted), u.id);
+    pushProfile(u.id);
+    auditLog(req, b.muted ? 'voice_mute' : 'voice_unmute', u.id, { username: u.username });
+    let voice_warning = '';
+    try { await applyVoiceMute(u.id, b.muted); }
+    catch (e) {
+      console.error('Голосовая модерация:', e.message);
+      voice_warning = 'Настройка сохранена, но LiveKit не подтвердил изменение текущего звонка. Повторите действие, когда связь восстановится.';
+    }
+    return { ...userCard(adminUser(u.id)), voice_warning };
+  }),
+  'POST /api/user/screen': async (b, _url, req) => {
+    const u = adminUser(b.id);
+    if (!online(u.id)) throw [409, 'Пользователь не в сети'];
+    if ((screenRequests.get(u.id) || 0) > Date.now()) throw [429, 'Запрос уже отправлен. Повторите через 30 секунд'];
+    const call = (await liveCalls(u.id)).find((c) => c.room === b.room);
+    if (!call) throw [409, 'Пользователь уже вышел из этого звонка'];
+    if ((screenRequests.get(u.id) || 0) > Date.now()) throw [429, 'Запрос уже отправлен. Повторите через 30 секунд'];
+    const expires = Date.now() + 30000;
+    screenRequests.set(u.id, expires);
+    setTimeout(() => { if (screenRequests.get(u.id) === expires) screenRequests.delete(u.id); }, 30000).unref();
+    push(u.id, { type: 'admin_screen_request', room: call.room, expires });
+    auditLog(req, 'screen_request', u.id, { username: u.username, room: call.room });
+    return { ok: true };
+  },
   // Новый пароль показываем один раз; старые сессии разлогиниваются
   'POST /api/user/reset': (b, _url, req) => {
     const u = adminUser(b.id);
@@ -1505,6 +1609,11 @@ const admin = http.createServer(async (req, res) => {
   const image = /^\/avatars\/([0-9a-f]{32}\.(png|jpg|webp|gif))$/.exec(url.pathname)?.[1];
   if (image && req.method === 'GET') return sendImage(res, AVATARS_DIR, image, send);
   if (!sameSecret(bearer(req), ADMIN_TOKEN)) return send(401, { error: 'Неверный токен админки' });
+  if (url.pathname === '/api/user/image' && req.method === 'POST') {
+    if (!['avatar', 'banner'].includes(url.searchParams.get('kind'))) return send(400, { error: 'Укажите kind: avatar или banner' });
+    try { return await uploadImage(req, res, url, send, adminUser(url.searchParams.get('id'))); }
+    catch (e) { return send(Array.isArray(e) ? e[0] : 500, { error: Array.isArray(e) ? e[1] : 'Не удалось загрузить картинку' }); }
+  }
   if (url.pathname === '/api/ringtone' && req.method === 'POST') return uploadRingtone(req, res, send);
   if (url.pathname === '/api/ringtone' && req.method === 'GET') {
     let st;

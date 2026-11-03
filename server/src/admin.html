@@ -17,8 +17,16 @@
 * { box-sizing: border-box; }
 html, body { height: 100%; margin: 0; }
 body { background: var(--base); color: var(--text); font: 14px/1.4 "gg sans", "Segoe UI", system-ui, sans-serif; }
-input { background: var(--deep); color: var(--text); border: 1px solid transparent; border-radius: 8px; padding: 9px 10px; font: inherit; outline: none; width: 100%; }
-input:focus { border-color: var(--accent); }
+input, textarea, select { background: var(--deep); color: var(--text); border: 1px solid transparent; border-radius: 8px; padding: 9px 10px; font: inherit; outline: none; width: 100%; }
+input:focus, textarea:focus, select:focus { border-color: var(--accent); }
+textarea { resize: vertical; min-height: 90px; }
+input[type=checkbox] { width: auto; }
+.profile-form { display: grid; gap: 12px; }
+.profile-fields { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; }
+.profile-form label { display: grid; gap: 5px; }
+.profile-form .row { display: flex; }
+.banner { height: 110px; border-radius: 8px; background: var(--deep) center/cover; margin-bottom: 14px; }
+.call-item { background: var(--card); border-radius: 8px; padding: 12px; margin-top: 10px; }
 button { font: inherit; color: inherit; cursor: pointer; border: 0; background: none; padding: 0; }
 [hidden] { display: none !important; }
 h2 { color: var(--head); font-size: 16px; margin: 0 0 12px; }
@@ -174,7 +182,7 @@ let tab = 'users';
 class AuthError extends Error {}
 async function api(path, body, file) {
   const headers = { Authorization: 'Bearer ' + token };
-  if (file) headers['Content-Type'] = 'audio/mpeg';
+  if (file) headers['Content-Type'] = file.type || 'application/octet-stream';
   else if (body !== undefined) headers['Content-Type'] = 'application/json';
   const r = await fetch(path, {
     method: body !== undefined || file ? 'POST' : 'GET', headers,
@@ -289,6 +297,7 @@ function renderCard(u) {
   const c = u.counts;
   const rel = { friend: '', in: ' (входящая заявка)', out: ' (исходящая заявка)' };
   $('#card').innerHTML = `
+    <div class="banner" style="${u.bcolor ? `background-color:${esc(u.bcolor)};` : ''}${u.banner ? `background-image:url('/avatars/${esc(u.banner)}')` : ''}"></div>
     <div class="top">
       ${avatar(u, true)}
       <div>
@@ -318,6 +327,35 @@ function renderCard(u) {
       ${u.banned ? '<button class="btn green" data-a="unban">Разблокировать</button>' : '<button class="btn red" data-a="ban">Заблокировать</button>'}
       <button class="btn red" data-a="delete">Удалить аккаунт</button>
     </div>
+    <section class="section">
+      <h2>Профиль пользователя</h2>
+      <form id="profile-form" class="profile-form">
+        <div class="profile-fields">
+          <label>Никнейм (логин)<input name="username" value="${esc(u.username)}" minlength="2" maxlength="32" required autocomplete="off"></label>
+          <label>Отображаемое имя<input name="display" value="${esc(u.display)}" maxlength="32"></label>
+          <label>Местоимения<input name="pronouns" value="${esc(u.pronouns)}" maxlength="40"></label>
+          <label>Свой статус<input name="custom" value="${esc(u.custom)}" maxlength="128"></label>
+          <label>Цвет баннера<input name="bcolor" value="${esc(u.bcolor)}" placeholder="#5865f2 или пусто" pattern="#[0-9a-fA-F]{6}|^$"></label>
+          <label>Статус<select name="status">${Object.entries(STATUS).map(([k, v]) => `<option value="${k}" ${k === (u.status || 'online') ? 'selected' : ''}>${esc(v)}</option>`).join('')}</select></label>
+        </div>
+        <label>Обо мне<textarea name="bio" maxlength="190">${esc(u.bio)}</textarea></label>
+        <div class="profile-fields">
+          ${['avatar', 'banner'].map((kind) => `<div>
+            <label>${kind === 'avatar' ? 'Новая аватарка' : 'Новый баннер'}<input type="file" name="${kind}" accept="image/png,image/jpeg,image/webp,image/gif"></label>
+            <label class="row"><input type="checkbox" name="remove_${kind}" ${u[kind] ? '' : 'disabled'}>Удалить ${kind === 'avatar' ? 'аватарку' : 'баннер'}</label>
+          </div>`).join('')}
+        </div>
+        <div class="muted">PNG, JPEG, WebP или GIF до 8 МБ. Изменения сразу появятся у пользователя и его контактов. При смене логина сообщите пользователю новый ник.</div>
+        <div class="row"><button class="btn" type="submit">Сохранить профиль</button><button class="btn red" type="button" data-a="clearprofile">Очистить оформление</button></div>
+      </form>
+    </section>
+    <section class="section">
+      <h2>Голосовая модерация</h2>
+      <p>${u.voice_muted ? '<span class="tag red">Микрофон отключён администратором</span>' : '<span class="muted">Микрофон разрешён</span>'}</p>
+      <div class="actions"><button class="btn red" data-a="mute">Замутить</button><button class="btn green" data-a="unmute">Размутить</button><button class="btn sec" data-a="calls">Обновить звонки</button></div>
+      <p class="muted">Mute действует во всех звонках до снятия. Размут разрешает пользователю самому включить микрофон. Запрос демонстрации требует согласия и обновлённого клиента.</p>
+      <div id="user-calls" class="muted">Загрузка звонков…</div>
+    </section>
     <h2>Друзья и заявки</h2>
     <div class="chips">${u.friends.length ? u.friends.map((f) => `<button data-open="${f.id}">${esc(f.username)}${rel[f.rel]}</button>`).join('') : '<span class="muted">нет</span>'}</div>
     <h2>Группы</h2>
@@ -328,9 +366,80 @@ function renderCard(u) {
     const b = e.target.closest('[data-a]');
     if (b) action(b.dataset.a, u, b);
   };
+  $('#profile-form').onsubmit = (e) => { e.preventDefault(); saveUserProfile(u, e.currentTarget); };
+  loadUserCalls(u.id);
+}
+
+async function loadUserCalls(id) {
+  const box = $('#user-calls');
+  if (!box) return;
+  try {
+    const calls = await api('/api/user/calls?id=' + id);
+    if (sel !== id || !box.isConnected) return;
+    box.innerHTML = calls.length ? calls.map((c) => `<div class="call-item">
+      <b>${esc(c.room)}</b><div>${c.participants.map((p) => `${esc(p.name)} · микрофон ${p.microphone ? 'вкл' : 'выкл'}${p.screen ? ' · показывает экран' : ''}`).join('<br>')}</div>
+      <button class="btn sec" data-screen="${esc(c.room)}" style="margin-top:8px">Запросить демонстрацию экрана</button>
+    </div>`).join('') : 'Нет активных звонков';
+    box.querySelectorAll('[data-screen]').forEach((btn) => { btn.onclick = async () => {
+      btn.disabled = true;
+      try { await api('/api/user/screen', { id, room: btn.dataset.screen }); toast('Запрос отправлен. Пользователь должен согласиться и выбрать экран'); }
+      catch (e) { fail(e); }
+      finally { if (btn.isConnected) btn.disabled = false; }
+    }; });
+  } catch (e) { if (e instanceof AuthError) return; if (sel === id && box.isConnected) box.textContent = 'Не удалось получить звонки. Проверьте LiveKit и нажмите «Обновить звонки».'; }
+}
+
+async function saveUserProfile(u, form) {
+  const data = new FormData(form), body = { id: u.id };
+  for (const k of ['username', 'display', 'pronouns', 'custom', 'bcolor', 'status', 'bio']) {
+    const value = String(data.get(k) || '');
+    if (value !== (u[k] || (k === 'status' ? 'online' : ''))) body[k] = value;
+  }
+  for (const kind of ['avatar', 'banner']) {
+    const file = data.get(kind);
+    if (file?.size > 8 * 1048576) return toast('Картинка больше 8 МБ', true);
+    if (data.get('remove_' + kind) && !file?.size) body[kind] = null;
+  }
+  const buttons = form.querySelectorAll('button');
+  buttons.forEach((b) => b.disabled = true);
+  let saved = false;
+  try {
+    let result = await api('/api/user/profile', body);
+    saved = true;
+    for (const kind of ['avatar', 'banner']) {
+      const file = data.get(kind);
+      if (file?.size) result = await api('/api/user/image?id=' + u.id + '&kind=' + kind, undefined, file);
+    }
+    if (sel === u.id) renderCard(result);
+    toast('Профиль сохранён');
+    loadUsers();
+  } catch (e) {
+    if (saved && !(e instanceof AuthError)) e.message = 'Поля профиля сохранены; загрузка картинки не завершена: ' + e.message;
+    fail(e);
+  } finally { buttons.forEach((b) => b.disabled = false); }
 }
 
 async function action(a, u, btn) {
+  if (a === 'calls') return loadUserCalls(u.id);
+  if (a === 'clearprofile') {
+    if (!(await modal({ title: 'Очистить оформление?', text: `У <b>${esc(u.username)}</b> удалятся аватарка, баннер, имя, местоимения, «Обо мне», свой статус и цвет баннера.`, ok: 'Очистить', danger: true }))) return;
+    btn.disabled = true;
+    try {
+      const result = await api('/api/user/profile', { id: u.id, display: '', pronouns: '', bio: '', custom: '', bcolor: '', avatar: null, banner: null });
+      if (sel === u.id) renderCard(result);
+      loadUsers(); toast('Оформление очищено');
+    } catch (e) { fail(e); btn.disabled = false; }
+    return;
+  }
+  if (a === 'mute' || a === 'unmute') {
+    btn.disabled = true;
+    try {
+      const result = await api('/api/user/voice', { id: u.id, muted: a === 'mute' });
+      if (sel === u.id) renderCard(result);
+      toast(result.voice_warning || (result.voice_muted ? 'Микрофон отключён администратором' : 'Ограничение микрофона снято'), !!result.voice_warning);
+    } catch (e) { fail(e); btn.disabled = false; }
+    return;
+  }
   const who = `<b>${esc(u.username)}</b>`;
   let body = { id: u.id };
   if (a === 'reset' && !(await modal({ title: 'Сбросить пароль?', text: `У ${who} будет новый временный пароль, все сессии завершатся.`, ok: 'Сбросить' }))) return;
@@ -458,12 +567,15 @@ async function playRingtone() {
 }
 
 // ---------- журнал ----------
-const ACTIONS = { reset_password: 'Сброс пароля', set_password: 'Новый пароль',ban: 'Бан', unban: 'Разбан', logout: 'Выход везде', delete: 'Удаление аккаунта', backup: 'Бэкап базы', ringtone: 'Мелодия звонка' };
+const ACTIONS = { profile: 'Изменение профиля', profile_image: 'Картинка профиля', voice_mute: 'Голосовой mute', voice_unmute: 'Снятие mute', screen_request: 'Запрос демонстрации', reset_password: 'Сброс пароля', set_password: 'Новый пароль',ban: 'Бан', unban: 'Разбан', logout: 'Выход везде', delete: 'Удаление аккаунта', backup: 'Бэкап базы', ringtone: 'Мелодия звонка' };
 async function loadAudit() {
   let list;
   try { list = await api('/api/audit'); } catch (e) { return fail(e); }
   const info = (a) => {
     const d = a.details || {};
+    if (a.action === 'profile') return esc((d.fields || []).join(', '));
+    if (a.action === 'profile_image') return d.kind === 'banner' ? 'Баннер' : 'Аватарка';
+    if (a.action === 'screen_request') return esc(d.room);
     if (a.action === 'ban') return d.reason ? 'причина: ' + esc(d.reason) : '';
     if (a.action === 'delete') return 'бэкап: ' + esc(d.backup);
     if (a.action === 'backup') return esc(d.file);

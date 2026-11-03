@@ -24,6 +24,7 @@ type User = {
   id: number; username: string; online?: boolean; status?: Status;
   display?: string; bio?: string; pronouns?: string; custom?: string; avatar?: string; banner?: string; bcolor?: string; created?: number;
   game?: Game | null;
+  voiceMuted?: boolean;
 };
 // «Играет в …»: app — id игры в базе Discord, steam — appid, start — когда запущена, icon — ключ иконки на сервере
 type Game = { name: string; app: string; steam: string; start: number; icon: string };
@@ -829,7 +830,7 @@ function renderRail() {
 function renderUserbar() {
   const box = document.getElementById('userbar');
   if (!box || !S.me) return;
-  const muted = C.selfMute || C.deaf;
+  const muted = C.selfMute || C.deaf || !!S.me?.voiceMuted;
   const online = S.ws?.readyState === WebSocket.OPEN;
   // как в Discord: при наведении вместо статуса — ник
   box.innerHTML = `
@@ -1828,7 +1829,7 @@ async function loadProfile(id: number) {
 // Новые данные человека — во все места, где он у нас есть (друзья, заявки, участники групп, звонок)
 function mergeUser(u: User) {
   const copies = [...S.friends.friends, ...S.friends.incoming, ...S.friends.outgoing, ...S.groups.flatMap((g) => g.members),
-    S.peer, C.peer, C.incoming].filter((x): x is User => x?.id === u.id);
+    S.peer, C.peer, C.incoming, S.profiles.get(u.id)].filter((x): x is User => x?.id === u.id);
   for (const x of new Set(copies)) Object.assign(x, u);
 }
 
@@ -2275,12 +2276,25 @@ function onEvent(ev: any) {
       mergeUser(ev.user);
       renderFriends();
       renderMessages();
+      renderProfile();
       if (C.state !== 'idle') renderPeople();
       break;
     // свой профиль или статус поменяли (в том числе на другом устройстве)
     case 'me':
+      if (ev.user.voiceMuted && !S.me?.voiceMuted) {
+        C.selfMute = true;
+        C.room?.localParticipant.setMicrophoneEnabled(false).catch(() => {});
+        toast('Администратор отключил ваш микрофон');
+      } else if (S.me?.voiceMuted && !ev.user.voiceMuted) {
+        C.selfMute = true;
+        toast('Ограничение микрофона снято. Вы можете включить его сами');
+      }
       Object.assign(S.me!, ev.user);
       renderMe();
+      renderCall();
+      break;
+    case 'admin_screen_request':
+      void adminScreenRequest(ev);
       break;
     // кто сейчас в звонке группы
     case 'gcall': {
@@ -2401,6 +2415,7 @@ function setNet(text: string) {
 }
 
 async function setMute(mute: boolean) {
+  if (!mute && S.me?.voiceMuted) return toast('Микрофон отключён администратором');
   C.selfMute = mute;
   // включили микрофон при отключённом звуке — звук тоже возвращается, играет его сигнал
   if (!mute && C.deaf) setDeaf(false);
@@ -2420,7 +2435,7 @@ function setDeaf(deaf: boolean) {
   if (deaf) stopSounds();
   callW.deafen(deaf);
   document.querySelectorAll<HTMLAudioElement>('#audio audio').forEach((a) => (a.muted = C.deaf));
-  C.room?.localParticipant.setMicrophoneEnabled(!deaf && !C.selfMute).then(renderCall, () => {});
+  C.room?.localParticipant.setMicrophoneEnabled(!deaf && !C.selfMute && !S.me?.voiceMuted).then(renderCall, () => {});
   renderCall();
 }
 
@@ -2611,7 +2626,7 @@ async function joinRoom(carry?: Carry, mode: 'auto' | 'all' = 'auto'): Promise<R
     if (t.track.readyState === 'live')
       await room.localParticipant.publishTrack(t.track, { source: t.source, ...screenPublishOpts() }).catch(() => {});
   try {
-    await room.localParticipant.setMicrophoneEnabled(carry ? carry.mic : !C.selfMute && !C.deaf);
+    await room.localParticipant.setMicrophoneEnabled(!S.me?.voiceMuted && (carry ? carry.mic : !C.selfMute && !C.deaf));
   } catch {
     toast('Нет доступа к микрофону');
   }
@@ -2801,6 +2816,17 @@ function hangup(notify: boolean) {
   renderCall();
 }
 
+let adminScreenPending = false;
+async function adminScreenRequest(ev: { room: string; expires: number }) {
+  const room = C.room;
+  if (adminScreenPending || ANDROID || !room || room.name !== ev.room || room.localParticipant.isScreenShareEnabled || ev.expires < Date.now()) return;
+  adminScreenPending = true;
+  try {
+    const accepted = await confirmDlg('Запрос демонстрации экрана', 'Администратор просит показать экран участникам текущего звонка. После согласия выберите экран или окно для показа.', 'Выбрать экран');
+    if (accepted && C.room === room && room.name === ev.room && ev.expires > Date.now() && !room.localParticipant.isScreenShareEnabled) await toggleScreen();
+  } finally { adminScreenPending = false; }
+}
+
 async function toggleScreen() {
   const lp = C.room!.localParticipant;
   if (lp.isScreenShareEnabled) return lp.setScreenShareEnabled(false).then(renderCall);
@@ -2880,7 +2906,7 @@ function renderCall() {
   if (!document.getElementById('stage')) buildCall(box);
   syncCallBox();
   const lp = C.room?.localParticipant;
-  const muted = C.selfMute || C.deaf;
+  const muted = C.selfMute || C.deaf || !!S.me?.voiceMuted;
   const scr = lp?.isScreenShareEnabled ?? false;
   $('#calltop').innerHTML = `
     <span class="cst">${C.state === 'calling' ? 'Вызов…' : 'Голосовой звонок'}</span>
