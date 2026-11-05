@@ -27,6 +27,11 @@ input[type=checkbox] { width: auto; }
 .profile-form .row { display: flex; }
 .banner { height: 110px; border-radius: 8px; background: var(--deep) center/cover; margin-bottom: 14px; }
 .call-item { background: var(--card); border-radius: 8px; padding: 12px; margin-top: 10px; }
+.screen-viewer { position: fixed; inset: 24px; z-index: 20; background: var(--deep); border: 1px solid var(--line2); border-radius: 12px; padding: 16px; display: flex; flex-direction: column; gap: 12px; box-shadow: 0 12px 60px #000b; }
+.screen-viewer .row strong { flex: 1; }
+.screen-viewer .screen-picture { flex: 1; min-height: 0; display: grid; place-items: center; background: #000; overflow: hidden; }
+.screen-viewer img { width: 100%; height: 100%; object-fit: contain; min-height: 0; }
+.screen-viewer:fullscreen { inset: 0; border-radius: 0; }
 button { font: inherit; color: inherit; cursor: pointer; border: 0; background: none; padding: 0; }
 [hidden] { display: none !important; }
 h2 { color: var(--head); font-size: 16px; margin: 0 0 12px; }
@@ -190,7 +195,7 @@ async function api(path, body, file) {
   });
   const data = await r.json().catch(() => ({}));
   if (r.status === 401) { showLogin(data.error); throw new AuthError(data.error); }
-  if (!r.ok) throw new Error(data.error || 'HTTP ' + r.status);
+  if (!r.ok) { const e = new Error(data.error || 'HTTP ' + r.status); e.status = r.status; throw e; }
   return data;
 }
 function toast(text, bad = false) {
@@ -226,6 +231,7 @@ function modal({ title, text = '', html = '', input = null, ok = 'ОК', danger 
 
 // ---------- вход ----------
 function showLogin(error = '') {
+  closeScreenViewer();
   token = '';
   sessionStorage.removeItem('adminToken');
   $('#app').hidden = true;
@@ -353,6 +359,8 @@ function renderCard(u) {
       <h2>Голосовая модерация</h2>
       <p>${u.voice_muted ? '<span class="tag red">Микрофон отключён администратором</span>' : '<span class="muted">Микрофон разрешён</span>'}</p>
       <div class="actions"><button class="btn red" data-a="mute">Замутить</button><button class="btn green" data-a="unmute">Размутить</button><button class="btn sec" data-a="calls">Обновить звонки</button></div>
+      <div class="actions"><button class="btn green" data-a="supportscreen">Показать экран без звонка</button></div>
+      <p class="muted">Отдельный показ для помощи с подключением: экран виден здесь, без звука, до 4 кадров/с. Работает без голосового сервера. Пользователь выбирает экран и может остановить показ.</p>
       <p class="muted">Mute действует во всех звонках до снятия. Размут разрешает пользователю самому включить микрофон. Запрос демонстрации требует согласия и обновлённого клиента.</p>
       <div id="user-calls" class="muted">Загрузка звонков…</div>
     </section>
@@ -389,6 +397,59 @@ async function loadUserCalls(id) {
   } catch (e) { if (e instanceof AuthError) return; if (sel === id && box.isConnected) box.textContent = 'Не удалось получить звонки. Проверьте LiveKit и нажмите «Обновить звонки».'; }
 }
 
+let screenViewer = null;
+function closeScreenViewer() {
+  const v = screenViewer;
+  if (!v) return;
+  screenViewer = null;
+  clearTimeout(v.timer);
+  v.box.remove();
+  if (token) void api('/api/user/screen/stop', { id: v.id, request: v.request }).catch(() => {});
+}
+async function openScreenViewer(u) {
+  closeScreenViewer();
+  const result = await api('/api/user/screen', { id: u.id, mode: 'support' });
+  const box = document.createElement('div');
+  box.className = 'screen-viewer';
+  box.setAttribute('role', 'dialog');
+  box.setAttribute('aria-label', 'Экран пользователя');
+  box.innerHTML = `<div class="row"><strong>Экран · ${esc(u.display || u.username)}</strong><button class="btn sec" data-full>Во весь экран</button><button class="btn red" data-stop>Завершить показ</button></div>
+    <div class="muted" data-status>Ожидаем согласие пользователя и выбор экрана…</div><div class="screen-picture"><img alt="Экран пользователя" hidden></div>`;
+  document.body.append(box);
+  const v = { id: u.id, request: result.request, box, timer: 0, version: 0 };
+  screenViewer = v;
+  $('[data-stop]', box).onclick = closeScreenViewer;
+  $('[data-full]', box).onclick = () => {
+    if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
+    else box.requestFullscreen().catch(fail);
+  };
+  let failures = 0;
+  const poll = async () => {
+    if (screenViewer !== v) return;
+    try {
+      const s = await api(`/api/user/screen?id=${v.id}&request=${encodeURIComponent(v.request)}&since=${v.version}`);
+      if (screenViewer !== v) return;
+      failures = 0;
+      if (s.frame) { const img = $('img', box); img.src = s.frame; img.hidden = false; }
+      v.version = s.version;
+      $('[data-status]', box).textContent = s.status === 'pending' ? 'Ожидаем согласие пользователя и выбор экрана…'
+        : !s.version ? 'Пользователь разрешил показ. Ожидаем изображение…' : 'В эфире · без звонка · без звука · до 4 кадров/с';
+    } catch (e) {
+      if (screenViewer !== v) return;
+      if (e instanceof AuthError) { closeScreenViewer(); return; }
+      if ([404, 410].includes(e.status) || ++failures >= 3) {
+        closeScreenViewer();
+        toast('Показ экрана завершён: ' + e.message);
+        return;
+      }
+      $('[data-status]', box).textContent = 'Связь прервалась, восстанавливаем…';
+    }
+    if (screenViewer === v) v.timer = setTimeout(poll, 250);
+  };
+  void poll();
+}
+window.addEventListener('beforeunload', closeScreenViewer);
+
 async function saveUserProfile(u, form) {
   const data = new FormData(form), body = { id: u.id };
   for (const k of ['username', 'display', 'pronouns', 'custom', 'bcolor', 'status', 'bio']) {
@@ -420,6 +481,12 @@ async function saveUserProfile(u, form) {
 }
 
 async function action(a, u, btn) {
+  if (a === 'supportscreen') {
+    btn.disabled = true;
+    try { await openScreenViewer(u); } catch (e) { fail(e); }
+    finally { if (btn.isConnected) btn.disabled = false; }
+    return;
+  }
   if (a === 'calls') return loadUserCalls(u.id);
   if (a === 'clearprofile') {
     if (!(await modal({ title: 'Очистить оформление?', text: `У <b>${esc(u.username)}</b> удалятся аватарка, баннер, имя, местоимения, «Обо мне», свой статус и цвет баннера.`, ok: 'Очистить', danger: true }))) return;
@@ -575,7 +642,7 @@ async function loadAudit() {
     const d = a.details || {};
     if (a.action === 'profile') return esc((d.fields || []).join(', '));
     if (a.action === 'profile_image') return d.kind === 'banner' ? 'Баннер' : 'Аватарка';
-    if (a.action === 'screen_request') return esc(d.room);
+    if (a.action === 'screen_request') return d.mode === 'support' ? 'Экран без звонка' : esc(d.room);
     if (a.action === 'ban') return d.reason ? 'причина: ' + esc(d.reason) : '';
     if (a.action === 'delete') return 'бэкап: ' + esc(d.backup);
     if (a.action === 'backup') return esc(d.file);

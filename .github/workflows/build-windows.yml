@@ -10,6 +10,17 @@ on:
 # отдельный job release дожидается обоих и публикует релиз. Кэш Rust и npm —
 # чтобы повторные сборки не компилировали зависимости заново.
 jobs:
+  checks:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: API and shared media tests
+        working-directory: ./server
+        run: npm ci && npm test
+
   linux:
     runs-on: ubuntu-22.04
     steps:
@@ -145,9 +156,9 @@ jobs:
           path: client/src-tauri/target/android/*.apk
 
   release:
-    needs: [linux, windows]
+    needs: [checks, linux, windows]
     # релиз выходит, даже если Linux-сборка упала (AppImage просто не попадёт в latest.json)
-    if: ${{ !cancelled() && needs.windows.result == 'success' }}
+    if: ${{ !cancelled() && needs.checks.result == 'success' && needs.windows.result == 'success' }}
     runs-on: windows-latest
     permissions:
       contents: write

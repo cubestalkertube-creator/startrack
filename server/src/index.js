@@ -1,5 +1,5 @@
 // Startrack API: аккаунты, друзья, личные сообщения, группы и файлы, сигналинг звонков.
-// Медиа (голос/видео/демонстрация) идёт через LiveKit SFU, здесь только выдаём токены.
+// Медиа звонков идёт через LiveKit SFU. Диагностический показ экрана использует API отдельно.
 import http from 'node:http';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
@@ -11,6 +11,11 @@ import { AccessToken, RoomServiceClient, TrackSource } from 'livekit-server-sdk'
 import { initVerity } from './verity.js';
 import { initApps } from './apps.js';
 import { createDirectCalls } from './direct-calls.js';
+import { createTyping } from './typing.js';
+import { createSupportScreens } from './support-screens.js';
+import { initChatFeatures } from './chat-features.js';
+import { serveWeb } from './web.js';
+import { createYoutubeRelay } from './youtube-relay.js';
 
 const PORT = Number(process.env.PORT || 8080);
 const DATA_DIR = process.env.DATA_DIR || './data';
@@ -72,6 +77,9 @@ addColumn('messages', 'file', 'TEXT');
 addColumn('messages', 'grp', 'INTEGER');
 addColumn('messages', 'kind', 'TEXT');
 addColumn('files', 'grp', 'INTEGER');
+addColumn('files', 'media', 'TEXT');
+addColumn('files', 'duration', 'REAL');
+addColumn('messages', 'reply', 'INTEGER');
 db.exec('CREATE INDEX IF NOT EXISTS messages_grp ON messages (grp, id)');
 // профиль как в Discord: отображаемое имя, «обо мне», местоимения, свой статус («пузырь» у аватарки),
 // аватарка и баннер (файлы в DATA_DIR/avatars) или цвет баннера; status — выбранный онлайн-статус
@@ -145,17 +153,17 @@ const q = {
   delMsg: db.prepare('DELETE FROM messages WHERE id = ?'),
   delFile: db.prepare('DELETE FROM files WHERE id = ?'),
   history: db.prepare(`
-    SELECT m.*, f.name AS fname, f.size AS fsize, f.type AS ftype, f.w AS fw, f.h AS fh, f.gif AS fgif FROM messages m
+    SELECT m.*, f.name AS fname, f.size AS fsize, f.type AS ftype, f.w AS fw, f.h AS fh, f.gif AS fgif, f.media AS fmedia, f.duration AS fduration FROM messages m
     LEFT JOIN files f ON f.id = m.file
     WHERE ((m.sender = ? AND m.recipient = ?) OR (m.sender = ? AND m.recipient = ?)) AND m.grp IS NULL AND m.id < ?
     ORDER BY m.id DESC LIMIT 50`),
   // в группе показываем и ник автора: он мог уже выйти из группы
   groupHistory: db.prepare(`
-    SELECT m.*, u.username AS sname, f.name AS fname, f.size AS fsize, f.type AS ftype, f.w AS fw, f.h AS fh, f.gif AS fgif FROM messages m
+    SELECT m.*, u.username AS sname, f.name AS fname, f.size AS fsize, f.type AS ftype, f.w AS fw, f.h AS fh, f.gif AS fgif, f.media AS fmedia, f.duration AS fduration FROM messages m
     LEFT JOIN files f ON f.id = m.file LEFT JOIN users u ON u.id = m.sender
     WHERE m.grp = ? AND m.id < ?
     ORDER BY m.id DESC LIMIT 50`),
-  addFile: db.prepare('INSERT INTO files (id, sender, recipient, name, size, type, w, h, created, grp, gif) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'),
+  addFile: db.prepare('INSERT INTO files (id, sender, recipient, name, size, type, w, h, created, grp, gif, media, duration) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'),
   file: db.prepare('SELECT * FROM files WHERE id = ?'),
   setFileGif: db.prepare('UPDATE files SET gif = ? WHERE id = ?'),
   gifs: db.prepare('SELECT hash, w, h FROM gifs WHERE uid = ? ORDER BY created DESC'),
@@ -186,9 +194,10 @@ const q = {
   delGroupFiles: db.prepare('DELETE FROM files WHERE grp = ?'),
 };
 
-const msgOut = (m) => ({
+const msgOut = (m) => chatFeatures.decorate({
   id: m.id, sender: m.sender, recipient: m.recipient, text: m.text, created: m.created,
-  file: m.file ? { id: m.file, name: m.fname, size: m.fsize, type: m.ftype, w: m.fw, h: m.fh, gif: m.fgif || null } : null,
+  file: m.file ? { id: m.file, name: m.fname, size: m.fsize, type: m.ftype, w: m.fw, h: m.fh, gif: m.fgif || null, media: m.fmedia || null, duration:m.fduration || null } : null,
+  reply: m.reply,
   ...(m.grp ? { grp: m.grp, kind: m.kind || null, sname: m.sname } : {}),
 });
 
@@ -221,6 +230,16 @@ function verify(token) {
 // --- realtime ---
 const sockets = new Map(); // userId -> Set<ws>
 const dcalls = createDirectCalls(push);
+const supportScreens = createSupportScreens(push);
+const typing = createTyping((uid, target, active) => {
+  const ids = target.group ? memberIds(target.group) : [target.peer];
+  for (const id of ids) if (id !== uid) push(id, {
+    type: 'typing', conv: target.group ? 'g' + target.group : 'u' + uid, user: uid, active,
+  });
+});
+const typingTarget = (uid, peer = 0, group = 0) => ({
+  key: group ? groupRoom(group) : roomFor(uid, peer), peer, group,
+});
 const online = (id) => sockets.has(id);
 function push(userId, event) {
   const data = JSON.stringify(event);
@@ -469,11 +488,12 @@ function memberGroup(me, gid) {
   return g;
 }
 // Сообщение в группу (и системное: «X добавил(а) Y» и т.п.) — всем участникам через WebSocket
-function groupMsg(gid, sender, text, kind = null, file = null) {
+function groupMsg(gid, sender, text, kind = null, file = null, reply = null) {
   const created = Date.now();
   const { lastInsertRowid } = q.addMsg.run(sender.id, 0, text, created, file?.id ?? null, gid, kind);
-  const msg = { id: Number(lastInsertRowid), sender: sender.id, recipient: 0, text, created, file, grp: gid, kind, sname: sender.username };
+  const msg = chatFeatures.attachReply({ id: Number(lastInsertRowid), sender: sender.id, recipient: 0, text, created, file, grp: gid, kind, sname: sender.username }, reply);
   pushGroup(gid, { type: 'message', msg });
+  if (!kind) typing.stop(sender.id, typingTarget(sender.id, 0, gid));
   return msg;
 }
 // Друзья, которых можно добавить в группу: только свои друзья, без повторов
@@ -548,9 +568,12 @@ function userFacts(id) {
 }
 const apps = initApps(db);
 const verity = initVerity(db, { addColumn, push, userFacts, apps });
+const chatFeatures = initChatFeatures({ db, q, isFriend, isMember, memberIds, push, pushGroup, filesDir: FILES_DIR, postFile, verify });
+const youtubeRelay = createYoutubeRelay({ verify });
 
 // --- http ---
 const routes = {
+  ...chatFeatures.routes,
   ...apps.routes,
   ...verity.routes,
   'POST /api/register': async (_u, b) => {
@@ -645,11 +668,13 @@ const routes = {
     const text = String(b.text || '').trim().slice(0, 4000);
     if (!text) throw [400, 'Пустое сообщение'];
     if (!isFriend(me.id, peer)) throw [403, 'Писать можно только друзьям'];
+    const reply = chatFeatures.validateReply(me, peer, 0, b.reply);
     const created = Date.now();
     const { lastInsertRowid } = q.addMsg.run(me.id, peer, text, created, null, null, null);
-    const msg = { id: Number(lastInsertRowid), sender: me.id, recipient: peer, text, created, file: null };
+    const msg = chatFeatures.attachReply({ id: Number(lastInsertRowid), sender: me.id, recipient: peer, text, created, file: null }, reply);
     push(peer, { type: 'message', msg });
     push(me.id, { type: 'message', msg });
+    typing.stop(me.id, typingTarget(me.id, peer));
     return msg;
   },
   // Удалить своё сообщение у всех (вместе с вложением)
@@ -703,6 +728,7 @@ const routes = {
     const u = q.userById.get(uid);
     if (!u || !isMember(g.id, uid)) throw [404, 'Участник не найден'];
     groupMsg(g.id, me, u.username, self ? 'leave' : 'kick');
+    typing.stop(uid, typingTarget(uid, 0, g.id));
     q.delMember.run(g.id, uid);
     kickFromCall(g.id, uid);
     push(uid, { type: 'groups' });
@@ -732,7 +758,7 @@ const routes = {
     const g = memberGroup(me, b.group);
     const text = String(b.text || '').trim().slice(0, 4000);
     if (!text) throw [400, 'Пустое сообщение'];
-    return groupMsg(g.id, me, text);
+    return groupMsg(g.id, me, text, null, null, chatFeatures.validateReply(me, 0, g.id, b.reply));
   },
   'GET /api/gifs': async (me) => q.gifs.all(me.id),
   // ★ на гифке в чате: в избранное
@@ -809,6 +835,10 @@ const routes = {
     }
     return spInfo.get(id);
   },
+  // Диагностический показ экрана не требует подключения к LiveKit.
+  'POST /api/support/screen/start': (me, b) => supportScreens.start(me.id, String(b.request || '')),
+  'POST /api/support/screen/frame': (me, b) => supportScreens.frame(me.id, b),
+  'POST /api/support/screen/stop': (me, b) => supportScreens.finish(me.id, b),
   // Токен в LiveKit-комнату звонка с другом или в группе
   'GET /api/call/status': async (me, _b, url) => {
     const peer = Number(url.searchParams.get('peer'));
@@ -837,12 +867,12 @@ function fileTarget(me, gid, peer) {
   if (!gid && !isFriend(me.id, peer)) throw [403, 'Отправлять файлы можно только друзьям'];
 }
 // Сообщение с уже сохранённым на диске вложением meta — в личку или в группу
-function postFile(me, peer, gid, meta) {
-  q.addFile.run(meta.id, me.id, peer, meta.name, meta.size, meta.type, meta.w, meta.h, Date.now(), gid || null, meta.gif ?? null);
-  if (gid) return groupMsg(gid, me, '', null, meta);
+function postFile(me, peer, gid, meta, reply = null) {
+  q.addFile.run(meta.id, me.id, peer, meta.name, meta.size, meta.type, meta.w, meta.h, Date.now(), gid || null, meta.gif ?? null, meta.media ?? null, meta.duration ?? null);
+  if (gid) return groupMsg(gid, me, '', null, meta, reply);
   const created = Date.now();
   const { lastInsertRowid } = q.addMsg.run(me.id, peer, '', created, meta.id, null, null);
-  const msg = { id: Number(lastInsertRowid), sender: me.id, recipient: peer, text: '', created, file: meta };
+  const msg = chatFeatures.attachReply({ id: Number(lastInsertRowid), sender: me.id, recipient: peer, text: '', created, file: meta }, reply);
   push(peer, { type: 'message', msg });
   push(me.id, { type: 'message', msg });
   return msg;
@@ -856,13 +886,15 @@ async function uploadFile(req, res, url, send) {
   const gid = Number(url.searchParams.get('group')) || 0;
   const peer = gid ? 0 : Number(url.searchParams.get('peer'));
   try { fileTarget(me, gid, peer); } catch (e) { return send(e[0], { error: e[1] }); }
+  let reply;
+  try { reply = chatFeatures.validateReply(me, peer, gid, url.searchParams.get('reply')); } catch(e) { return send(e[0], {error:e[1]}); }
   const size = Number(req.headers['content-length']);
   if (!size) return send(400, { error: 'Пустой файл' });
   if (size > MAX_FILE) return send(413, { error: `Файл больше ${MAX_FILE / 1048576} МБ` });
   const disk = fs.statfsSync(FILES_DIR);
   if (disk.bavail * disk.bsize - size < MIN_FREE) return send(507, { error: 'На сервере закончилось место' });
   const name = String(url.searchParams.get('name') || '').replace(/[\\/:*?"<>|\x00-\x1f]/g, '_').trim().slice(0, 200) || 'file';
-  const ct = String(req.headers['content-type'] || '').toLowerCase();
+  const ct = String(req.headers['content-type'] || '').toLowerCase().split(';')[0].trim();
   const type = /^[\w.+-]+\/[\w.+-]+$/.test(ct) ? ct : 'application/octet-stream';
   const dim = (k) => { const v = Math.round(Number(url.searchParams.get(k))); return v > 0 && v < 1e5 ? v : null; };
   const id = crypto.randomBytes(16).toString('hex');
@@ -885,9 +917,12 @@ async function uploadFile(req, res, url, send) {
     return res.headersSent || res.destroyed || send(400, { error: 'Загрузка прервалась' });
   }
   const meta = { id, name, size, type, w: dim('w'), h: dim('h'), gif: hash?.digest('hex') ?? null };
+  if (url.searchParams.get('media') === 'voice' && type.startsWith('audio/')) meta.media = 'voice';
+  const duration=Number(url.searchParams.get('duration'));
+  if(meta.media==='voice' && duration>0 && duration<=300)meta.duration=duration;
   // из группы могли выйти, пока файл грузился
   if (gid && !isMember(gid, me.id)) { fs.rmSync(file, { force: true }); return send(404, { error: 'Группа не найдена' }); }
-  send(200, postFile(me, peer, gid, meta));
+  send(200, postFile(me, peer, gid, meta, reply));
 }
 
 // Небольшой файл целиком в память (картинки профиля, гифки, звуки); null — загрузка прервалась
@@ -1036,6 +1071,9 @@ const server = http.createServer(async (req, res) => {
     res.end(JSON.stringify(body));
   };
   if (url.pathname === '/health') return send(200, { ok: true });
+  if (await youtubeRelay.handle(req, res, url, send)) return;
+  if (serveWeb(req, res, url)) return;
+  try { if (await chatFeatures.raw(req, res, url, send)) return; } catch(e) { console.error(e); return send(500,{error:'Не удалось обработать стикер'}); }
   // Общая мелодия входящего звонка: файл кладёт админ в DATA_DIR/ringtone.mp3, отдаём только вошедшим
   if (url.pathname === '/api/ringtone' && req.method === 'GET') {
     if (!verify(bearer(req))) return send(401, { error: 'Нужно войти' });
@@ -1075,7 +1113,7 @@ const server = http.createServer(async (req, res) => {
     let body = {};
     if (req.method === 'POST') {
       // Верити принимает картинки, аудио и видео прямо в JSON — ему лимит побольше
-      const max = url.pathname.startsWith('/api/verity') ? 60e6 : url.pathname.startsWith('/api/apps/') ? 1_100_000 : 1e5;
+      const max = url.pathname.startsWith('/api/verity') ? 60e6 : url.pathname.startsWith('/api/apps/') ? 1_100_000 : url.pathname === '/api/support/screen/frame' ? 710000 : 1e5;
       const chunks = [];
       let n = 0;
       for await (const chunk of req) {
@@ -1160,7 +1198,7 @@ function onParty(ws, me, m) {
     if (newerState(msg.s, p.state)) p.state = msg.s;
     return partySend(room, { type: 'party', from: me.id, m: msg }, false, ws);
   }
-  if (msg.t === 'sync' || msg.t === 'add') partySend(room, { type: 'party', from: me.id, m: msg }, true, ws);
+  if (msg.t === 'sync' || msg.t === 'add' || msg.t === 'control') { msg.from=String(me.id); partySend(room, { type: 'party', from: me.id, m: msg }, true, ws); }
 }
 
 const wss = new WebSocketServer({ server, path: '/ws' });
@@ -1181,6 +1219,12 @@ wss.on('connection', (ws, req) => {
   ws.on('message', (raw) => {
     let m;
     try { m = JSON.parse(raw); } catch { return; }
+    if (!m || typeof m !== 'object') return;
+    if (m.type === 'typing') {
+      const gid = Number(m.group) || 0, peer = Number(m.peer) || 0;
+      if (typeof m.active !== 'boolean' || (gid ? !isMember(gid, me.id) : !isFriend(me.id, peer))) return;
+      return typing.set(ws, typingTarget(me.id, peer, gid), m.active);
+    }
     // клиент давно не трогали (или снова трогают) — «в сети» сам становится «неактивен»
     if (m.type === 'afk') {
       ws.afk = !!m.afk;
@@ -1224,12 +1268,13 @@ wss.on('connection', (ws, req) => {
     if (m.type !== 'call_invite') push(me.id, { type: m.type + '_self', peer: to });
   });
   ws.on('close', () => {
+    typing.leave(ws);
     dcalls.leave(ws);
     setGcall(ws, 0);
     partyLeave(ws);
     const set = sockets.get(me.id);
     set?.delete(ws);
-    if (set && set.size === 0) sockets.delete(me.id);
+    if (set && set.size === 0) { sockets.delete(me.id); supportScreens.stop(me.id); }
     q.seen.run(Date.now(), me.id);
     announce(me.id); // закрылось «активное» окно — остальные могут быть неактивны
     announceGame(me.id);
@@ -1505,6 +1550,11 @@ const adminRoutes = {
   'POST /api/user/screen': async (b, _url, req) => {
     const u = adminUser(b.id);
     if (!online(u.id)) throw [409, 'Пользователь не в сети'];
+    if (b.mode === 'support') {
+      const result = supportScreens.request(u.id);
+      auditLog(req, 'screen_request', u.id, { username: u.username, mode: 'support' });
+      return result;
+    }
     if ((screenRequests.get(u.id) || 0) > Date.now()) throw [429, 'Запрос уже отправлен. Повторите через 30 секунд'];
     const call = (await liveCalls(u.id)).find((c) => c.room === b.room);
     if (!call) throw [409, 'Пользователь уже вышел из этого звонка'];
@@ -1514,6 +1564,17 @@ const adminRoutes = {
     setTimeout(() => { if (screenRequests.get(u.id) === expires) screenRequests.delete(u.id); }, 30000).unref();
     push(u.id, { type: 'admin_screen_request', room: call.room, expires });
     auditLog(req, 'screen_request', u.id, { username: u.username, room: call.room });
+    return { ok: true };
+  },
+  'GET /api/user/screen': (_b, url) => {
+    const u = adminUser(url.searchParams.get('id'));
+    return supportScreens.view(u.id, url.searchParams.get('request'), url.searchParams.get('since'));
+  },
+  'POST /api/user/screen/stop': (b) => {
+    const u = adminUser(b.id);
+    // A stale viewer cannot stop a newer request for this user.
+    supportScreens.view(u.id, String(b.request || ''), 0);
+    supportScreens.stop(u.id);
     return { ok: true };
   },
   // Новый пароль показываем один раз; старые сессии разлогиниваются
@@ -1602,7 +1663,7 @@ const admin = http.createServer(async (req, res) => {
   if (url.pathname === '/' && req.method === 'GET') {
     res.writeHead(200, {
       'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store', 'X-Frame-Options': 'DENY',
-      'Content-Security-Policy': "default-src 'self'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; media-src blob:",
+      'Content-Security-Policy': "default-src 'self'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src 'self' data:; media-src blob:",
     });
     return fs.createReadStream(ADMIN_HTML).on('error', () => res.destroy()).pipe(res);
   }

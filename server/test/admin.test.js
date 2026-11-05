@@ -38,7 +38,7 @@ test('admin profile edits, image moderation, voice permissions and consent reque
     res.end(JSON.stringify(result));
   });
   const lkPort = await listen(livekit);
-  let child, logs = '', ws, friendWs;
+  let child, logs = '', ws, friendWs, strangerWs;
   const start = async () => {
     child = spawn(process.execPath, ['src/index.js'], { cwd: new URL('..', import.meta.url), env: {
       ...process.env, PORT: String(port), HOST: '127.0.0.1', ADMIN_PORT: String(adminPort),
@@ -56,7 +56,7 @@ test('admin profile edits, image moderation, voice permissions and consent reque
   };
   const stop = async () => { if (child && child.exitCode === null) { child.kill(); await once(child, 'exit'); } };
   t.after(async () => {
-    ws?.terminate(); friendWs?.terminate(); await stop();
+    ws?.terminate(); friendWs?.terminate(); strangerWs?.terminate(); await stop();
     await new Promise((resolve) => livekit.close(resolve));
     fs.rmSync(dir, { recursive: true, force: true });
   });
@@ -88,6 +88,51 @@ test('admin profile edits, image moderation, voice permissions and consent reque
   ws.on('message', (s) => events.push(JSON.parse(s)));
   friendWs.on('message', (s) => friendEvents.push(JSON.parse(s)));
   await Promise.all([once(ws, 'open'), once(friendWs, 'open')]);
+  await t.test('typing stays inside authorized conversations and calls keep their last participant', async () => {
+    const waitFor = async (predicate) => {
+      for (let i = 0; i < 100; i++) { if (predicate()) return; await new Promise((r) => setTimeout(r, 10)); }
+      assert.fail('Expected realtime event did not arrive');
+    };
+    const c = (await request(false, '/api/register', { username: 'test_stranger', password: 'test-password' })).data;
+    strangerWs = new WebSocket(`ws://127.0.0.1:${port}/ws?token=${c.token}`);
+    const strangerEvents = [];
+    strangerWs.on('message', (s) => strangerEvents.push(JSON.parse(s)));
+    await once(strangerWs, 'open');
+    const send = (socket, event) => socket.send(JSON.stringify(event));
+    send(ws, { type: 'typing', peer: b.user.id, user: c.user.id, active: true });
+    await waitFor(() => friendEvents.some((e) => e.type === 'typing' && e.active));
+    assert.deepEqual(friendEvents.findLast((e) => e.type === 'typing'), { type: 'typing', conv: 'u' + id, user: id, active: true });
+    await request(false, '/api/dm/messages', { peer: b.user.id, text: 'typing stops on send' }, a.token);
+    await waitFor(() => friendEvents.findLast((e) => e.type === 'typing')?.active === false);
+    const group = (await request(false, '/api/groups/create', { users: [b.user.id], name: 'Realtime test' }, a.token)).data;
+    send(ws, { type: 'typing', group: group.id, active: true });
+    await waitFor(() => friendEvents.some((e) => e.type === 'typing' && e.conv === 'g' + group.id && e.active));
+    send(strangerWs, { type: 'typing', peer: id, active: true });
+    send(strangerWs, { type: 'typing', group: group.id, active: true });
+    await new Promise((r) => setTimeout(r, 30));
+    assert.ok(!strangerEvents.some((e) => e.type === 'typing'));
+    assert.ok(!events.some((e) => e.type === 'typing' && e.user === c.user.id), 'strangers cannot signal into a DM or group');
+    send(friendWs, { type: 'typing', group: group.id, active: true });
+    await waitFor(() => events.some((e) => e.type === 'typing' && e.user === b.user.id && e.active));
+    await request(false, '/api/groups/remove', { group: group.id, user: b.user.id }, a.token);
+    await waitFor(() => events.findLast((e) => e.type === 'typing' && e.user === b.user.id)?.active === false);
+    // Clear the remaining draft, then use a fresh two-member group for calls.
+    send(ws, { type: 'typing', group: group.id, active: false });
+    const voice = (await request(false, '/api/groups/create', { users: [b.user.id] }, a.token)).data;
+    const lastCall = () => events.findLast((e) => e.type === 'gcall' && e.group === voice.id)?.users;
+    send(ws, { type: 'gcall_join', group: voice.id, ring: false });
+    send(friendWs, { type: 'gcall_join', group: voice.id, ring: false });
+    await waitFor(() => lastCall()?.length === 2);
+    send(ws, { type: 'gcall_leave', group: voice.id });
+    await waitFor(() => lastCall()?.length === 1);
+    assert.deepEqual(lastCall(), [b.user.id]);
+    assert.deepEqual((await request(false, '/api/groups', undefined, a.token)).data.find((g) => g.id === voice.id).call, [b.user.id]);
+    send(ws, { type: 'gcall_join', group: voice.id, ring: false });
+    await waitFor(() => lastCall()?.length === 2);
+    send(friendWs, { type: 'gcall_leave', group: voice.id });
+    send(ws, { type: 'gcall_leave', group: voice.id });
+    await waitFor(() => lastCall()?.length === 0);
+  });
   let card = await admin('/api/user/profile', { id, username: 'новый.ник', display: '  New\n Name  ', bio: 'Bio\n\n\ntext',
     pronouns: 'they', custom: 'Status', bcolor: '#aabbcc', status: 'dnd' });
   assert.equal(card.username, 'новый.ник');
@@ -140,6 +185,26 @@ test('admin profile edits, image moderation, voice permissions and consent reque
   assert.ok(events.some((e) => e.type === 'admin_screen_request' && e.room === 'dm_1_2' && e.expires > Date.now()));
   assert.ok(friendEvents.some((e) => e.type === 'user' && e.user.username === 'новый.ник'));
   assert.ok(!friendEvents.some((e) => e.type === 'admin_screen_request'));
+  // Standalone diagnostics must work with no call and with LiveKit completely unavailable.
+  participants = [];
+  lkDown = true;
+  const support = await admin('/api/user/screen', { id, mode: 'support' });
+  assert.equal((await request(true, '/api/user/screen', { id, mode: 'support' })).status, 409);
+  assert.equal((await request(false, '/api/support/screen/start', { request: support.request }, b.token)).status, 404);
+  assert.equal((await request(false, '/api/support/screen/frame', { request: support.request, frame: 'bad' }, a.token)).status, 403);
+  const started = await request(false, '/api/support/screen/start', { request: support.request }, a.token);
+  assert.equal(started.status, 200);
+  const frame = 'data:image/jpeg;base64,/9j/2Q==';
+  assert.equal((await request(false, '/api/support/screen/frame', { request: support.request, publisher: started.data.publisher, frame }, a.token)).status, 200);
+  const view = `/api/user/screen?id=${id}&request=${support.request}`;
+  assert.equal((await request(true, view, undefined, b.token)).status, 401);
+  assert.equal((await admin(view)).frame, frame);
+  assert.equal((await admin(view + '&since=1')).frame, '');
+  assert.equal((await request(true, '/api/user/screen/stop', { id, request: 'stale' })).status, 404);
+  await admin('/api/user/screen/stop', { id, request: support.request });
+  assert.equal((await request(true, view)).status, 404);
+  lkDown = false;
+  participants = [{ identity: String(id), name: 'test_author', tracks: [] }];
   await stop();
   await start();
   assert.equal((await admin('/api/user?id=' + id)).voice_muted, 1, 'mute must survive restart');

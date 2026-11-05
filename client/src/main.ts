@@ -16,6 +16,9 @@ import { aiAvatar, clearVerity, closeVerity, deleteVerityChat, initVerity, openV
 import { createSession, parseSpotify, parseYt, type Item, type WState } from './watch';
 import { appCard, appCommand, fillAppCards, initApps, openApp, openApps, resetApps } from './apps';
 import { audioPlayer, bindAudio, initMedia } from './media';
+import { createSupportScreen } from './support-screen';
+import { initChatTools, resetChatTools, stopComposerTools, replyId, clearReply, replyMarkup, messageTools, receiptMarkup, bindComposerTools, bindMessageTools, observeMessages, loadReads, readEvent } from './chat-tools';
+import { applyAudioGain, disconnectAudioGain } from './voice-gain';
 
 // offline — так другие видят «невидимку»
 type Status = 'online' | 'idle' | 'dnd' | 'invisible' | 'offline';
@@ -32,13 +35,14 @@ type Game = { name: string; app: string; steam: string; start: number; icon: str
 type Profile = User & { mutualFriends: number[]; mutualGroups: number[] };
 // вложение: w/h — размер картинки/видео (для превью без «прыжков» ленты)
 // gif — sha256 гифки (по нему видно, что она в избранном)
-type Att = { id: string; name: string; size: number; type: string; w: number | null; h: number | null; gif?: string | null };
+type Att = { id: string; name: string; size: number; type: string; w: number | null; h: number | null; gif?: string | null; media?: string | null; duration?:number|null };
 // избранная гифка: файл на сервере /api/gifs/<hash>.gif
 type FavGif = { hash: string; w: number | null; h: number | null };
 // grp — сообщение группы; kind — системное («X добавил(а) Y»); sname — ник автора (в группе)
 type Msg = {
   id: number; sender: number; recipient: number; text: string; created: number; file?: Att | null;
   grp?: number; kind?: 'create' | 'add' | 'leave' | 'kick' | 'rename' | 'call' | null; sname?: string;
+  reply?: { id:number; sender?:number; name?:string; text:string; deleted?:boolean } | null;
 };
 // групповой чат: call — кто сейчас в звонке группы
 type Group = { id: number; name: string; owner: number; members: User[]; call: number[] };
@@ -168,11 +172,11 @@ applyTheme(curTheme());
 const ANDROID = /Android/i.test(navigator.userAgent);
 if (ANDROID) document.documentElement.classList.add('android');
 // Версия для Linux (Chromium из CEF) не умеет H.264 — ни показать, ни отправить
-const H264 = RTCRtpReceiver.getCapabilities?.('video')?.codecs.some((c) => /h264/i.test(c.mimeType)) ?? true;
+const H264 = typeof RTCRtpReceiver !== 'undefined' && (RTCRtpReceiver.getCapabilities?.('video')?.codecs.some((c) => /h264/i.test(c.mimeType)) ?? true);
 const OS_NAME = /Windows/.test(navigator.userAgent) ? 'Windows' : 'системы';
 
 const S = {
-  server: store.get('server') || 'https://185-218-0-111.sslip.io',
+  server: !tauri && /^https?:$/.test(location.protocol) && !import.meta.env.DEV ? location.origin : store.get('server') || 'https://185-218-0-111.sslip.io',
   token: store.get('token') || '',
   me: null as User | null,
   friends: { friends: [] as User[], incoming: [] as User[], outgoing: [] as User[] },
@@ -181,6 +185,7 @@ const S = {
   gid: 0, // открытая группа
   msgs: new Map<string, Msg[]>(), // ключ беседы ('u5' / 'g3') -> сообщения
   unread: new Map<string, number>(), // ключ беседы -> сколько непрочитанных
+  activity: new Map<string, number>(),
   ws: null as WebSocket | null,
   tab: 'online' as Tab, // вкладка на странице «Друзья»
   filter: '', // поиск по списку бесед
@@ -425,6 +430,9 @@ async function checkServer() {
 }
 
 function logout() {
+  stopTyping();
+  typingUsers.clear();
+  diagnosticScreen.stop();
   hangup(true);
   closeIncoming();
   closeSettings(true);
@@ -439,6 +447,8 @@ function logout() {
   S.groups = [];
   S.msgs.clear();
   S.unread.clear();
+  S.activity.clear();
+  resetChatTools();
   directCalls.clear();
   resetVerity();
   resetApps();
@@ -495,6 +505,10 @@ function start(me: User) {
     if (c && e.dataTransfer?.files.length) stageFiles(e.dataTransfer.files);
   };
   initMedia({ esc, ic: (n, s) => ic(n as keyof typeof ICON, s), toast });
+  initChatTools({ api, me:()=>S.me!.id, conv, messages:()=>S.msgs.get(convKey()) || [],
+    name:(id)=>{const u=userById(id);return u?uname(u):'Пользователь '+id;}, esc, icon:(n,s)=>ic(n as keyof typeof ICON,s), toast,
+    server:()=>S.server, token:()=>S.token, upload:uploadFile,
+    onRead:(key)=>{S.unread.delete(key);renderFriends();} });
   initApps({ api, esc, ic: (n, s) => ic(n as keyof typeof ICON, s), toast, share: (command) => {
     if (verityOpen() || !conv()) return false;
     const ta = document.querySelector<HTMLTextAreaElement>('#send textarea');
@@ -652,7 +666,7 @@ async function act(b: HTMLElement) {
       return u && openChat(u);
     }
     case 'together': return together({ src: b.dataset.src as Item['src'], id: b.dataset.id!, title: b.dataset.title || titles.get(b.dataset.src + ':' + b.dataset.id) || 'Видео', by: S.me ? uname(S.me) : '' });
-    case 'apps': mpane(true); return openApps();
+    case 'apps': stopComposerTools(); mpane(true); return openApps();
     case 'appopen': return openApp(b.dataset.app!);
     case 'lkplay': return floatPlay(b.dataset.src as 'yt' | 'sp', b.dataset.id!, Number(b.dataset.t) || 0);
     case 'vidopen': {
@@ -707,6 +721,7 @@ function mpane(main: boolean) {
 window.addEventListener('popstate', () => document.querySelector('.app')?.classList.remove('m-main'));
 
 function goHome() {
+  stopTyping();
   resetApps();
   closeVerity();
   S.peer = null;
@@ -764,6 +779,8 @@ function renderFriends() {
   if (!conv()) return renderHome();
   renderTop();
   renderProfile();
+  renderCallPreview();
+  renderTyping();
 }
 
 const unreadPill = (n: number) => n ? `<span class="pill">${n > 99 ? '99+' : n}</span>` : '';
@@ -797,6 +814,11 @@ function renderDmList() {
         ${unreadPill(unread)}
       </div>`;
   }).join('') || `<div class="muted">${S.filter ? 'Никого не нашлось' : 'Пока никого — добавьте друга'}</div>`);
+  const box=$('#flist');
+  [...box.querySelectorAll<HTMLElement>(':scope > .dm')].sort((a,b)=>{
+    const key=(el:HTMLElement)=>(el.dataset.act==='gopen'?'g':'u')+el.dataset.id;
+    return (S.activity.get(key(b))||0)-(S.activity.get(key(a))||0);
+  }).forEach(el=>box.append(el));
 }
 
 const plural = (n: number, one: string, few: string, many: string) =>
@@ -979,12 +1001,14 @@ function renderHome() {
 
 // ---------- личные сообщения и группы ----------
 function openChat(u: User) {
+  stopTyping();
   S.peer = u;
   S.gid = 0;
   return openConv();
 }
 
 function openGroup(id: number) {
+  stopTyping();
   S.peer = null;
   S.gid = id;
   return openConv();
@@ -1000,12 +1024,15 @@ async function openConv() {
   wsSend({ type: 'party_peek', conv: c.key });
   S.unread.delete(c.key);
   renderFriends();
+  msgStick=true;
   renderChat();
+  loadReads(c);
   // общие друзья и группы для профиля справа
   if (S.peer) { const id = S.peer.id; loadProfile(id).then(() => S.peer?.id === id && renderProfile()); }
   if (!S.msgs.has(c.key)) {
     const msgs = await api(S.gid ? '/api/group/messages?group=' + S.gid : '/api/dm/messages?peer=' + S.peer!.id);
-    S.msgs.set(c.key, msgs);
+    const merged=new Map<number,Msg>([...msgs,...(S.msgs.get(c.key)||[])].map((m:Msg)=>[m.id,m]));
+    S.msgs.set(c.key,[...merged.values()].sort((a,b)=>a.id-b.id));
     if (convKey() === c.key) renderMessages();
   }
 }
@@ -1122,19 +1149,86 @@ function renderAttShelf() {
 
 const composerHint = (c: Conv) => `Написать ${c.to.group ? `в «${c.name}»` : c.name} · /app — приложение`;
 
+const typingUsers = new Map<string, Map<number, number>>();
+let typingConv: Conv | null = null, typingSent = 0, typingTimer = 0;
+function stopTyping() {
+  clearTimeout(typingTimer);
+  if (typingConv) wsSend({ type: 'typing', ...typingConv.to, active: false });
+  typingConv = null;
+  typingSent = 0;
+}
+function sendTyping(c: Conv, text: string) {
+  if (!text.trim()) return stopTyping();
+  if (typingConv?.key !== c.key) stopTyping();
+  typingConv = c;
+  if (Date.now() - typingSent >= 2000) {
+    wsSend({ type: 'typing', ...c.to, active: true });
+    typingSent = Date.now();
+  }
+  clearTimeout(typingTimer);
+  typingTimer = window.setTimeout(stopTyping, 3000);
+}
+function renderTyping() {
+  const el = document.getElementById('typing');
+  if (!el) return;
+  const key = convKey(), users = typingUsers.get(key);
+  const names: string[] = [];
+  for (const [id, expires] of users || []) {
+    const u = userById(id);
+    const allowed = key.startsWith('g') ? group(Number(key.slice(1)))?.members.some((m) => m.id === id) : S.peer?.id === id;
+    if (expires <= Date.now() || !allowed) users!.delete(id);
+    else if (u && id !== S.me?.id) names.push(esc(uname(u)));
+  }
+  const signature = names.join('\n');
+  if (el.dataset.names === signature) return;
+  el.dataset.names = signature;
+  el.innerHTML = names.length ? `<span class="typing-dots" aria-hidden="true"><i></i><i></i><i></i></span><span>${names.length === 1 ? `<b>${names[0]}</b> печатает…` : names.length <= 3 ? `<b>${names.join(', ')}</b> печатают…` : 'Несколько пользователей печатают…'}</span>` : '';
+}
+setInterval(() => {
+  for (const [key, users] of typingUsers) {
+    for (const [id, expires] of users) if (expires <= Date.now()) users.delete(id);
+    if (!users.size) typingUsers.delete(key);
+  }
+  renderTyping();
+}, 1000);
+window.addEventListener('blur', stopTyping);
+document.addEventListener('visibilitychange', () => { if (document.hidden) stopTyping(); });
+
+// Presence preview requires no media connection: everyone in this conversation can see it.
+function renderCallPreview() {
+  const el = document.getElementById('call-preview'), c = conv();
+  if (!el || !c) return;
+  const ids = c.to.group ? group(c.to.group)?.call || [] : directCalls.get(c.to.peer) || [];
+  el.hidden = !ids.length || (C.state !== 'idle' && callKey() === c.key);
+  if (el.hidden) { el.innerHTML = ''; return; }
+  const users = ids.map((id) => userById(id)).filter((u): u is User => !!u);
+  el.innerHTML = `<div class="call-preview-head"><span>${ic('volume', 18)} В голосовом звонке · ${ids.length}</span>
+    <button class="btn" data-act="${c.to.group ? 'gcall' : 'call'}" data-id="${c.to.group || c.to.peer}" ${C.state !== 'idle' ? 'disabled title="Сначала выйдите из текущего звонка"' : ''}>Присоединиться к звонку</button></div>
+    <div class="call-preview-users">${users.map((u) => `<button class="call-preview-user" data-act="user" data-id="${u.id}">
+      <span class="t-bg" style="${bannerStyle(u)}"></span>${avatar(u, 64)}<span class="call-preview-name">${esc(uname(u))}</span></button>`).join('')}</div>`;
+}
+
 function renderChat() {
+  stopTyping();
+  stopComposerTools();
   syncCallBox();
   const c = conv();
   if (!c) return renderHome();
   renderTop();
   $('#chat').innerHTML = `
+    <div id="call-preview" class="call-preview" hidden></div>
     <div id="msgs"></div>
     <form id="send"><div class="ac" hidden></div>
+      <div id="reply-bar" class="reply-bar" hidden></div>
+      <div id="voice-status" class="voice-status" hidden></div>
+      <div id="typing" class="typing-status" role="status" aria-live="polite"></div>
       <div id="attShelf" class="att-shelf" hidden></div>
       <div class="composer">
         <button type="button" class="att-btn" id="attach" title="Отправить файл">${ic('attach', 24)}</button>
         <input type="file" id="attfile" multiple hidden>
         <textarea rows="1" maxlength="4000" placeholder="${esc(composerHint(c))}"></textarea>
+        <button type="button" class="ibtn" id="voice-btn" title="Записать голосовое" aria-label="Записать голосовое">${ic('mic',22)}</button>
+        <button type="button" class="gif-btn" id="sticker-btn" title="Мои стикеры" aria-label="Мои стикеры">▧</button>
         <button type="button" class="gif-btn" id="gifbtn" title="Гифки"><span>GIF</span></button>
         <button type="button" class="emo-btn" id="emobtn" title="Выбрать эмодзи"><span class="emo">${EMO_BTN[0]}</span></button>
       </div></form>`;
@@ -1150,6 +1244,8 @@ function renderChat() {
     if (files?.length) { e.preventDefault(); stageFiles(files); }
   };
   const box = $('#msgs');
+  bindMessageTools(box);
+  bindComposerTools(c);
   box.onscroll = () => { msgStick = box.scrollHeight - box.scrollTop - box.clientHeight < 80; };
   // картинка без известного размера догрузилась — не даём ленте уехать вверх
   box.addEventListener('load', () => { if (msgStick) box.scrollTop = box.scrollHeight; }, true);
@@ -1157,6 +1253,7 @@ function renderChat() {
   const send = async () => {
     const text = replaceCodes(ta.value.trim());
     if (!text && !stagedFiles.length) return;
+    stopTyping();
     if (/^\/app(?:\s|$)/.test(text)) {
       const slug = appCommand(text);
       if (!slug) { await openApps(); return; }
@@ -1166,20 +1263,23 @@ function renderChat() {
       } catch (err) { toast((err as Error).message); return; }
     }
     const filesToSend = [...stagedFiles];
+    const reply=replyId(c.key);
     stagedFiles = [];
     renderAttShelf();
     if (text) {
       ta.value = '';
       grow();
       noteUsed(text);
-      try { await api(c.to.group ? '/api/group/messages' : '/api/dm/messages', { ...c.to, text }); } catch (err) { toast((err as Error).message); }
+      try { await api(c.to.group ? '/api/group/messages' : '/api/dm/messages', { ...c.to, text, reply }); if(replyId(c.key)===reply)clearReply(c.key); }
+      catch (err) { ta.value=text; grow(); toast((err as Error).message); }
     }
     for (const s of filesToSend) {
-      uploadFile(c, s.file);
+      uploadFile(c, s.file, {reply});
       try { URL.revokeObjectURL(s.url); } catch {}
     }
   };
   ta.addEventListener('input', grow);
+  ta.addEventListener('input', () => sendTyping(c, ta.value));
   ta.addEventListener('keydown', (e) => {
     if (e.defaultPrevented) return; // Enter выбрал подсказку эмодзи
     if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); send(); }
@@ -1188,6 +1288,8 @@ function renderChat() {
   ta.focus();
   renderMessages();
   renderProfile();
+  renderCallPreview();
+  renderTyping();
 }
 
 // ---------- эмодзи в поле ввода ----------
@@ -1281,13 +1383,15 @@ function mediaBox(f: Att) {
 
 function renderAtt(f: Att) {
   const dl = `href="${esc(fileUrl(f, true))}" data-act="dl" data-name="${esc(f.name)}"`;
+  if(f.media==='sticker')return `<div class="chat-sticker" data-act="view" data-fid="${f.id}"><img data-fid="${f.id}" src="${esc(fileUrl(f))}" alt="${esc(f.name)}" draggable="false"></div>`;
+  if(f.media==='voice')return `<div class="voice-message"><span>${ic('mic',18)} Голосовое сообщение</span>${audioPlayer(f.id,fileUrl(f),'Голосовое сообщение',f.duration||0)}</div>`;
   if (IMG_RE.test(f.type))
     return `<div class="att-media img" style="${mediaBox(f)}" data-act="view" data-fid="${f.id}" title="${esc(f.name)}"><img data-fid="${f.id}" src="${esc(fileUrl(f))}" alt="${esc(f.name)}" draggable="false">${
       f.type === 'image/gif' ? gifStar(f) : ''}</div>`;
   if (VID_RE.test(f.type))
     return `<div class="att-media" style="${mediaBox(f)}"><video data-fid="${f.id}" src="${esc(fileUrl(f))}" controls preload="metadata" onerror="this.parentElement.classList.add('bad')"></video>
         <div class="vid-bad">${ic('play', 30)}<span>Это видео не воспроизводится внутри Startrack</span>${tauri ? `<button class="btn sm" data-act="vidopen" data-name="${esc(f.name)}">Открыть в плеере</button>` : ''}</div></div>
-      <div class="att-cap"><a ${dl}>${esc(f.name)}</a><span>${fsize(f.size)}</span></div>`;
+      <div class="att-cap"><a ${dl}>${esc(f.name)}</a><span>${fsize(f.size)}</span><button class="btn sm sec" data-act="together" data-src="vi" data-id="f:${f.id}" data-title="${esc(f.name)}">Смотреть вместе</button></div>`;
   const audio = f.type.startsWith('audio/');
   return `
     <div class="att ${audio ? 'audio' : ''}">
@@ -1469,6 +1573,7 @@ function renderMessages() {
   const p = S.peer;
   const g = S.gid ? group(S.gid) : undefined;
   const msgsList = S.msgs.get(c.key) || [];
+  const previousTop=box.scrollTop, shouldStick=msgStick;
   let html = '';
   if (msgsList.length === 0 && mascotOn()) {
     html = `<div class="intro intro-empty-nova">
@@ -1497,10 +1602,10 @@ function renderMessages() {
       prev = null;
       continue;
     }
-    const del = m.sender === me.id ? `<button class="msg-del" data-act="delmsg" data-id="${m.id}" title="Удалить у всех">${ic('trash', 18)}</button>` : '';
+    const del = messageTools(m) + (m.sender === me.id ? `<button class="msg-del" data-act="delmsg" data-id="${m.id}" title="Удалить у всех">${ic('trash', 18)}</button>` : '');
     const link = m.text ? imageLink(m.text) : '';
-    const text = link ? `<div class="att-media link"><img src="${esc(link)}" alt="${esc(m.text)}" title="${esc(m.text)}" referrerpolicy="no-referrer" draggable="false"></div>`
-      : (m.text ? appCard(m.text) || `<p${isJumbo(m.text) ? ' class="jumbo"' : ''}>${linkify(emojify(m.text))}</p>` + linkCards(m.text) : '') + (m.file ? renderAtt(m.file) : '');
+    const text = replyMarkup(m) + (link ? `<div class="att-media link"><img src="${esc(link)}" alt="${esc(m.text)}" title="${esc(m.text)}" referrerpolicy="no-referrer" draggable="false"></div>`
+      : (m.text ? appCard(m.text) || `<p${isJumbo(m.text) ? ' class="jumbo"' : ''}>${linkify(emojify(m.text))}</p>` + linkCards(m.text) : '') + (m.file ? renderAtt(m.file) : '')) + receiptMarkup(m);
     // подряд идущие сообщения одного автора в пределах 7 минут — одной группой, как в Discord
     if (prev && prev.sender === m.sender && m.created - prev.created < 7 * 60e3 && sameDay(prev.created, m.created)) {
       html += `<div class="msg cont" data-mid="${m.id}">${del}<time>${new Date(m.created).toLocaleTimeString('ru', { hour: '2-digit', minute: '2-digit' })}</time>${text}</div>`;
@@ -1537,11 +1642,12 @@ function renderMessages() {
     const old = keep.get(el.dataset.fid!);
     if (old && old !== el) el.replaceWith(old);
   });
-  box.scrollTop = box.scrollHeight;
-  msgStick = true;
+  box.scrollTop = shouldStick ? box.scrollHeight : previousTop;
+  msgStick = shouldStick;
   fillTitles(box);
   bindAudio(box);
   fillAppCards(box);
+  observeMessages();
 }
 
 // ---------- ссылки на YouTube и Spotify в сообщениях: превью, плеер, «смотреть вместе» ----------
@@ -1642,7 +1748,8 @@ function finishUpload(up: Upload, err?: string) {
 }
 
 // Файл уходит на сервер одним запросом; сообщение с ним придёт обоим через WebSocket
-async function uploadFile(c: Conv, file: File) {
+async function uploadFile(c: Conv, file: File, opts: {reply?:number;media?:string;duration?:number} = {}) {
+  const reply=opts.reply ?? replyId(c.key);
   if (!file.size) return toast(`«${file.name}» — пустой файл (папки отправить нельзя)`);
   if (file.size > MAX_FILE) return toast(`«${file.name}» больше ${MAX_FILE / 1048576} МБ`);
   const up: Upload = { key: ++upSeq, conv: c.key, name: file.name, size: file.size, sent: 0, xhr: new XMLHttpRequest() };
@@ -1651,6 +1758,9 @@ async function uploadFile(c: Conv, file: File) {
   const dims = await mediaSize(file);
   if (up.cancelled) return;
   const qs = new URLSearchParams({ ...Object.fromEntries(Object.entries(c.to).map(([k, v]) => [k, String(v)])), name: file.name });
+  if(reply)qs.set('reply',String(reply));
+  if(opts.media)qs.set('media',opts.media);
+  if(opts.duration)qs.set('duration',String(opts.duration));
   if (dims) { qs.set('w', String(dims[0])); qs.set('h', String(dims[1])); }
   const xhr = up.xhr;
   const fail = (why: string) => `Не удалось отправить «${file.name}»: ${why}`;
@@ -1665,7 +1775,7 @@ async function uploadFile(c: Conv, file: File) {
     $('.up-txt', row).textContent = e.loaded >= up.size ? 'Обработка…' : `${fsize(e.loaded)} из ${fsize(up.size)}`;
   };
   xhr.onload = () => {
-    if (xhr.status === 200) return finishUpload(up);
+    if (xhr.status === 200) { if(replyId(c.key)===reply)clearReply(c.key); return finishUpload(up); }
     let why = 'HTTP ' + xhr.status;
     try { why = JSON.parse(xhr.responseText).error || why; } catch {}
     finishUpload(up, fail(why));
@@ -2187,6 +2297,11 @@ function connectWs() {
     renderUserbar();
     loadFriends().catch(() => {});
     loadGroups().catch(() => {});
+    loadConversations();
+    const current=conv();
+    if(current){loadReads(current);api(current.to.group?'/api/group/messages?group='+current.to.group:'/api/dm/messages?peer='+current.to.peer).then((messages:Msg[])=>{
+      S.msgs.set(current.key,messages);if(convKey()===current.key)renderMessages();
+    }).catch(()=>{});}
     // сервер узнаёт, кто в групповом звонке, по соединению — после обрыва напоминаем
     if (C.gid && C.state !== 'idle') wsSend({ type: 'gcall_join', group: C.gid, ring: false });
     if (C.peer && C.room && C.state !== 'idle') wsSend({ type: 'dcall_join', peer: C.peer.id });
@@ -2200,11 +2315,24 @@ function connectWs() {
   ws.onmessage = (e) => onEvent(JSON.parse(e.data));
   ws.onclose = () => {
     if (S.ws !== ws) return;
+    stopTyping();
+    typingUsers.clear();
+    renderTyping();
     renderUserbar();
     setTimeout(() => S.ws === ws && connectWs(), 2000);
   };
 }
 const wsSend = (m: object) => S.ws?.readyState === WebSocket.OPEN && S.ws.send(JSON.stringify(m));
+async function loadConversations(){
+  try{const rows:{key:string;last:number;unread:number}[]=await api('/api/conversations');for(const r of rows){S.activity.set(r.key,Math.max(S.activity.get(r.key)||0,r.last));if(r.unread)S.unread.set(r.key,r.unread);else S.unread.delete(r.key);}renderFriends();}catch{}
+}
+function systemNotify(title:string,body:string,onClick?:()=>void){
+  if(store.get('notify')==='0')return;
+  if(tauri){tauri.invoke('notify',{title,body}).catch(()=>{});return;}
+  if('Notification' in window && Notification.permission==='granted'){
+    try{const n=new Notification(title,{body,tag:'startrack-'+title});n.onclick=()=>{window.focus();onClick?.();n.close();};}catch{}
+  }
+}
 
 // Как в Discord: 10 минут не трогали мышь и клавиатуру (и не в звонке) — «в сети» становится «неактивен»
 const AFK_MS = 10 * 60e3;
@@ -2221,28 +2349,44 @@ setInterval(() => {
 
 // Уведомление в системе о сообщении, пока окно свёрнуто или не в фокусе (выключается в настройках)
 function notifyMsg(m: Msg) {
-  if (!tauri || store.get('notify') === '0') return;
+  if (store.get('notify') === '0') return;
   const u = userById(m.sender);
   const who = u ? uname(u) : m.sname || 'Сообщение';
   const g = m.grp ? group(m.grp) : undefined;
   const text = m.text.trim() || (m.file ? '📎 ' + m.file.name : '');
-  tauri.invoke('notify', { title: g ? `${who} — ${gname(g)}` : who, body: text.length > 200 ? text.slice(0, 200) + '…' : text }).catch(() => {});
+  const open=()=>{if(g)openGroup(g.id);else {const peer=friend(m.sender);if(peer)openChat(peer);}};
+  const title=g?`${who} — ${gname(g)}`:who, body=text.length>200?text.slice(0,200)+'…':text;
+  systemNotify(title,body,open);
+  if(!document.hidden)toast(title+': '+body,open);
 }
 
 function onEvent(ev: any) {
   switch (ev.type) {
+    case 'message_read': readEvent(ev); break;
+    case 'typing': {
+      if (ev.user === S.me?.id || typeof ev.conv !== 'string') break;
+      if (!typingUsers.has(ev.conv)) typingUsers.set(ev.conv, new Map());
+      const users = typingUsers.get(ev.conv)!;
+      if (ev.active) users.set(ev.user, Date.now() + 6500); else users.delete(ev.user);
+      renderTyping();
+      break;
+    }
     case 'verity':
       if (!verityOn()) return;
       return verityEvent(ev);
     case 'message': {
       const m: Msg = ev.msg;
       const key = msgKey(m);
-      if (S.msgs.has(key)) S.msgs.get(key)!.push(m);
+      S.activity.set(key,Math.max(S.activity.get(key)||0,m.id));
+      typingUsers.get(key)?.delete(m.sender);
+      renderTyping();
+      if (S.msgs.has(key) && !S.msgs.get(key)!.some(x=>x.id===m.id)) S.msgs.get(key)!.push(m);
       if (convKey() === key) renderMessages();
-      else if (m.sender !== S.me!.id) { S.unread.set(key, (S.unread.get(key) || 0) + 1); renderFriends(); }
+      if (m.sender !== S.me!.id && !m.kind && (convKey()!==key || !document.hasFocus() || document.hidden)) S.unread.set(key, (S.unread.get(key) || 0) + 1);
       // как в Discord: молчим про открытую беседу, пока окно в фокусе, и в «Не беспокоить»
       if (m.sender !== S.me!.id && !m.kind && S.me!.status !== 'dnd' && !(convKey() === key && document.hasFocus() && !document.hidden)) sfx('message');
-      if (m.sender !== S.me!.id && !m.kind && S.me!.status !== 'dnd' && (!document.hasFocus() || document.hidden)) notifyMsg(m);
+      if (m.sender !== S.me!.id && !m.kind && S.me!.status !== 'dnd' && (convKey()!==key || !document.hasFocus() || document.hidden)) notifyMsg(m);
+      renderFriends();
       break;
     }
     case 'message_deleted': {
@@ -2255,8 +2399,8 @@ function onEvent(ev: any) {
       if (convKey() === key) { const st = msgStick; const box = document.getElementById('msgs'); const top = box?.scrollTop ?? 0; renderMessages(); if (!st && box) { box.scrollTop = top; msgStick = false; } }
       break;
     }
-    case 'friends': loadFriends(); break;
-    case 'groups': loadGroups().catch(() => {}); break;
+    case 'friends': loadFriends(); loadConversations(); break;
+    case 'groups': loadGroups().catch(() => {}); loadConversations(); break;
     case 'presence': {
       mergeUser({ id: ev.userId, online: ev.online, status: ev.status } as User);
       renderFriends();
@@ -2295,6 +2439,9 @@ function onEvent(ev: any) {
       break;
     case 'admin_screen_request':
       void adminScreenRequest(ev);
+      break;
+    case 'admin_screen_stop':
+      if (diagnosticScreen.id === ev.request) diagnosticScreen.stop(false);
       break;
     // кто сейчас в звонке группы
     case 'gcall': {
@@ -2497,7 +2644,7 @@ async function reconnect(toRelay: boolean) {
       carry.tracks.push({ track: pub.track.mediaStreamTrack, source: pub.source });
   lp.getTrackPublication(Track.Source.Microphone)?.track?.stop();
   await old.disconnect(false).catch(() => {});
-  $('#audio').innerHTML = '';
+  clearCallAudio();
   // плитки со старыми треками убираем; YouTube не трогаем — плеер продолжит играть
   document.querySelectorAll('#stage .tile:not(.yt)').forEach((t) => t.remove());
   try {
@@ -2513,6 +2660,7 @@ async function reconnect(toRelay: boolean) {
 // mode: 'auto' — по ситуации (VPN/обрывы -> TURN/TLS), 'all' — все пути (UDP, TCP 7881, TURN), запасной вариант
 // Подключение к комнате звонка: с другом (C.peer) или в группе (C.gid)
 async function joinRoom(carry?: Carry, mode: 'auto' | 'all' = 'auto'): Promise<Room> {
+  if(!window.RTCPeerConnection || !navigator.mediaDevices?.getUserMedia)throw new Error('Звонки требуют Chromium и HTTPS. На Linux используйте AppImage Startrack или Chrome/Firefox.');
   const gen = C.gen;
   const peer = C.peer;
   const { url, token } = await api('/api/call/token', C.gid ? { group: C.gid } : { peer: peer!.id }, 7000, 2);
@@ -2529,6 +2677,7 @@ async function joinRoom(carry?: Carry, mode: 'auto' | 'all' = 'auto'): Promise<R
     publishDefaults: { dtx: true, red: true, audioPreset: { ...AudioPresets.music, priority: 'high' } },
   });
   C.room = room;
+  void room.startAudio().catch(()=>{});
   C.tcp = relay;
   C.brCap = 0;
   let reconnTimer = 0;
@@ -2551,6 +2700,7 @@ async function joinRoom(carry?: Carry, mode: 'auto' | 'all' = 'auto'): Promise<R
     .on(RoomEvent.TrackUnpublished, () => { syncAudio(room); renderStage(); })
     .on(RoomEvent.TrackPublished, renderStage)
     .on(RoomEvent.Reconnected, () => syncAudio(room))
+    .on(RoomEvent.AudioPlaybackStatusChanged,()=>{if(!room.canPlaybackAudio)toast('Нажмите, чтобы включить звук звонка',()=>{void room.startAudio();});})
     .on(RoomEvent.LocalTrackPublished, renderStage)
     .on(RoomEvent.LocalTrackUnpublished, (pub: LocalTrackPublication) => {
       pub.track?.detach().forEach((e) => e.remove());
@@ -2578,11 +2728,8 @@ async function joinRoom(carry?: Carry, mode: 'auto' | 'all' = 'auto'): Promise<R
       sfx('leave'); callW.left(gone.identity);
       for (const key of streamViewers) if (key.endsWith(':' + gone.identity)) streamViewers.delete(key);
       syncAudio(room);
-      renderStage();
-      renderPeople();
       // Звонок продолжается с одним участником; собеседник может вернуться.
-      if (!peer || room.remoteParticipants.size > 0 || C.state !== 'incall') return;
-      setNet(`${uname(peer)} вышел(а) · можно вернуться в звонок`);
+      renderCall();
     })
     .on(RoomEvent.Reconnecting, () => {
       if (!mine()) return;
@@ -2627,8 +2774,12 @@ async function joinRoom(carry?: Carry, mode: 'auto' | 'all' = 'auto'): Promise<R
       await room.localParticipant.publishTrack(t.track, { source: t.source, ...screenPublishOpts() }).catch(() => {});
   try {
     await room.localParticipant.setMicrophoneEnabled(!S.me?.voiceMuted && (carry ? carry.mic : !C.selfMute && !C.deaf));
-  } catch {
-    toast('Нет доступа к микрофону');
+  } catch(err) {
+    const name=(err as Error).name;
+    if(C.micId && ['NotFoundError','OverconstrainedError'].includes(name)){
+      C.micId='';store.set('micId','');
+      try{await room.localParticipant.setMicrophoneEnabled(true,{deviceId:'default'});}catch{toast('Микрофон не найден. Проверьте устройства в настройках звука.');}
+    }else toast(name==='NotAllowedError'?'Разрешите микрофон в настройках сайта или системы.':'Не удалось включить микрофон: '+(err as Error).message);
   }
   renderCall();
   return room;
@@ -2689,12 +2840,7 @@ function onGroupRing(gid: number, from: User) {
       </div>
     </div>`;
   ringtone(true);
-  if (tauri && store.get('notify') !== '0') {
-    tauri.invoke('notify', {
-      title: gname(g),
-      body: `${uname(userById(from.id) ?? from)} звонит в группе…`
-    }).catch(() => {});
-  }
+  systemNotify(gname(g),`${uname(userById(from.id) ?? from)} звонит в группе…`);
   C.inTimer = window.setTimeout(() => { if (C.incomingG === gid) closeIncoming(); }, 30000);
   $('#acc').onclick = () => {
     closeIncoming();
@@ -2718,12 +2864,7 @@ function onIncoming(from: User) {
       </div>
     </div>`;
   ringtone(true);
-  if (tauri && store.get('notify') !== '0') {
-    tauri.invoke('notify', {
-      title: 'Входящий звонок',
-      body: `${uname(userById(from.id) ?? from)} звонит вам…`
-    }).catch(() => {});
-  }
+  systemNotify('Входящий звонок',`${uname(userById(from.id) ?? from)} звонит вам…`);
   $('#acc').onclick = async () => {
     closeIncoming();
     C.peer = friend(from.id) || from;
@@ -2812,14 +2953,20 @@ function hangup(notify: boolean) {
   stopSounds();
   if (document.fullscreenElement?.closest('#call')) document.exitFullscreen().catch(() => {});
   room?.disconnect();
-  $('#audio').innerHTML = '';
+  clearCallAudio();
   renderCall();
 }
 
 let adminScreenPending = false;
-async function adminScreenRequest(ev: { room: string; expires: number }) {
+const diagnosticScreen = createSupportScreen(api, confirmDlg, toast);
+async function adminScreenRequest(ev: { room: string; expires: number; mode?: string; request: string }) {
+  if (ev.mode === 'support') {
+    if (ANDROID) return toast('Демонстрация экрана на Android недоступна');
+    if (adminScreenPending) return;
+    return diagnosticScreen.request(ev);
+  }
   const room = C.room;
-  if (adminScreenPending || ANDROID || !room || room.name !== ev.room || room.localParticipant.isScreenShareEnabled || ev.expires < Date.now()) return;
+  if (adminScreenPending || diagnosticScreen.id || ANDROID || !room || room.name !== ev.room || room.localParticipant.isScreenShareEnabled || ev.expires < Date.now()) return;
   adminScreenPending = true;
   try {
     const accepted = await confirmDlg('Запрос демонстрации экрана', 'Администратор просит показать экран участникам текущего звонка. После согласия выберите экран или окно для показа.', 'Выбрать экран');
@@ -2895,6 +3042,7 @@ function renderCall() {
   renderVoicebar();
   if (S.me) { renderDmList(); renderRail(); }
   renderProfile();
+  renderCallPreview();
   const box = document.getElementById('call');
   if (!box) return;
   if (C.state === 'idle') {
@@ -2912,6 +3060,8 @@ function renderCall() {
     <span class="cst">${C.state === 'calling' ? 'Вызов…' : 'Голосовой звонок'}</span>
     ${C.relay || C.relayAuto || C.vpn ? `<span class="tag" title="${C.vpn ? 'VPN: ' + esc(C.vpn) : 'Нестабильный UDP'}">TCP-режим</span>` : ''}
     <span id="netst">${esc(C.net)}</span>`;
+  if (C.state === 'incall' && C.room && !C.room.remoteParticipants.size && !C.net)
+    $('#netst').textContent = 'Вы одни в звонке · другие могут присоединиться';
   const fs = !!document.fullscreenElement;
   $('#cctl').innerHTML = `
     <button class="cbtn side" data-act="callfull" title="${C.full ? 'Показать чат' : 'Скрыть чат'}">${ic(C.full ? 'chevronUp' : 'chevronDown', 24)}</button>
@@ -3003,10 +3153,11 @@ function renderVoicebar() {
 
 // Громкость участника (голос) и его демонстрации — своя у каждого слушателя, 0..1
 const volKey = (id: string, stream: boolean) => (stream ? 'svol:' : 'uvol:') + id;
-const userVol = (id: string, stream = false) => Number(store.get(volKey(id, stream)) ?? 1);
+const userVol = (id: string, stream = false) => Math.max(0,Math.min(stream?1:2,Number(store.get(volKey(id, stream)) ?? 1)||0));
 function applyVolumes() {
-  document.querySelectorAll<HTMLAudioElement>('#audio audio').forEach((a) => (a.volume = C.vol * userVol(a.dataset.uid!, a.dataset.src === 'stream')));
+  document.querySelectorAll<HTMLAudioElement>('#audio audio').forEach((a) => applyAudioGain(a,C.vol * userVol(a.dataset.uid!, a.dataset.src === 'stream')));
 }
+function clearCallAudio(){document.querySelectorAll<HTMLAudioElement>('#audio audio').forEach(el=>{disconnectAudioGain(el);el.srcObject=null;el.remove();});}
 
 // Ровно один <audio> на каждый подписанный удалённый аудиотрек; после переподключений лишние убираем
 function syncAudio(room: Room) {
@@ -3016,7 +3167,7 @@ function syncAudio(room: Room) {
   for (const p of room.remoteParticipants.values())
     for (const pub of p.audioTrackPublications.values())
       if (pub.track && pub.isSubscribed) live.set(pub.trackSid, [pub.track as RemoteTrack, p.identity, pub.source === Track.Source.ScreenShareAudio]);
-  box.querySelectorAll<HTMLAudioElement>('audio').forEach((el) => { if (!live.has(el.dataset.tsid!)) { el.srcObject = null; el.remove(); } });
+  box.querySelectorAll<HTMLAudioElement>('audio').forEach((el) => { if (!live.has(el.dataset.tsid!)) { disconnectAudioGain(el); el.srcObject = null; el.remove(); } });
   for (const [sid, [track, uid, stream]] of live) {
     if (box.querySelector(`[data-tsid="${sid}"]`)) continue;
     const el = track.attach() as HTMLAudioElement;
@@ -3024,8 +3175,8 @@ function syncAudio(room: Room) {
     el.dataset.uid = uid;
     el.dataset.src = stream ? 'stream' : 'voice';
     el.muted = C.deaf;
-    el.volume = C.vol * userVol(uid, stream);
     box.appendChild(el);
+    applyAudioGain(el,C.vol * userVol(uid, stream));
   }
 }
 
@@ -3045,7 +3196,7 @@ function stageTiles(): TileSpec[] {
   for (const p of parts) out.push({ key: 'u' + p.identity, kind: 'user', p, u: userOf(p) });
   // пока комната подключается — своя плитка; собеседник ещё не ответил — его плитка с пульсацией
   if (!room && S.me) out.push({ key: 'u' + S.me.id, kind: 'user', u: S.me });
-  if (C.peer && !room?.remoteParticipants.size) out.push({ key: 'u' + C.peer.id, kind: 'user', u: C.peer, wait: true });
+  if (C.peer && C.state === 'calling' && !room?.remoteParticipants.size) out.push({ key: 'u' + C.peer.id, kind: 'user', u: C.peer, wait: true });
   return out;
 }
 
@@ -3215,7 +3366,7 @@ function openTileMenu(tile: HTMLElement, x: number, y: number) {
   }
   html += item('focus', C.focus === key ? 'fsExit' : 'fs', C.focus === key ? 'Свернуть' : 'Развернуть') + item('fs', 'fs', 'Во весь экран');
   if (volId) html = `<label class="tm-vol"><span>${volStream ? 'Громкость демонстрации' : 'Громкость пользователя'}<b></b></span>
-    <input type="range" min="0" max="100" value="${Math.round(userVol(volId, volStream) * 100)}"></label><div class="pm-sep"></div>` + html;
+    <input type="range" min="0" max="${volStream?100:200}" value="${Math.round(userVol(volId, volStream) * 100)}"></label><div class="pm-sep"></div>` + html;
   el.innerHTML = html;
   (document.fullscreenElement ?? document.body).append(el);
   el.style.left = Math.max(8, Math.min(x, innerWidth - el.offsetWidth - 8)) + 'px';
@@ -3287,6 +3438,11 @@ async function mediaInfo(it: Item): Promise<string> {
 const loginWin = tauri && !ANDROID && OS_NAME === 'Windows'
   ? (service: 'spotify' | 'youtube') => { tauri.invoke('login_window', { service }).catch(() => toast('Не удалось открыть окно входа')); }
   : undefined;
+async function youtubeSource(id:string):Promise<{video:string;audio:string|null}>{
+  const s=await api('/api/yt/source?v='+encodeURIComponent(id),undefined,45000);
+  const url=(path:string)=>S.server+path+'&token='+encodeURIComponent(S.token);
+  return {video:url(s.video),audio:s.audio?url(s.audio):null};
+}
 const nameOfId = (id: string) => { const u = userById(Number(id)); return u ? uname(u) : 'участник'; };
 
 // В звонке: сообщения через LiveKit
@@ -3304,6 +3460,7 @@ const callW = createSession({
   nameOf: nameOfId,
   info: mediaInfo,
   fileUrl: (id) => fileUrl({ id } as Att),
+  youtubeSource,
   toast,
   ic: (n, s) => ic(n as keyof typeof ICON, s),
   esc,
@@ -3334,6 +3491,7 @@ const party = createSession({
   nameOf: nameOfId,
   info: mediaInfo,
   fileUrl: (id) => fileUrl({ id } as Att),
+  youtubeSource,
   toast,
   ic: (n, s) => ic(n as keyof typeof ICON, s),
   esc,
@@ -4191,8 +4349,9 @@ function renderSettingsTab() {
       </div>
       <input type="file" id="rfile" accept="audio/*" hidden>
       <hr>
-      ${tauri ? `<div class="switch-row"><div><b>${ANDROID ? 'Системные уведомления' : `Уведомления ${OS_NAME}`}</b><span>${ANDROID ? 'Показывать уведомления о новых сообщениях и звонках' : 'Показывать новые сообщения, когда окно Startrack свёрнуто или не в фокусе'}</span></div>
-        <input type="checkbox" class="switch" id="notifyon" ${store.get('notify') !== '0' ? 'checked' : ''}></div>` : ''}
+      <div class="switch-row"><div><b>Всплывающие уведомления</b><span>Сообщения и звонки${!tauri?' · Разрешите уведомления в браузере':''}</span></div>
+        <input type="checkbox" class="switch" id="notifyon" ${store.get('notify') !== '0' ? 'checked' : ''}></div>
+      ${!tauri && 'Notification' in window?'<button class="btn sec" id="notifyperm">Разрешить уведомления в браузере</button>':''}
       ${tauri && !ANDROID ? `<div class="switch-row"><div><b>Показывать, во что я играю</b><span>Друзья увидят в профиле запущенную игру и сколько вы в неё играете, как в Discord</span></div>
         <input type="checkbox" class="switch" id="gameson" ${store.get('games') !== '0' ? 'checked' : ''}></div>` : ''}
       ${tauri && !ANDROID ? '<div id="deskprefs"></div>' : ''}
@@ -4211,6 +4370,8 @@ function renderSettingsTab() {
     box.querySelectorAll<HTMLInputElement>('[data-sfxon]').forEach((c) => (c.onchange = () => setSfxOn(c.dataset.sfxon as SfxGroup, c.checked)));
     const nt = document.getElementById('notifyon') as HTMLInputElement | null;
     if (nt) nt.onchange = () => store.set('notify', nt.checked ? '1' : '0');
+    const permission=document.getElementById('notifyperm') as HTMLButtonElement|null;
+    if(permission)permission.onclick=async()=>{const result=await Notification.requestPermission();permission.textContent=result==='granted'?'Уведомления разрешены':'Разрешите уведомления в настройках сайта';};
     const gm = document.getElementById('gameson') as HTMLInputElement | null;
     if (gm) gm.onchange = () => { store.set('games', gm.checked ? '1' : '0'); scanGames(); };
     // трей и автозапуск (старые сборки этих команд не знают — тогда переключателей нет)

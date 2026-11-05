@@ -6,7 +6,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates curl build-essential pkg-config file \
       # то, что нужно libcef.so при запуске (и для проверки под xvfb)
       libnss3 libatk1.0-0 libatk-bridge2.0-0 libcups2 libxcomposite1 libxdamage1 libxrandr2 \
-      libgbm1 libpango-1.0-0 libcairo2 libasound2 libxkbcommon0 libdrm2 libxshmfence1 libgtk-3-0 \
+      libgbm1 libpango-1.0-0 libcairo2 libasound2 libpulse0 libxkbcommon0 libdrm2 libxshmfence1 libgtk-3-0 \
       xvfb xauth dbus-x11 socat \
       # AppImage
       squashfs-tools desktop-file-utils \

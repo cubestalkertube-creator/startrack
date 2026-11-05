@@ -48,6 +48,7 @@ fn main() {
     let rules = bypass::DOMAINS.iter().map(|d| format!("MAP {d} {target}")).collect::<Vec<_>>().join(", ");
     let _ = SWITCHES.set(vec![
         ("autoplay-policy", "no-user-gesture-required".into()),
+        ("enable-media-stream", "".into()),
         ("host-resolver-rules", rules),
         // демонстрация экрана в Wayland — через xdg-desktop-portal и PipeWire
         ("enable-features", "WebRTCPipeWireCapturer".into()),
@@ -66,7 +67,8 @@ fn main() {
         cache_path: CefString::from(data.join("profile").to_string_lossy().as_ref()),
         persist_session_cookies: 1,
         locale: CefString::from("ru"),
-        log_severity: if cfg!(debug_assertions) { LogSeverity::WARNING } else { LogSeverity::DISABLE },
+        log_severity: LogSeverity::WARNING,
+        log_file: CefString::from(data.join("chromium.log").to_string_lossy().as_ref()),
         background_color: 0xFF32_3339,
         remote_debugging_port: debug_port,
         ..Default::default()

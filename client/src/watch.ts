@@ -4,14 +4,15 @@
 // Управляет тот, кто включил: пауза, перемотка, «следующее», закрыть. Остальные добавляют видео и
 // песни в очередь — они включатся по порядку, когда досмотрим текущее. Если управляющий ушёл,
 // управление переходит к главному из оставшихся (у кого самый маленький id).
-export type Src = 'yt' | 'sp' | 'au'; // YouTube, Spotify, аудиофайл (вложение чата или прямая ссылка)
+export type Src = 'yt' | 'sp' | 'au' | 'vi';
 // id: YouTube — id видео; Spotify — «track/<id>» или «episode/<id>»; аудио — «f:<id вложения>» или https-ссылка
 export type Item = { src: Src; id: string; title: string; by: string };
 // v — номер версии: из двух состояний верное то, у которого v больше (при равных — больший by)
-export type WState = { v: number; by: string; owner: string; on: boolean; vid: Item | null; playing: boolean; pos: number; queue: Item[] };
+export type WState = { v: number; by: string; owner: string; on: boolean; vid: Item | null; playing: boolean; pos: number; queue: Item[]; relay?:boolean };
 export type WMsg =
   | { t: 'state'; s: WState }
   | { t: 'sync'; v: number; by: string; pos: number }
+  | { t: 'control'; action:'toggle'; from:string }
   | { t: 'add'; item: Item; from: string }; // просьба к управляющему: добавить в очередь
 
 export type Opts = {
@@ -24,6 +25,7 @@ export type Opts = {
   nameOf(id: string): string;
   info(it: Item): Promise<string>; // название видео или трека
   fileUrl(id: string): string; // ссылка на вложение чата (со своим токеном)
+  youtubeSource(id:string):Promise<{video:string;audio:string|null}>;
   toast(text: string): void;
   ic(name: string, size?: number): string;
   esc(s: string): string;
@@ -34,7 +36,7 @@ export type Opts = {
 };
 
 const MAX_QUEUE = 100;
-const SRC_NAME: Record<Src, string> = { yt: 'YouTube', sp: 'Spotify', au: 'Музыка' };
+const SRC_NAME: Record<Src, string> = { yt: 'YouTube', sp: 'Spotify', au: 'Музыка', vi:'Видео' };
 
 // Ссылка (или id) на видео YouTube -> id и время начала из ?t=
 export function parseYt(text: string): { id: string; t: number } | null {
@@ -69,6 +71,7 @@ export function parseItem(text: string): { src: Src; id: string; t: number } | n
   const sp = parseSpotify(text);
   if (sp) return { src: 'sp', id: sp, t: 0 };
   if (AUDIO_URL.test(text.trim())) return { src: 'au', id: text.trim(), t: 0 };
+  if(/^https?:\/\/[^\s<>"']+\.(mp4|webm|ogv)(\?[^\s<>"']*)?$/i.test(text.trim()))return {src:'vi',id:text.trim(),t:0};
   return null;
 }
 
@@ -230,6 +233,38 @@ function auBackend(box: HTMLElement, ev: Events, url: (it: Item) => string): Bac
   };
 }
 
+// This player contacts Startrack only. YouTube need not be reachable on viewers' devices.
+function videoBackend(box:HTMLElement,ev:Events,resolve:(it:Item)=>Promise<{video:string;audio:string|null}>):Backend {
+  box.replaceChildren();
+  const video=document.createElement('video'),audio=document.createElement('audio');
+  video.controls=true;video.playsInline=true;video.preload='auto';audio.preload='auto';audio.hidden=true;box.append(video,audio);
+  let state=-1,gen=0,dead=false,wantPlay=false,position=0;
+  const set=(n:number)=>{if(state!==n){state=n;ev.state(n);}};
+  const align=()=>{if(audio.getAttribute('src') && audio.readyState && Math.abs(audio.currentTime-video.currentTime)>.35)audio.currentTime=video.currentTime;};
+  const play=()=>{wantPlay=true;if(video.readyState)void video.play().catch(()=>ev.error('Нажмите ▶ в плеере, чтобы начать просмотр'));};
+  video.onplaying=()=>{set(1);align();if(audio.getAttribute('src'))void audio.play().catch(()=>{});};
+  video.onpause=()=>{audio.pause();if(!video.ended)set(2);};
+  video.onwaiting=()=>{audio.pause();set(3);};
+  video.onended=()=>{audio.pause();set(0);};
+  video.onseeked=align;
+  video.ontimeupdate=align;
+  audio.onloadedmetadata=()=>{align();if(!video.paused)void audio.play().catch(()=>{});};
+  video.onloadedmetadata=()=>{video.currentTime=position;if(wantPlay)play();else set(5);};
+  video.onerror=()=>{if(video.getAttribute('src'))ev.error('Видео не воспроизводится. Для YouTube попробуйте переключить «Через Startrack» / «Обычный YouTube».');};
+  audio.onerror=()=>{if(audio.getAttribute('src'))ev.error('Звук видео временно недоступен. Переключите режим просмотра и повторите.');};
+  setTimeout(()=>{if(!dead)ev.ready();});
+  return {
+    ready:()=>true,
+    load:(it,at,playing)=>{const current=++gen;wantPlay=playing;position=at;state=3;video.pause();audio.pause();
+      resolve(it).then(s=>{if(dead||current!==gen)return;state=3;video.src=s.video;if(s.audio)audio.src=s.audio;else audio.removeAttribute('src');video.load();},err=>{if(!dead&&current===gen){state=-1;ev.error((err as Error).message);}});
+    },
+    play,pause:()=>{wantPlay=false;video.pause();audio.pause();},seek:t=>{position=t;if(video.readyState){video.currentTime=t;align();}},
+    time:()=>video.currentTime||position,state:()=>state,
+    volume:(v,mute)=>{video.volume=audio.volume=v;video.muted=audio.muted=mute;},
+    destroy:()=>{dead=true;gen++;video.pause();audio.pause();video.removeAttribute('src');audio.removeAttribute('src');video.load();audio.load();box.replaceChildren();},
+  };
+}
+
 // ---------- сессия ----------
 export type Session = ReturnType<typeof createSession>;
 
@@ -241,6 +276,7 @@ export function createSession(O: Opts) {
   let loadedId = '';
   let quiet = 0; // до этого момента изменения в плеере — наши собственные, а не действия пользователя
   let deaf = false;
+  let localMute = false;
   let vol = Math.min(1, Math.max(0, Number(localStorage.getItem('wvol') ?? 0.8)));
   let tile: HTMLElement | null = null;
   let timers: number[] = [];
@@ -265,6 +301,7 @@ export function createSession(O: Opts) {
 
   function accept(s: WState) {
     const was = !!st?.on;
+    if(!!st?.relay!==!!s.relay && players.yt){players.yt.destroy();delete players.yt;loadedId='';const box=tile?.querySelector('.w-p-yt');if(box)box.innerHTML='<div></div>';}
     st = norm(s);
     recvAt = now();
     if (!st.on) unload();
@@ -282,6 +319,7 @@ export function createSession(O: Opts) {
   }
 
   function onData(m: WMsg) {
+    if(m.t==='control' && m.action==='toggle' && st?.on && st.vid && isCtrl() && O.present(m.from))return commit({playing:!st.playing});
     if (m.t === 'state') { if (m.s && typeof m.s.v === 'number' && newer(m.s, st)) accept(m.s); return; }
     // управляющий сообщает, где сейчас видео, — подстраиваемся
     if (m.t === 'sync' && st && m.v === st.v && m.by === st.by && Number.isFinite(m.pos)) {
@@ -290,7 +328,7 @@ export function createSession(O: Opts) {
       return;
     }
     // кто-то просит добавить в очередь — решает управляющий
-    if (m.t === 'add' && st?.on && isCtrl() && m.item && (['yt', 'sp', 'au'] as Src[]).includes(m.item.src)) addItem(m.item, false, m.from);
+    if (m.t === 'add' && st?.on && isCtrl() && m.item && (['yt', 'sp', 'au', 'vi'] as Src[]).includes(m.item.src)) addItem(m.item, false, m.from);
   }
 
   function addItem(item: Item, playNow: boolean, from?: string) {
@@ -317,7 +355,9 @@ export function createSession(O: Opts) {
       state: (ps) => { if (cur === src) onState(ps); },
       error: (text) => { if (cur === src || !st?.vid) showError(text); },
     };
-    players[src] = src === 'yt' ? ytBackend(box, ev) : src === 'sp' ? spBackend(box, ev) : auBackend(box, ev, (it) => it.id.startsWith('f:') ? O.fileUrl(it.id.slice(2)) : it.id);
+    players[src] = src === 'yt' ? st?.relay ? videoBackend(box,ev,it=>O.youtubeSource(it.id)) : ytBackend(box, ev)
+      : src === 'vi' ? videoBackend(box,ev,async it=>({video:it.id.startsWith('f:')?O.fileUrl(it.id.slice(2)):it.id,audio:null}))
+      : src === 'sp' ? spBackend(box, ev) : auBackend(box, ev, (it) => it.id.startsWith('f:') ? O.fileUrl(it.id.slice(2)) : it.id);
     return players[src];
   }
 
@@ -390,7 +430,9 @@ export function createSession(O: Opts) {
   }
 
   function applyVolume() {
-    for (const p of Object.values(players)) p?.volume(vol, deaf);
+    for (const p of Object.values(players)) p?.volume(vol, deaf || localMute);
+    const button=tile?.querySelector<HTMLButtonElement>('[data-y="mute"]');
+    if(button){button.innerHTML=O.ic(localMute?'deaf':'volume',18);button.title=localMute?'Включить звук у себя':'Выключить звук у себя';button.setAttribute('aria-label',button.title);button.setAttribute('aria-pressed',String(localMute));}
   }
 
   function unload() {
@@ -438,14 +480,17 @@ export function createSession(O: Opts) {
         <div class="yt-now"></div>
         <form class="yt-form"><input aria-label="Ссылка на видео или музыку" placeholder="Ссылка: YouTube, Spotify или mp3" spellcheck="false">
           <button class="btn sm" data-y="go"></button></form>
-        <button class="ibtn w-own" data-y="pp" title="Пауза / играть">${ic('play', 20)}</button>
+        <button class="ibtn" data-y="pp" title="Пауза / играть у всех" aria-label="Пауза или воспроизведение для всех">${ic('play', 20)}</button>
         <button class="ibtn w-own" data-y="next" title="Следующее из очереди">${ic('skip', 20)}</button>
+        <button class="btn sm sec w-own" data-y="relay" title="YouTube через Startrack: зрителям не нужен доступ к YouTube">Через Startrack</button>
         <button class="ibtn yt-qbtn" data-y="queue" title="Очередь">${ic('queue', 20)}<i></i></button>
-        <label class="w-vol" title="Громкость (только у вас)">${ic('volume', 18)}<input aria-label="Громкость совместного просмотра" type="range" min="0" max="100" value="${Math.round(vol * 100)}"></label>
+        <button class="ibtn" data-y="mute" title="Выключить звук у себя">${ic('volume',18)}</button>
+        <label class="w-vol" title="Громкость (только у вас)"><input aria-label="Громкость совместного просмотра" type="range" min="0" max="100" value="${Math.round(vol * 100)}"></label>
         <button class="ibtn" data-y="close"></button>
       </div>
       <div class="yt-body"><div class="yt-main">
         <div class="w-p w-p-yt yt-player"><div></div></div>
+        <div class="w-p w-p-vi"></div>
         <div class="w-p w-p-sp"><div></div></div>
         <div class="w-p w-p-au"><div class="au-cover">${ic('music', 64)}<b></b><span></span>
           <div class="au-prog" data-y="seek"><i></i></div></div><audio preload="auto"></audio></div>
@@ -492,7 +537,9 @@ export function createSession(O: Opts) {
         case 'close':
           if (own) return commit({ on: false, vid: null, queue: [], playing: false, pos: 0 });
           return O.leave?.();
-        case 'pp': return own && st.vid ? commit({ playing: !st.playing }) : undefined;
+        case 'mute': localMute=!localMute;applyVolume();return;
+        case 'relay': if(!own)return;return commit({relay:!st.relay});
+        case 'pp': if(!st.vid)return;if(own)return commit({playing:!st.playing});O.send({t:'control',action:'toggle',from:O.me()});return;
         case 'next': return own ? (st.queue.length ? next() : O.toast('Очередь пуста')) : undefined;
         case 'qplay': return own && st.queue[i] ? commit({ vid: st.queue[i], queue: st.queue.filter((_, k) => k !== i), playing: true, pos: 0 }) : undefined;
         case 'qdel': return own ? commit({ queue: st.queue.filter((_, k) => k !== i) }) : undefined;
@@ -530,6 +577,8 @@ export function createSession(O: Opts) {
     const compactTitle = tile.querySelector('.yt-compact-title');
     if (compactTitle) compactTitle.textContent = v?.title || 'Смотрим и слушаем вместе';
     const own = isCtrl();
+    const relay=tile.querySelector<HTMLButtonElement>('[data-y="relay"]')!;
+    relay.hidden=v?.src!=='yt';relay.textContent=st.relay?'Обычный YouTube':'Через Startrack';
     const boss = ctrlId();
     tile.classList.toggle('w-owner', own);
     tile.querySelector('.yt-now')!.innerHTML = v
@@ -570,7 +619,7 @@ export function createSession(O: Opts) {
     // начать: я включил — я и управляю
     start(first?: Item) {
       if (st?.on) { if (first) enqueue(first); return; }
-      commit({ on: true, owner: O.me(), vid: first ?? null, queue: [], playing: !!first, pos: 0 });
+      commit({ on: true, owner: O.me(), vid: first ?? null, queue: [], playing: !!first, pos: 0, relay:false });
     },
     enqueue,
     // новичку — что играет и где сейчас (отвечает главный)

@@ -23,10 +23,15 @@ for f in "$REL"/libEGL.so "$REL"/libGLESv2.so; do [ -e "$f" ] && cp "$f" "$LIB/"
 cp "$REL/locales/ru.pak" "$REL/locales/en-US.pak" "$LIB/locales/"
 # в libcef.so из архива CEF отладочные символы — без них он в несколько раз меньше
 strip --strip-unneeded "$LIB/libcef.so" "$LIB/libvk_swiftshader.so"
+# Chromium loads PulseAudio dynamically, including on PipeWire desktops.
+cp -L /usr/lib/x86_64-linux-gnu/libpulse.so.0 "$LIB/"
+cp -L /usr/lib/x86_64-linux-gnu/libasyncns.so.0 "$LIB/"
+cp -L /usr/lib/x86_64-linux-gnu/pulseaudio/libpulsecommon-*.so "$LIB/"
 
 cat > "$APPDIR/AppRun" <<'EOF'
 #!/bin/sh
 HERE="$(dirname "$(readlink -f "$0")")"
+export LD_LIBRARY_PATH="$HERE/usr/lib/startrack${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 exec "$HERE/usr/lib/startrack/startrack" "$@"
 EOF
 chmod +x "$APPDIR/AppRun"

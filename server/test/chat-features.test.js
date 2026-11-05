@@ -1,0 +1,71 @@
+import {test} from 'node:test';
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import http from 'node:http';
+import {spawn} from 'node:child_process';
+import {once} from 'node:events';
+import {WebSocket} from 'ws';
+
+async function freePort(){const s=http.createServer();s.listen(0,'127.0.0.1');await once(s,'listening');const p=s.address().port;await new Promise(r=>s.close(r));return p;}
+test('replies, persistent receipts, voice uploads, private stickers and the browser client work together', {timeout:30000},async t=>{
+  const dir=fs.mkdtempSync(path.join(os.tmpdir(),'startrack-chat-'));
+  fs.writeFileSync(path.join(dir,'detectable.json'),'[]');
+  const web=path.join(dir,'web');fs.mkdirSync(web);fs.writeFileSync(path.join(web,'index.html'),'<title>Startrack</title>');
+  fs.writeFileSync(path.join(dir,'private.txt'),'private');
+  const port=await freePort(),adminPort=await freePort(),base=`http://127.0.0.1:${port}`;
+  let child,logs='',ws;
+  const stop=async()=>{if(child?.exitCode===null){child.kill();await once(child,'exit');}};
+  const start=async()=>{
+    child=spawn(process.execPath,['src/index.js'],{cwd:new URL('..',import.meta.url),env:{...process.env,HOST:'127.0.0.1',PORT:String(port),ADMIN_PORT:String(adminPort),DATA_DIR:dir,WEB_DIR:web,APP_SECRET:'chat-test-secret'},stdio:['ignore','pipe','pipe']});
+    child.stdout.on('data',s=>logs+=s);child.stderr.on('data',s=>logs+=s);
+    for(let i=0;i<120;i++){if(child.exitCode!==null)throw new Error(logs);try{if((await fetch(base+'/health')).ok)return;}catch{}await new Promise(r=>setTimeout(r,25));}throw new Error(logs);
+  };
+  t.after(async()=>{ws?.terminate();await stop();fs.rmSync(dir,{recursive:true,force:true});});
+  await start();
+  const req=async(token,url,body,headers={})=>{const r=await fetch(base+url,{method:body===undefined?'GET':'POST',headers:{Authorization:'Bearer '+token,...(body===undefined?{}:{'Content-Type':'application/json'}),...headers},body:body===undefined?undefined:Buffer.isBuffer(body)?body:JSON.stringify(body)});return {status:r.status,data:await r.json()};};
+  const api=async(user,url,body)=>{const r=await req(user?.token||'',url,body);assert.equal(r.status,200,JSON.stringify(r.data));return r.data;};
+  const register=username=>api(null,'/api/register',{username,password:'test-password'});
+  const a=await register('author'),b=await register('reader'),c=await register('stranger');
+  for(const u of [b,c]){await api(a,'/api/friends/request',{username:u.user.username});await api(u,'/api/friends/accept',{userId:a.user.id});}
+  ws=new WebSocket(base.replace('http','ws')+'/ws?token='+b.token);await once(ws,'open');
+  const events=[];ws.on('message',data=>events.push(JSON.parse(data)));
+  const original=await api(a,'/api/dm/messages',{peer:b.user.id,text:'original'});
+  const reply=await api(b,'/api/dm/messages',{peer:a.user.id,text:'answer',reply:original.id});
+  assert.equal(reply.reply.id,original.id);assert.equal(reply.reply.text,'original');
+  const other=await api(a,'/api/dm/messages',{peer:c.user.id,text:'private'});
+  assert.equal((await req(b.token,'/api/dm/messages',{peer:a.user.id,text:'leak',reply:other.id})).status,400);
+  let history=await api(a,'/api/dm/messages?peer='+b.user.id);assert.equal(history.at(-1).reply.id,original.id);
+  await api(a,'/api/messages/delete',{id:original.id});
+  history=await api(b,'/api/dm/messages?peer='+a.user.id);assert.equal(history.at(-1).reply.deleted,true);
+  assert.equal((await req(c.token,'/api/messages/read',{peer:a.user.id,id:reply.id})).status,400);
+  await api(a,'/api/messages/read',{peer:b.user.id,id:reply.id});
+  await new Promise(r=>setTimeout(r,30));assert.ok(events.some(e=>e.type==='message_read'&&e.user===a.user.id&&e.id===reply.id));
+  const rows=await api(b,'/api/messages/reads?peer='+a.user.id);assert.equal(rows.find(r=>r.uid===a.user.id).last,reply.id);
+  const group=await api(a,'/api/groups/create',{users:[b.user.id]});
+  const gm=await api(a,'/api/group/messages',{group:group.id,text:'group'});
+  const gr=await api(b,'/api/group/messages',{group:group.id,text:'group reply',reply:gm.id});assert.equal(gr.reply.id,gm.id);
+  assert.equal((await req(c.token,'/api/messages/reads?group='+group.id)).status,404);
+  const voice=await req(a.token,`/api/dm/file?peer=${b.user.id}&media=voice&reply=${reply.id}&name=voice.webm`,Buffer.from('voice-test'),{'Content-Type':'audio/webm;codecs=opus'});
+  assert.equal(voice.status,200);assert.equal(voice.data.file.type,'audio/webm');assert.equal(voice.data.file.media,'voice');assert.equal(voice.data.reply.id,reply.id);
+  assert.equal((await api(b,'/api/dm/messages?peer='+a.user.id)).at(-1).file.media,'voice');
+  const png=Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScLbtAAAAABJRU5ErkJggg==','base64');
+  const upload=await req(a.token,'/api/stickers/upload?name=custom',png,{'Content-Type':'image/png'});assert.equal(upload.status,200);const s=upload.data[0];
+  assert.equal((await api(b,'/api/stickers')).length,0);
+  assert.equal((await req(b.token,'/api/stickers/send',{peer:a.user.id,id:s.id})).status,404);
+  assert.equal((await fetch(`${base}/api/stickers/${s.id}?token=${b.token}`)).status,404);
+  const sent=await api(a,'/api/stickers/send',{peer:b.user.id,id:s.id});assert.equal(sent.file.media,'sticker');
+  assert.equal((await fetch(`${base}/api/files/${sent.file.id}?token=${b.token}`)).status,200);
+  await api(a,'/api/stickers/delete',{id:s.id});
+  assert.equal((await fetch(`${base}/api/files/${sent.file.id}?token=${b.token}`)).status,200,'deleting a library sticker preserves sent messages');
+  const convs=await api(b,'/api/conversations');assert.ok(convs.find(r=>r.key==='u'+a.user.id).unread>0);
+  await api(b,'/api/messages/read',{peer:a.user.id,id:sent.id});
+  await api(b,'/api/messages/read',{peer:a.user.id,id:reply.id}); // Cursor never moves backwards.
+  assert.equal((await api(b,'/api/messages/reads?peer='+a.user.id)).find(r=>r.uid===b.user.id).last,sent.id);
+  ws.terminate();await stop();await start();
+  assert.equal((await api(b,'/api/conversations')).find(r=>r.key==='u'+a.user.id).unread,0);
+  assert.equal((await fetch(base+'/')).status,200);assert.match(await (await fetch(base+'/app')).text(),/Startrack/);
+  assert.notEqual((await fetch(base+'/%2e%2e%2fprivate.txt')).status,200);
+  assert.notEqual((await fetch(base+'/..%5cprivate.txt')).status,200);
+});
