@@ -224,10 +224,18 @@ jobs:
           if (Test-Path $apk) { $files += $apk }
           if (Test-Path "$linuxDir/$appimage.sig") { $files += "$linuxDir/$appimage", "$linuxDir/$appimage.sig" }
 
+          function Invoke-StartrackGh([string[]]$GhArgs) {
+            for ($attempt = 1; $attempt -le 4; $attempt++) {
+              & gh @GhArgs
+              if ($LASTEXITCODE -eq 0) { return }
+              if ($attempt -eq 4) { throw "GitHub release operation failed after four attempts." }
+              Start-Sleep -Seconds (3 * $attempt)
+            }
+          }
           $rel = gh release view "v$ver" 2>&1
           if ($LASTEXITCODE -eq 0) {
-            gh release upload "v$ver" $files --clobber
-            gh release edit "v$ver" --draft=false
+            Invoke-StartrackGh -GhArgs (@("release", "upload", "v$ver") + $files + @("--clobber"))
+            Invoke-StartrackGh -GhArgs @("release", "edit", "v$ver", "--draft=false")
           } else {
-            gh release create "v$ver" $files --title "Startrack $ver" --notes-file "$dir/release-notes.md"
+            Invoke-StartrackGh -GhArgs (@("release", "create", "v$ver") + $files + @("--title", "Startrack $ver", "--notes-file", "$dir/release-notes.md"))
           }
