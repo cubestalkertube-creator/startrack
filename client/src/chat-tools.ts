@@ -154,9 +154,10 @@ type Sticker={id:string;name:string};
 async function stickerFile(file:File):Promise<Blob> {
   if(file.type==='image/gif')return file;
   const bitmap=await createImageBitmap(file);
-  const canvas=document.createElement('canvas');canvas.width=canvas.height=512;
+  const canvas=document.createElement('canvas');
   const k=Math.min(1,512/bitmap.width,512/bitmap.height),w=bitmap.width*k,h=bitmap.height*k;
-  canvas.getContext('2d')!.drawImage(bitmap,(512-w)/2,(512-h)/2,w,h);bitmap.close();
+  canvas.width=Math.max(1,Math.round(w));canvas.height=Math.max(1,Math.round(h));
+  canvas.getContext('2d')!.drawImage(bitmap,0,0,canvas.width,canvas.height);bitmap.close();
   return new Promise((resolve,reject)=>canvas.toBlob(b=>b?resolve(b):reject(new Error('Не удалось создать стикер')),'image/webp',.9));
 }
 async function openStickers(c:Conv) {
