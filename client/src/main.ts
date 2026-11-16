@@ -1,4 +1,5 @@
 import './style.css';
+import './vice-city.css';
 import defaultRingtone from './assets/ringtone.mp3';
 import novaWave from './assets/nova_wave.png';
 import novaHelper from './assets/nova_helper.png';
@@ -72,12 +73,15 @@ interface ThemeDef {
   gradient?: string;
   baseBg?: string;
   chatBg?: string;
-  accent: string;
+  accent?: string;
   mode?: 'dark' | 'light';
   light?: boolean;
 }
 
+const DEFAULT_THEME = 'vice-city';
+
 const THEMES: ThemeDef[] = [
+  { id: DEFAULT_THEME, name: 'Вайс-Сити', desc: 'Розово-персиковый закат, пальмы и неоновые огни в духе GTA VI' },
   // 1-й ряд (Своя тема + Светлые пастели)
   { id: 'custom', name: 'Своя тема', desc: 'Создайте свой собственный градиент и настройте цвета', accent: '#5865f2', mode: 'dark' },
   { id: 'mint_apple', name: 'Мятное яблоко', desc: 'Свежий салатово-мятный градиент', gradient: 'linear-gradient(135deg, #a8e6cf 0%, #b2d8d8 50%, #88d8b0 100%)', accent: '#10b981', mode: 'light' },
@@ -121,11 +125,14 @@ const THEMES: ThemeDef[] = [
   { id: 'verity', name: 'Verity', desc: 'Тот самый жёлтый смайлик на сочной траве', baseBg: '#14230f', chatBg: '#1a2e13', accent: '#f5c800', mode: 'dark' },
 ];
 
-const curTheme = () => store.get('theme') || 'dark';
+const curTheme = () => {
+  const saved = store.get('theme');
+  return THEMES.find((theme) => theme.id === saved)?.id ?? DEFAULT_THEME;
+};
 
 // persist: false — временно (пакость Верити), выбранная пользователем тема остаётся в настройках
 function applyTheme(id: string, persist = true) {
-  const t = THEMES.find((x) => x.id === id) || THEMES.find((x) => x.id === 'dark') || THEMES[0];
+  const t = THEMES.find((x) => x.id === id) ?? THEMES[0];
   const root = document.documentElement;
   if (persist) store.set('theme', t.id);
 
@@ -147,25 +154,27 @@ function applyTheme(id: string, persist = true) {
     root.style.setProperty('--theme-bg', t.gradient);
     root.dataset.theme = 'gradient';
     root.dataset.themeMode = t.mode || (t.light ? 'light' : 'dark');
+  } else {
+    root.style.removeProperty('--theme-bg');
+    delete root.dataset.themeMode;
+    if (t.id === 'dark') delete root.dataset.theme;
+    else root.dataset.theme = t.id;
+  }
+
+  if (t.accent && t.id !== 'dark') {
     root.style.setProperty('--accent', t.accent);
     root.style.setProperty('--accent-hi', t.accent);
   } else {
-    root.style.removeProperty('--theme-bg');
-    if (t.id === 'dark') {
-      delete root.dataset.theme;
-      delete root.dataset.themeMode;
-      root.style.removeProperty('--accent');
-      root.style.removeProperty('--accent-hi');
-    } else {
-      root.dataset.theme = t.id;
-      delete root.dataset.themeMode;
-      root.style.setProperty('--accent', t.accent);
-      root.style.setProperty('--accent-hi', t.accent);
-    }
+    root.style.removeProperty('--accent');
+    root.style.removeProperty('--accent-hi');
   }
 }
 
-// Применяем сохранённую тему при запуске
+// Один раз включаем «Вайс-Сити» и для клиентов, которые уже сохранили другую тему.
+if (store.get('viceCityThemeApplied') !== '1') {
+  store.set('theme', DEFAULT_THEME);
+  store.set('viceCityThemeApplied', '1');
+}
 applyTheme(curTheme());
 
 // Телефон (APK для Android): узкая раскладка, без демонстрации экрана и автообновления установщиком
@@ -4028,8 +4037,15 @@ function renderSettingsTab() {
     box.innerHTML = `
       <h2>Внешний вид</h2>
       <h3>Цветовые темы</h3>
-      <p class="set-hint">Выберите цветовую схему для интерфейса Startrack.</p>
-      
+
+      <div class="theme-status-card">
+        <div>
+          <b>${esc(curObj.name)}</b>
+          <span>${curObj.desc || (curObj.light || curObj.mode === 'light' ? 'Светлая тема оформления' : 'Тёмная тема оформления')}</span>
+        </div>
+        ${cur !== DEFAULT_THEME ? `<button class="btn sec" id="themeReset">По умолчанию</button>` : ''}
+      </div>
+
       <div class="swatch-grid">
         ${THEMES.map((t) => {
           const sel = t.id === cur;
@@ -4037,26 +4053,17 @@ function renderSettingsTab() {
             ? `linear-gradient(135deg, ${cust.c1}, ${cust.c2})` 
             : (t.gradient || t.baseBg || '#2c2d32');
           return `
-            <div class="swatch-item ${sel ? 'sel' : ''} ${t.id === 'custom' ? 'swatch-custom' : ''}" 
-                 data-tid="${t.id}" 
-                 style="background:${bg};">
+            <button type="button" class="swatch-item ${sel ? 'sel' : ''} ${t.id === 'custom' ? 'swatch-custom' : ''}"
+                    data-tid="${t.id}" aria-label="${esc(t.name)}" aria-pressed="${sel}"
+                    ${t.id === DEFAULT_THEME ? '' : `style="background:${bg};"`}>
               ${t.id === 'custom' ? `
-                <span class="swatch-badge">НОВОЕ</span>
                 <span class="swatch-icon">${ic('palette', 26)}</span>
               ` : ''}
               ${sel ? `<span class="swatch-check">${ic('check', 14)}</span>` : ''}
-              <span class="swatch-tooltip">${esc(t.name)}</span>
-            </div>
+              <span class="${t.id === DEFAULT_THEME ? 'swatch-name' : 'swatch-tooltip'}">${esc(t.name)}</span>
+            </button>
           `;
         }).join('')}
-      </div>
-
-      <div class="theme-status-card">
-        <div>
-          <b>${esc(curObj.name)}</b>
-          <span>${curObj.desc || (curObj.light || curObj.mode === 'light' ? 'Светлая тема оформления' : 'Тёмная тема оформления')}</span>
-        </div>
-        ${cur !== 'dark' ? `<button class="btn sec" id="themeReset">По умолчанию</button>` : ''}
       </div>
 
       ${isCustom ? `
@@ -4111,10 +4118,12 @@ function renderSettingsTab() {
       </label>
     `;
 
-    box.querySelectorAll<HTMLElement>('[data-tid]').forEach((c) => {
-      c.onclick = () => {
-        applyTheme(c.dataset.tid!);
+    box.querySelectorAll<HTMLButtonElement>('[data-tid]').forEach((c) => {
+      c.onclick = (event) => {
+        const id = c.dataset.tid!;
+        applyTheme(id);
         renderSettingsTab();
+        if (event.detail === 0) box.querySelector<HTMLButtonElement>(`[data-tid="${id}"]`)?.focus();
       };
     });
 
@@ -4163,8 +4172,9 @@ function renderSettingsTab() {
 
     const rst = document.getElementById('themeReset');
     if (rst) rst.onclick = () => {
-      applyTheme('dark');
+      applyTheme(DEFAULT_THEME);
       renderSettingsTab();
+      box.querySelector<HTMLButtonElement>(`[data-tid="${DEFAULT_THEME}"]`)?.focus();
     };
 
     if (isCustom) {

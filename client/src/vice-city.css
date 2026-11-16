@@ -1,0 +1,171 @@
+/* Вайс-Сити — отдельная тема Startrack. Палитра и референсы описаны в DESIGN.md. */
+:root[data-theme="vice-city"],
+.swatch-item[data-tid="vice-city"] {
+  --vice-wallpaper: url("./assets/vice-city.webp");
+  --vice-dusk: #5d286c;
+  --vice-pink: #ff9fc8;
+  --vice-peach: #ffc18a;
+  --vice-lagoon: #8ce7df;
+  --vice-horizon: linear-gradient(90deg, #ac7cf3, var(--vice-pink) 52%, var(--vice-peach));
+}
+
+:root[data-theme="vice-city"] {
+  --deep: #130e20;
+  --base: #1b1328;
+  --chat: #24182f;
+  --ub: #2b1b37;
+  --card: #382442;
+  --card-hi: #482c50;
+  --pop: #2b1c37;
+  --line: rgb(255 164 207 / 16%);
+  --line2: rgb(255 164 207 / 30%);
+  --text: #faeaf4;
+  --head: #fff5ed;
+  --muted: #dfbed9;
+  --faint: #c3a5c0;
+  --hover: #432849;
+  --sel: #543059;
+  --accent: #ae2865;
+  --accent-hi: #bc336e;
+  --green: #79d6a9;
+  --green-hi: #96e6bc;
+  --yellow: var(--vice-peach);
+  --vice-ink: #29142a;
+  --vice-action: linear-gradient(115deg, #853794, var(--accent) 60%, #a8444b);
+  --vice-action-hi: linear-gradient(115deg, #94439f, var(--accent-hi) 60%, #b64c52);
+  --vice-scrim: linear-gradient(180deg, rgb(26 17 39 / 91%), rgb(29 17 38 / 82%) 62%, rgb(35 16 36 / 67%));
+}
+
+:root[data-theme="vice-city"] .app {
+  background: linear-gradient(160deg, var(--deep) 8%, var(--base) 50%, var(--ub));
+}
+
+:root[data-theme="vice-city"] .app > .side,
+:root[data-theme="vice-city"] .set-nav {
+  background: linear-gradient(175deg, var(--base), var(--ub));
+}
+
+:root[data-theme="vice-city"] .main,
+:root[data-theme="vice-city"] #app-room {
+  background: var(--vice-scrim), var(--vice-wallpaper) 62% bottom / cover no-repeat, var(--chat);
+}
+
+:root[data-theme="vice-city"] .topbar,
+:root[data-theme="vice-city"] .activity-head {
+  background: linear-gradient(100deg, var(--base), var(--card));
+  border-image: var(--vice-horizon) 1;
+}
+
+:root[data-theme="vice-city"] .settings {
+  background: radial-gradient(ellipse at 85% 0%, var(--card-hi), transparent 58%), var(--ub);
+}
+
+:root[data-theme="vice-city"] .auth-bg {
+  grid-template-columns: minmax(0, 1fr);
+  background: linear-gradient(110deg, rgb(19 14 32 / 39%), rgb(19 14 32 / 14%)),
+    var(--vice-wallpaper) 69% bottom / cover no-repeat, var(--vice-dusk);
+}
+
+@media (max-width: 480px) {
+  :root[data-theme="vice-city"] .auth { padding: 20px; }
+}
+
+:root[data-theme="vice-city"] .auth {
+  background: linear-gradient(155deg, var(--chat), var(--base)) padding-box,
+    var(--vice-horizon) border-box;
+  border: 1px solid transparent;
+  box-shadow: 0 18px 56px rgb(19 14 32 / 57%);
+}
+
+@media (min-width: 1024px) {
+  :root[data-theme="vice-city"] .auth-bg:has(> .auth) {
+    grid-template-columns: minmax(480px, 54%) 1fr;
+  }
+}
+
+:root[data-theme="vice-city"] .auth h1 { font-weight: 750; }
+:root[data-theme="vice-city"] .auth .hint,
+:root[data-theme="vice-city"] .auth label,
+:root[data-theme="vice-city"] .side-top input::placeholder,
+:root[data-theme="vice-city"] .composer textarea::placeholder,
+:root[data-theme="vice-city"] :is(.tb-btn:not(.live, .on, :hover), .att-btn:not(:hover), .pop-menu button .ic) {
+  color: var(--muted);
+}
+
+:root[data-theme="vice-city"] :is(.auth .alt a, .msg p a, .chat-link, .msg-receipt.read) {
+  color: var(--vice-lagoon);
+}
+
+:root[data-theme="vice-city"] :is(.tb-tab.add.sel, .app-symbol, .au-cover, .pb-info, .pop-sub button.on b::after) {
+  color: var(--vice-pink);
+}
+
+:root[data-theme="vice-city"] :is(.ri.sel .rb.home, .rb.home:hover, .auth-logo .ic, .ring-ic,
+  .auth .submit, .tb-tab.add:not(.sel), .btn:not(.sec, .red, .green, .lnk, .call-preview-head .btn), .audio-toggle) {
+  background: var(--vice-action);
+  color: #fff;
+  box-shadow: inset 0 1px rgb(255 193 138 / 42%);
+}
+
+:root[data-theme="vice-city"] :is(.auth .submit, .tb-tab.add:not(.sel),
+  .btn:not(.sec, .red, .green, .lnk, .call-preview-head .btn), .audio-toggle):hover {
+  background: var(--vice-action-hi);
+}
+
+:root[data-theme="vice-city"] :is(.dm.sel, .nav-item.sel, .sn.sel) {
+  background: linear-gradient(90deg, var(--sel), var(--card));
+  box-shadow: inset 2px 0 var(--vice-pink);
+}
+
+:root[data-theme="vice-city"] .ri::before { background: var(--vice-horizon); }
+:root[data-theme="vice-city"] .msg:hover { background: var(--hover); }
+:root[data-theme="vice-city"] :is(.composer, .dlg, .theme-status-card) { border-color: var(--line2); }
+:root[data-theme="vice-city"] .composer:focus-within { border-color: var(--vice-pink); }
+
+:root[data-theme="vice-city"] :is(.btn.sec, .pf-btn:not(.red), .rbtn, .frow:hover .rbtn, .tile,
+  .call-preview-user, .call-top .tag, .pop-menu, .msg-del) { background: var(--card); }
+:root[data-theme="vice-city"] :is(.btn.sec:hover, .pf-btn:not(.red):hover, .rbtn:hover, .msg-del:hover) { background: var(--card-hi); }
+:root[data-theme="vice-city"] :is(#call, .call-preview, .pop-sub, .ac) { background: var(--pop); }
+:root[data-theme="vice-city"] #call { --ring: var(--pop); }
+:root[data-theme="vice-city"] .call-top .tag { color: var(--vice-pink); }
+:root[data-theme="vice-city"] #chat.drop::after { background: var(--sel); border-color: var(--vice-pink); }
+
+:root[data-theme="vice-city"] :is(.btn.green, .call-preview-head .btn, .rb.add:hover, .vbtn.on,
+  .rb-voice) { color: var(--vice-ink); }
+
+:root[data-theme="vice-city"] .swatch-item.sel { border-color: var(--vice-pink); }
+:root[data-theme="vice-city"] .swatch-check { background: var(--vice-horizon); color: var(--vice-ink); }
+
+.swatch-item[data-tid="vice-city"] {
+  background: var(--vice-wallpaper) 72% bottom / cover no-repeat, var(--vice-dusk);
+  align-items: flex-end;
+}
+
+.swatch-name {
+  width: 100%;
+  padding: 5px 0;
+  border-radius: 0 0 11px 11px;
+  background: rgb(19 14 32 / 90%);
+  color: #fff5ed;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+:root[data-theme="vice-city"] :focus-visible:not(.composer textarea),
+.swatch-item:focus-visible {
+  outline: 2px solid var(--vice-peach, #fff);
+  outline-offset: 2px;
+}
+
+.swatch-item:focus-visible .swatch-tooltip {
+  opacity: 1;
+  visibility: visible;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .swatch-item,
+  .swatch-tooltip { transition: none; }
+  .swatch-item:hover { transform: none; }
+  .swatch-item:hover .swatch-tooltip { transform: translateX(-50%); }
+  :root[data-theme="vice-city"] .boot .ic { animation: none; }
+}
